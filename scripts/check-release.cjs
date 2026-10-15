@@ -57,6 +57,7 @@ assert(packageJson.dependencies.zod);
 
 if (bundle) {
   const resources = path.join(path.resolve(bundle), 'Contents', 'Resources');
+  for (const name of ['licenses/LICENSE.electron.txt', 'licenses/LICENSES.chromium.html']) assert(fs.existsSync(path.join(resources, name)), `Missing Electron notice: ${name}`);
   const asar = require('../app/node_modules/@electron/asar');
   const archive = path.join(resources, 'app.asar');
   const files = asar.listPackage(archive).map(name => name.replace(/^\//, ''));

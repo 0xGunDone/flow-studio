@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 
 module.exports = {
@@ -10,6 +11,13 @@ module.exports = {
   directories: { output: '../dist' },
   asar: true,
   npmRebuild: false,
+  afterExtract: context => {
+    if (context.electronPlatformName !== 'darwin') return;
+    const notices = path.join(context.appOutDir, 'Electron.app', 'Contents', 'Resources', 'licenses');
+    fs.mkdirSync(notices, { recursive: true });
+    fs.copyFileSync(path.join(context.appOutDir, 'LICENSE'), path.join(notices, 'LICENSE.electron.txt'));
+    fs.copyFileSync(path.join(context.appOutDir, 'LICENSES.chromium.html'), path.join(notices, 'LICENSES.chromium.html'));
+  },
   afterPack: context => {
     // Finder metadata can arrive from a downloaded Electron archive on local macOS.
     if (context.electronPlatformName === 'darwin') execFileSync('xattr', ['-cr', path.join(context.appOutDir, 'Flow Studio.app')]);
@@ -42,6 +50,7 @@ module.exports = {
     hardenedRuntime: false,
     gatekeeperAssess: false,
     notarize: false,
+    timestamp: 'none',
   },
   dmg: { sign: false },
   publish: null,
