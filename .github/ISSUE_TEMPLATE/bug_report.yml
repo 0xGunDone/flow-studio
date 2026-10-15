@@ -1,0 +1,34 @@
+name: Ошибка / Bug report
+description: Сообщить о воспроизводимой ошибке Flow Studio
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Не прикладывайте cookies, токены, пароли, базы данных или профили Chrome. Скройте почту аккаунтов на скриншотах."
+  - type: input
+    id: version
+    attributes:
+      label: Версия Flow Studio и macOS
+      placeholder: "1.0.0, macOS 15, Apple Silicon"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Что сделали, что ожидали и что произошло?
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Текст ошибки
+      description: Код RPC/HTTP и сообщение без данных входа.
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Docker
+      options:
+        - Docker Desktop
+        - Colima
+        - Другая среда
