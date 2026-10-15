@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Flow Studio Session Sync</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><span class="mark" aria-hidden="true">F</span><div><h1>Flow Studio</h1><p>Session Sync</p></div></header>
+  <p>Обновление входа из этого профиля Chrome в локальном приложении.</p>
+  <form id="settings">
+    <label for="email">Google-аккаунт</label>
+    <input id="email" name="email" type="email" autocomplete="off" maxlength="254" required placeholder="you@example.com">
+    <label for="token">Токен подключения</label>
+    <input id="token" name="token" type="password" autocomplete="off" maxlength="4096" placeholder="Из настроек локального сервера">
+    <small id="token-hint">Токен хранится только в этом профиле Chrome.</small>
+    <label for="server">Локальный сервер</label>
+    <input id="server" value="http://127.0.0.1:38000/api/plugin/update-token" readonly>
+    <button type="submit">Сохранить и синхронизировать</button>
+  </form>
+  <p id="status" role="status" aria-live="polite">Загрузка настроек…</p>
+  <p class="note">Откроется фоновая вкладка Flow и закроется после проверки. Автопроверка — каждые 10 минут.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+    <section id="page-help" class="page" aria-labelledby="help-title" hidden>
+      <header class="page-header"><div><p class="eyebrow">РУКОВОДСТВО</p><h1 id="help-title">Помощь и MCP</h1><p class="subtitle">От первого входа до генерации через агента</p></div></header>
+      <div class="help-intro">
+        <p>Flow Studio создает изображения и видео через подключенные аккаунты Google. Запросы, ход работы и результаты доступны в приложении и через MCP</p>
+        <p class="help-note">Каталог показывает возможности моделей, но не гарантирует доступ на вашем Google-тарифе. Генерация может расходовать кредиты</p>
+      </div>
+      <nav class="help-nav" aria-label="Темы справки">
+        <button type="button" class="small secondary" data-help-target="help-start">Быстрый старт</button>
+        <button type="button" class="small secondary" data-help-target="help-inputs">Изображения и видео</button>
+        <button type="button" class="small secondary" data-help-target="help-results">Результаты и история</button>
+        <button type="button" class="small secondary" data-help-target="help-accounts">Аккаунты и ошибки</button>
+        <button type="button" class="small secondary" data-help-target="help-mcp">Подключение MCP</button>
+        <button type="button" class="small secondary" data-help-target="help-tools">Инструменты и примеры</button>
+      </nav>
+      <p id="help-copy-status" class="help-copy-status" role="status" aria-live="polite"></p>
+
+      <details id="help-start" class="help-section" open>
+        <summary>Быстрый старт</summary>
+        <ol>
+          <li>Дождитесь статуса «Flow подключен» внизу боковой панели. Первый запуск локального движка может занять несколько минут</li>
+          <li>Откройте «Аккаунты» и нажмите «Войти в Google». Завершите вход в открывшемся Chrome, откройте Flow и вернитесь в приложение</li>
+          <li>Нажмите «Я вошёл» и дождитесь подтверждения подключения</li>
+          <li>В разделе «Создать» выберите «Изображение» или «Видео», затем модель. Опишите желаемый результат и добавьте исходные изображения, если они нужны модели</li>
+          <li>Нажмите «Создать изображение» или «Создать видео». Сочетание ⌘ Enter запускает генерацию из поля запроса</li>
+          <li>Дождитесь результата справа, нажмите «Сохранить как…» и выберите файл. После сохранения появится кнопка «Открыть папку»</li>
+        </ol>
+        <p>Приложение выполняет одну генерацию за раз. Пока она идет, новая генерация недоступна</p>
+      </details>
+
+      <details id="help-inputs" class="help-section">
+        <summary>Изображения, видео и исходные файлы</summary>
+        <h2>Выбор модели</h2>
+        <p>Название модели показывает доступные формат кадра, длительность и разрешение. Для другого сочетания выберите соответствующую модель: отдельных настроек этих параметров нет</p>
+        <div class="help-table-wrap">
+          <table>
+            <caption>Как использовать исходные материалы</caption>
+            <thead><tr><th scope="col">Задача</th><th scope="col">Что добавить</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Изображение по тексту</th><td>Только запрос. Исходные изображения необязательны</td></tr>
+              <tr><th scope="row">Изображение по образцам или редактирование</th><td>До 5 исходных изображений с учетом лимита выбранной модели</td></tr>
+              <tr><th scope="row">Видео по тексту</th><td>Запрос и модель для текстового видео</td></tr>
+              <tr><th scope="row">Видео «По образцам»</th><td>Изображения для содержания или стиля, до 3 с учетом лимита модели. Они не задают начальный и конечный кадры</td></tr>
+              <tr><th scope="row">Видео «По кадрам»</th><td>Первое изображение — начальный кадр. Второе — конечный, если модель его поддерживает. Некоторые модели требуют оба кадра, другие принимают только один</td></tr>
+              <tr><th scope="row">«Продолжение» видео</th><td>ID исходного видео из Flow. Локальный файл видео и ID задачи Flow Studio не подходят</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h2>Порядок кадров</h2>
+        <ol>
+          <li>Выберите модель «По кадрам»</li>
+          <li>Через «Добавить изображения» сначала добавьте начальный кадр, затем конечный, если он нужен. Оба находятся в общем списке «Исходные изображения»</li>
+          <li>Проверьте подписи «Начальный кадр» и «Конечный кадр» под миниатюрами. Чтобы изменить порядок, удалите изображения и добавьте их заново</li>
+        </ol>
+        <p>Поддерживаются PNG, JPEG, WebP и GIF, не более 20 МБ на файл. Подсказка и счетчик под выбранной моделью показывают допустимое число изображений</p>
+      </details>
+
+      <details id="help-results" class="help-section">
+        <summary>Сохранение, история и повторное использование</summary>
+        <ol>
+          <li>Откройте готовый результат справа или выберите его карточку в разделе «История»</li>
+          <li>Нажмите «Сохранить как…» под нужным изображением или видео и выберите место сохранения</li>
+          <li>Нажмите «Открыть папку», чтобы показать сохраненный файл в Finder</li>
+        </ol>
+        <p>История сохраняет последние 100 задач между запусками приложения. Она содержит запрос, модель, статус и сведения о результатах. Сохраняйте нужные файлы отдельно: запись в истории не заменяет экспорт</p>
+        <p>«Использовать запрос» переносит текст и доступную модель в редактор. Исходные изображения и ID видео нужно добавить заново. Эта кнопка не запускает генерацию</p>
+        <p>Если предпросмотр не загрузился, попробуйте «Сохранить как…». Ошибка предпросмотра сама по себе не означает, что генерация не удалась</p>
+        <p>Во время генерации закрытие окна предлагает «Продолжить в фоне». Полный выход из приложения прерывает ожидание; после запуска такая задача отмечается ошибкой. Перед новым запуском проверьте ее результат в Flow</p>
+      </details>
+
+      <details id="help-accounts" class="help-section">
+        <summary>Аккаунты Google, кредиты и ошибки</summary>
+        <h2>Вход и проверка подключения</h2>
+        <ol>
+          <li>В разделе «Аккаунты» нажмите «Войти в Google» для нового аккаунта или «Войти заново» у существующего</li>
+          <li>Завершите вход в окне Google Chrome, которое откроет Flow Studio. Для аккаунтов из расширения откроется ваш обычный Chrome; для аккаунтов, добавленных через приложение, — отдельный профиль</li>
+          <li>Откройте Flow в этом окне и убедитесь, что вошли в нужный аккаунт. При переподключении используйте тот же адрес Google</li>
+          <li>Следуйте инструкции в приложении: для обычного Chrome нажмите «Проверить подключение», для отдельного профиля — «Я вошёл». При проверке отдельного профиля окно Chrome может закрыться и открыться снова</li>
+          <li>Дождитесь сообщения «Аккаунт подключен». Позже проверку можно запустить кнопкой «Проверить подключение» у нужного аккаунта. Она не создает генерацию и не расходует кредиты на создание результата</li>
+        </ol>
+        <p>Для аккаунтов, добавленных через Flow Studio, держать окно Chrome открытым не нужно. После подтверждённого входа приложение закрывает своё окно и сохраняет профиль. При обновлении сессии оно кратко запускает Chrome в фоне без окна. Если Google потребует пароль или Touch ID, нажмите «Войти заново» и подтвердите вход. Для аккаунтов, подключённых только через расширение обычного Chrome, автоматическая синхронизация доступна, пока Chrome работает.</p>
+        <p>Вводите пароль и коды подтверждения только в интерфейсе Google. Не отправляйте агенту пароли, cookies или токены. Flow Studio управляет сессией самостоятельно</p>
+        <p>«Включен для генерации» — настройка аккаунта, а не подтверждение входа. Строка «Подключение проверено» показывает отдельную проверку с её временем. «Обновить» запрашивает список и баланс, но не проверяет вход. Баланс и успешная проверка входа не гарантируют доступ ко всем моделям. Пометка «Видео недоступно» относится к возможности аккаунта создавать видео</p>
+        <h2>Ошибка 401: восстановить вход самостоятельно</h2>
+        <ol>
+          <li>В карточке ошибки нажмите «Войти в Google заново». Если аккаунт задачи известен, приложение откроет вход для него. Если аккаунт нельзя определить, выберите его в разделе «Аккаунты» и нажмите «Войти заново»</li>
+          <li>Завершите вход в тот же аккаунт Google, откройте Flow и выполните проверку по инструкции над списком аккаунтов</li>
+          <li>Убедитесь, что подключение подтверждено. При ошибке проверки раскройте «Причина ошибки» у аккаунта. Исходный код ошибки генерации доступен в «Технических деталях» карточки результата</li>
+          <li>Проверьте результат в Flow: ранее отправленная задача могла завершиться там. Если нужен новый запрос, вернитесь в «Создать» и сами нажмите кнопку генерации</li>
+        </ol>
+        <p>Повторный вход сохраняет текущий текст, модель, исходные изображения и ID видео в редакторе. Приложение не повторяет генерацию автоматически</p>
+        <h2>Если не получилось</h2>
+        <div class="help-table-wrap">
+          <table>
+            <caption>Что проверить перед повтором</caption>
+            <thead><tr><th scope="col">Состояние</th><th scope="col">Действие</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">«Нет подключения»</th><td>Прочитайте сообщение запуска и нажмите «Повторить». Если указаны Colima или Docker, проверьте их установку</td></tr>
+              <tr><th scope="row">Кнопка генерации недоступна</th><td>Дождитесь подключения Flow и завершения текущей задачи. Проверьте наличие активного аккаунта и выбранной модели</td></tr>
+              <tr><th scope="row">Вход не подтвержден или ошибка <code>401</code></th><td>Нажмите «Войти в Google заново» в карточке ошибки или «Войти заново» у нужного аккаунта. Войдите в Google, откройте Flow и проверьте подключение по инструкции в приложении</td></tr>
+              <tr><th scope="row">Недостаточно кредитов или нет доступа к модели</th><td>Обновите баланс и проверьте доступ в Google Flow. Выберите другой доступный вариант только осознанно: каталог не подтверждает права аккаунта</td></tr>
+              <tr><th scope="row">«Генерация не завершилась» или нет файла</th><td>Прочитайте сообщение задачи. Пустой ответ сам по себе не означает отказ модерации. Сохраните текст ошибки и технический код, если он указан</td></tr>
+              <tr><th scope="row">Истекло ожидание или приложение закрылось</th><td>Проверьте историю и результат в Flow. Запрос мог продолжиться у Google, поэтому новый запуск может снова расходовать кредиты</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="help-note">После ошибки приложение не подменяет выбранную модель и не запускает новую генерацию автоматически. Сначала выясните состояние задачи, затем решите, нужен ли новый запрос</p>
+      </details>
+
+      <details id="help-mcp" class="help-section">
+        <summary>Подключение MCP к Codex и другим агентам</summary>
+        <p>MCP дает агенту доступ к тому же приложению, аккаунтам и истории. Локальный мост при необходимости запускает установленный Flow Studio. Второй движок для агента не нужен</p>
+        <p><strong>На этом Mac сервер <code>flow-studio</code> уже записан в настройки Codex.</strong> Если инструменты еще не появились в текущем чате, используйте CLI ниже или откройте новый сеанс Codex после перезапуска приложения Codex</p>
+        <h2>Команда подключения Codex</h2>
+        <p>Команда нужна для восстановления настройки или нового подключения. Здесь указаны проверенные пути этой установки</p>
+        <button type="button" class="small secondary" data-copy-target="help-codex-command">Копировать</button>
+        <pre id="help-codex-command"><code>codex mcp add flow-studio -- node /ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs</code></pre>
+        <h2>Настройки другого MCP-клиента</h2>
+        <p>Выберите транспорт <code>stdio</code>. Если клиент принимает конфигурацию <code>mcpServers</code>, используйте этот блок; в остальных клиентах перенесите поля <code>command</code> и <code>args</code>. Нужен Node.js 22 или новее</p>
+        <button type="button" class="small secondary" data-copy-target="help-mcp-config">Копировать</button>
+        <pre id="help-mcp-config"><code>{
+  "mcpServers": {
+    "flow-studio": {
+      "command": "node",
+      "args": [
+        "/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs"
+      ]
+    }
+  }
+}</code></pre>
+        <p>Для долгого первого запуска установите тайм-аут инструмента не менее 300 секунд, если клиент позволяет это настроить. В текущей настройке Codex уже указаны 300 секунд.</p>
+        <p>Ключ API или секрет моста в конфигурацию добавлять не нужно. Агенту не требуется читать файлы с учетными данными</p>
+        <h2>Проверка без расхода кредитов</h2>
+        <p>Попросите агента вызвать <code>flow_studio_status</code>, затем <code>flow_studio_list_models</code>. Указание «Проверь подключение» не разрешает тестовую генерацию</p>
+        <button type="button" class="small secondary" data-copy-target="help-agent-check">Копировать</button>
+        <pre id="help-agent-check"><code>Используй Flow Studio. Проверь состояние приложения через flow_studio_status и получи каталог моделей через flow_studio_list_models. Покажи готовность, аккаунты и ограничения моделей. Генерацию не запускай.</code></pre>
+        <p>Если MCP недоступен в текущем сеансе, те же операции работают через CLI. Эти команды читают состояние и каталог, не создают медиа и не расходуют кредиты генерации</p>
+        <button type="button" class="small secondary" data-copy-target="help-cli-check">Копировать</button>
+        <pre id="help-cli-check"><code>node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call status '{}'
+node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call models '{"kind":"video","mode":"frames"}'</code></pre>
+        <p>Для запроса на генерацию явно назовите Flow Studio, желаемый результат, модель и роли исходных файлов. В Codex установлен навык <code>$flow-studio</code>. Общий запрос на изображение без выбора Flow Studio может использовать другой маршрут</p>
+      </details>
+
+      <details id="help-tools" class="help-section">
+        <summary>13 инструментов MCP и примеры аргументов</summary>
+        <div class="help-table-wrap">
+          <table>
+            <caption>Имена инструментов, методы CLI и аргументы</caption>
+            <thead><tr><th scope="col">MCP / CLI</th><th scope="col">Назначение и аргументы</th></tr></thead>
+            <tbody>
+              <tr><th scope="row"><code>flow_studio_status</code><br><code>status</code></th><td>Готовность, аккаунты, текущие задачи и размер истории. Аргументы: <code>{}</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_list_models</code><br><code>models</code></th><td>Каталог. Необязательные фильтры: <code>kind</code> — <code>image</code> или <code>video</code>; <code>mode</code> — <code>text</code>, <code>references</code>, <code>frames</code> или <code>extend</code>; <code>query</code> — строка поиска</td></tr>
+              <tr><th scope="row"><code>flow_studio_generate</code><br><code>generate</code></th><td>Создать задачу с расходом кредитов. Обязательны <code>model</code>, <code>prompt</code>, <code>confirmCreditSpend: true</code> и <code>requestId</code>. Входные файлы — по примерам ниже</td></tr>
+              <tr><th scope="row"><code>flow_studio_get_job</code><br><code>job</code></th><td>Статус и результаты задачи. Обязателен <code>jobId</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_wait_job</code><br><code>wait</code></th><td>Ожидать известную задачу. Обязателен <code>jobId</code>; <code>timeoutSeconds</code> — от 0 до 30, по умолчанию 20. Возвращает <code>job</code> и <code>done</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_list_jobs</code><br><code>history</code></th><td>Недавние задачи, новые первыми. <code>limit</code> — от 1 до 100, по умолчанию 20</td></tr>
+              <tr><th scope="row"><code>flow_studio_save_result</code><br><code>save</code></th><td>Сохранить файл. Обязательны <code>jobId</code> и абсолютный <code>outputPath</code>. <code>index</code> — номер результата с нуля, по умолчанию 0; <code>overwrite</code> — по умолчанию <code>false</code>. Папка назначения должна существовать</td></tr>
+              <tr><th scope="row"><code>flow_studio_open_result_folder</code><br><code>open_folder</code></th><td>Показать в Finder сохраненный файл или локальный кэш. Обязателен <code>jobId</code>; <code>index</code> — по умолчанию 0</td></tr>
+              <tr><th scope="row"><code>flow_studio_list_accounts</code><br><code>accounts</code></th><td>Адреса, ID, баланс и активность аккаунтов без учетных данных. Аргументы: <code>{}</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_begin_google_login</code><br><code>login_start</code></th><td>Открыть вход в Chrome. Без <code>accountId</code> — новый аккаунт; с известным положительным целым <code>accountId</code> — переподключение</td></tr>
+              <tr><th scope="row"><code>flow_studio_complete_google_login</code><br><code>login_complete</code></th><td>Подтвердить, что пользователь завершил вход в Chrome и открыл Flow. Аргументы: <code>{}</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_cancel_google_login</code><br><code>login_cancel</code></th><td>Отменить текущий вход. Аргументы: <code>{}</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_cancel_job</code><br><code>cancel</code></th><td>Прервать запрос приложения. Обязателен <code>jobId</code>. Google может продолжить генерацию и списать кредиты</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h2>Порядок работы агента</h2>
+        <ol>
+          <li>Вызовите <code>flow_studio_status</code> и <code>flow_studio_list_models</code>. Используйте точный <code>id</code> из текущего каталога</li>
+          <li>Проверьте <code>minImages</code>, <code>maxImages</code>, <code>supportsStartFrame</code> и <code>supportsEndFrame</code>. Для изображений с референсами фильтруйте по <code>kind: "image"</code>: такие модели могут иметь <code>mode: "text"</code></li>
+          <li>Создайте UUID для <code>requestId</code> и сохраните его вместе с аргументами. Передайте <code>confirmCreditSpend: true</code>, только если пользователь запросил эту генерацию</li>
+          <li>Вызовите <code>flow_studio_generate</code> и сохраните возвращенный <code>jobId</code>. Проверяйте задачу через <code>flow_studio_get_job</code> или повторяйте ожидания <code>flow_studio_wait_job</code> до 30 секунд каждое</li>
+          <li>После успешного завершения создайте папку назначения и вызовите <code>flow_studio_save_result</code> с абсолютным путем и подходящим расширением. Не заменяйте существующий файл без разрешения пользователя</li>
+          <li>Покажите сохраненный результат. Вызывайте <code>flow_studio_open_result_folder</code>, если пользователь попросил открыть папку</li>
+        </ol>
+        <p><code>confirmCreditSpend</code> фиксирует уже полученное разрешение на конкретную генерацию. Повторное подтверждение того же запроса не нужно. Настройка аккаунта, чтение каталога и диагностика сами по себе расход кредитов не разрешают</p>
+        <h2>Примеры входных данных</h2>
+        <p>Ниже шаблоны, а не готовые запросы. Замените значения в угловых скобках данными пользователя и текущего каталога. Для каждой новой генерации создавайте новый UUID. Файлы должны существовать локально; не передавайте URL или данные изображения вместо пути</p>
+        <p><strong>Референсы для изображения или видео.</strong> <code>referencePaths</code> сохраняет порядок пользователя: до 5 файлов для изображения или до 3 для видео, с учетом ограничений модели</p>
+        <button type="button" class="small secondary" data-copy-target="help-reference-example">Копировать</button>
+        <pre id="help-reference-example"><code>{
+  "model": "&lt;MODEL_ID_FROM_LIST_MODELS&gt;",
+  "prompt": "&lt;USER_PROMPT&gt;",
+  "referencePaths": ["/absolute/path/reference.png"],
+  "confirmCreditSpend": true,
+  "requestId": "&lt;NEW_UUID&gt;"
+}</code></pre>
+        <p><strong>Начальный и конечный кадры.</strong> Для <code>mode: "frames"</code> начальный кадр обязателен. Конечный нужен при <code>minImages: 2</code>; в остальных случаях передавайте его только при поддержке модели</p>
+        <button type="button" class="small secondary" data-copy-target="help-frames-example">Копировать</button>
+        <pre id="help-frames-example"><code>{
+  "model": "&lt;FRAMES_MODEL_ID_FROM_LIST_MODELS&gt;",
+  "prompt": "&lt;USER_PROMPT&gt;",
+  "startFramePath": "/absolute/path/start.png",
+  "endFramePath": "/absolute/path/end.png",
+  "confirmCreditSpend": true,
+  "requestId": "&lt;NEW_UUID&gt;"
+}</code></pre>
+        <p><strong>Продолжение видео.</strong> Для <code>sourceVideoId</code> возьмите проверенный <code>media[index].mediaGenerationId</code> из <code>flow_studio_get_job</code>. Если этого ID нет, запросите его у пользователя; не подставляйте <code>jobId</code></p>
+        <button type="button" class="small secondary" data-copy-target="help-extend-example">Копировать</button>
+        <pre id="help-extend-example"><code>{
+  "model": "&lt;EXTEND_MODEL_ID_FROM_LIST_MODELS&gt;",
+  "prompt": "&lt;USER_PROMPT&gt;",
+  "sourceVideoId": "&lt;VERIFIED_MEDIA_GENERATION_ID&gt;",
+  "confirmCreditSpend": true,
+  "requestId": "&lt;NEW_UUID&gt;"
+}</code></pre>
+        <p>Для генерации только по тексту оставьте <code>model</code>, <code>prompt</code>, <code>confirmCreditSpend</code> и <code>requestId</code>. <code>referencePaths</code>, поля кадров и <code>sourceVideoId</code> взаимно исключают друг друга. Не добавляйте отдельные поля длительности, формата или разрешения: их задает выбранная модель</p>
+        <h2>Ожидание, повтор и отмена</h2>
+        <p><code>generate</code> возвращает задачу сразу. Истечение <code>wait_job</code> или ошибка связи не доказывают провал генерации. Сначала проверьте <code>get_job</code> и <code>list_jobs</code></p>
+        <p>Если ответ на запуск потерялся, повторите вызов только с тем же <code>requestId</code> и неизменными аргументами и файлами. Пока задача есть в истории, мост вернет ее вместо новой генерации. Дедупликация сохраняется между запусками в пределах последних 100 задач. Если старая задача уже не хранится, сначала выясните ее исход</p>
+        <p>Новый <code>requestId</code> означает новую генерацию и возможное новое списание. После подтвержденной ошибки или отмены не запускайте запрос автоматически и не меняйте без согласования модель, текст, исходные файлы или маршрут</p>
+        <p>При ошибке сообщите возвращенный текст и технический код без изменений. Различайте подтвержденный провал задачи и неизвестный исход из-за связи. Отмена через <code>cancel_job</code> не гарантирует остановку у Google или возврат кредитов</p>
+      </details>
+    </section>

@@ -1,0 +1,470 @@
+import types
+import unittest
+from io import BytesIO
+from unittest.mock import AsyncMock, patch
+
+from PIL import Image
+
+from src.api.routes import _get_openai_model_catalog, _normalize_openai_request
+from src.core.models import ChatCompletionRequest, ChatMessage
+from src.core.model_resolver import resolve_model_name
+from src.services.flow_client import FlowClient
+from src.services.generation_handler import MODEL_CONFIG, GenerationHandler
+
+
+def _make_image_bytes(size: tuple[int, int], color: str = "white") -> bytes:
+    image = Image.new("RGB", size, color=color)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class VeoLiteModelResolverTests(unittest.TestCase):
+    def test_public_catalog_exposes_current_flow_families(self):
+        listed = {item["id"] for item in _get_openai_model_catalog()}
+
+        self.assertIn("veo-3.1-lite-4s-landscape", listed)
+        self.assertIn("veo-3.1-fast-4s-landscape", listed)
+        self.assertIn("veo-3.1-quality-4s-landscape", listed)
+        self.assertIn("omni-1.1-flash-4s-landscape", listed)
+        self.assertIn("veo-3.1-fast", listed)
+        self.assertIn("omni-1.1-flash", listed)
+        self.assertNotIn("veo_3_1_t2v_fast_landscape_4s", listed)
+        self.assertIn("veo_3_1_t2v_fast_landscape_4s", MODEL_CONFIG)
+
+    def test_current_aliases_use_live_upstream_keys(self):
+        self.assertEqual(
+            MODEL_CONFIG["veo-3.1-fast-4s-landscape"]["model_key"],
+            "veo_3_1_t2v_fast_4s_relaxed",
+        )
+        self.assertEqual(
+            MODEL_CONFIG["omni-1.1-flash-4s-landscape"]["model_key"],
+            "abra_t2v_4s",
+        )
+        self.assertEqual(
+            MODEL_CONFIG["veo-3.1-fast-r2v-8s-landscape"]["model_key"],
+            "veo_3_1_r2v_fast_landscape",
+        )
+        self.assertEqual(
+            MODEL_CONFIG["veo-3.1-fast-r2v-8s-portrait"]["model_key"],
+            "veo_3_1_r2v_fast_portrait",
+        )
+
+    def test_resolve_t2v_lite_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(aspectRatio="portrait")
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_t2v_lite",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_t2v_lite_portrait")
+
+    def test_resolve_quality_4s_upsample_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(aspectRatio="portrait")
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_t2v_4s_4k",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_t2v_portrait_4s_4k")
+
+    def test_resolve_video_image_size_to_upsample_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(
+                aspectRatio="landscape", imageSize="1080p"
+            )
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_i2v_s_6s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_i2v_s_6s_1080p")
+
+    def test_resolve_quality_8s_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(aspectRatio="portrait")
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_t2v_8s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_t2v_portrait_8s")
+
+    def test_resolve_quality_8s_upsample_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(
+                aspectRatio="portrait", imageSize="4k"
+            )
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_i2v_s_8s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_i2v_s_portrait_8s_4k")
+
+    def test_image_model_follows_reference_image_aspect_ratio(self):
+        request = types.SimpleNamespace(generationConfig=None)
+        portrait_image = _make_image_bytes((900, 1600))
+
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=request,
+            model_config=MODEL_CONFIG,
+            images=[portrait_image],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-portrait")
+
+
+class VeoLiteGenerationHandlerTests(unittest.TestCase):
+    def test_tier_two_does_not_upgrade_lite_model_to_fake_ultra(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+
+        model_key, message = handler._resolve_video_model_key_for_tier(
+            {
+                "model_key": "veo_3_1_t2v_lite",
+                "allow_tier_upgrade": False,
+            },
+            "PAYGATE_TIER_TWO",
+        )
+
+        self.assertEqual(model_key, "veo_3_1_t2v_lite")
+        self.assertIsNone(message)
+
+    def test_tier_two_still_upgrades_regular_model(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+
+        model_key, message = handler._resolve_video_model_key_for_tier(
+            {
+                "model_key": "veo_3_1_t2v_fast",
+            },
+            "PAYGATE_TIER_TWO",
+        )
+
+        self.assertEqual(model_key, "veo_3_1_t2v_fast_ultra")
+        self.assertIn("ultra", message)
+
+    def test_quality_model_does_not_upgrade_to_fake_ultra(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+
+        model_key, message = handler._resolve_video_model_key_for_tier(
+            {
+                "model_key": "veo_3_1_t2v",
+            },
+            "PAYGATE_TIER_TWO",
+        )
+
+        self.assertEqual(model_key, "veo_3_1_t2v")
+        self.assertIsNone(message)
+
+    def test_quality_4s_upsample_model_generates_then_upsamples(self):
+        cfg = MODEL_CONFIG["veo_3_1_t2v_4s_4k"]
+
+        self.assertEqual(cfg["model_key"], "veo_3_1_t2v_quality_4s")
+        self.assertEqual(cfg["video_type"], "t2v")
+        self.assertEqual(cfg["upsample"]["model_key"], "veo_3_1_upsampler_4k")
+        self.assertEqual(cfg["upsample"]["resolution"], "VIDEO_RESOLUTION_4K")
+
+    def test_quality_6s_i2v_1080p_model_generates_then_upsamples(self):
+        cfg = MODEL_CONFIG["veo_3_1_i2v_s_6s_1080p"]
+
+        self.assertEqual(cfg["model_key"], "veo_3_1_i2v_s_quality_6s_fl")
+        self.assertEqual(cfg["video_type"], "i2v")
+        self.assertEqual(cfg["upsample"]["model_key"], "veo_3_1_upsampler_1080p")
+        self.assertEqual(cfg["upsample"]["resolution"], "VIDEO_RESOLUTION_1080P")
+
+    def test_explicit_8s_aliases_reuse_default_upstream_keys(self):
+        self.assertEqual(MODEL_CONFIG["veo_3_1_t2v_8s"]["model_key"], "veo_3_1_t2v")
+        self.assertEqual(
+            MODEL_CONFIG["veo_3_1_i2v_s_8s"]["model_key"], "veo_3_1_i2v_s_fl"
+        )
+        self.assertEqual(
+            MODEL_CONFIG["veo_3_1_r2v_fast_ultra_8s"]["model_key"],
+            "veo_3_1_r2v_fast_landscape_ultra",
+        )
+
+    def test_short_duration_models_include_explicit_landscape_aliases(self):
+        expected_aliases = {
+            "veo_3_1_t2v_landscape_4s": "veo_3_1_t2v_4s",
+            "veo_3_1_t2v_landscape_6s": "veo_3_1_t2v_6s",
+            "veo_3_1_i2v_s_landscape_4s": "veo_3_1_i2v_s_4s",
+            "veo_3_1_i2v_s_landscape_6s": "veo_3_1_i2v_s_6s",
+            "veo_3_1_t2v_landscape_4s_4k": "veo_3_1_t2v_4s_4k",
+            "veo_3_1_i2v_s_landscape_6s_1080p": "veo_3_1_i2v_s_6s_1080p",
+        }
+
+        for alias, target in expected_aliases.items():
+            self.assertIn(alias, MODEL_CONFIG)
+            self.assertEqual(MODEL_CONFIG[alias], MODEL_CONFIG[target])
+
+    def test_default_duration_models_include_explicit_8s_aliases(self):
+        expected_aliases = {
+            "veo_3_1_t2v_landscape_8s": "veo_3_1_t2v_8s",
+            "veo_3_1_t2v_landscape_8s_4k": "veo_3_1_t2v_8s_4k",
+            "veo_3_1_t2v_lite_landscape_8s": "veo_3_1_t2v_lite_8s_landscape",
+            "veo_3_1_i2v_s_landscape_8s": "veo_3_1_i2v_s_8s",
+            "veo_3_1_i2v_s_landscape_8s_1080p": "veo_3_1_i2v_s_8s_1080p",
+            "veo_3_1_i2v_lite_landscape_8s": "veo_3_1_i2v_lite_8s_landscape",
+            "veo_3_1_interpolation_lite_landscape_8s": "veo_3_1_interpolation_lite_8s_landscape",
+            "veo_3_1_r2v_fast_landscape_8s": "veo_3_1_r2v_fast_8s",
+            "veo_3_1_r2v_fast_landscape_ultra_8s": "veo_3_1_r2v_fast_ultra_8s",
+            "veo_3_1_r2v_fast_landscape_ultra_relaxed_8s": "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        }
+
+        for alias, target in expected_aliases.items():
+            self.assertIn(alias, MODEL_CONFIG)
+            self.assertEqual(MODEL_CONFIG[alias], MODEL_CONFIG[target])
+
+    def test_r2v_models_include_explicit_landscape_aliases(self):
+        expected_aliases = {
+            "veo_3_1_r2v_fast_landscape": "veo_3_1_r2v_fast",
+            "veo_3_1_r2v_fast_landscape_ultra": "veo_3_1_r2v_fast_ultra",
+            "veo_3_1_r2v_fast_landscape_ultra_relaxed": "veo_3_1_r2v_fast_ultra_relaxed",
+            "veo_3_1_r2v_fast_landscape_ultra_4k": "veo_3_1_r2v_fast_ultra_4k",
+            "veo_3_1_r2v_fast_landscape_ultra_1080p": "veo_3_1_r2v_fast_ultra_1080p",
+        }
+
+        for alias, target in expected_aliases.items():
+            self.assertIn(alias, MODEL_CONFIG)
+            self.assertEqual(MODEL_CONFIG[alias], MODEL_CONFIG[target])
+
+    def test_direct_upsampler_keys_are_not_public_models(self):
+        self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
+        self.assertNotIn("veo_3_1_upsampler_1080p", MODEL_CONFIG)
+
+
+class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.client = FlowClient(proxy_manager=None)
+        self.client._acquire_video_launch_gate = AsyncMock(
+            return_value=(True, None, None)
+        )
+        self.client._release_video_launch_gate = AsyncMock()
+        self.client._get_recaptcha_token = AsyncMock(
+            return_value=("recaptcha-token", "browser-1")
+        )
+        self.client._notify_browser_captcha_request_finished = AsyncMock()
+
+    async def test_generate_video_text_uses_v2_payload_for_lite(self):
+        operation_id = "11111111-1111-1111-1111-111111111111"
+        project_id = "22222222-2222-2222-2222-222222222222"
+        media_id = "33333333-3333-3333-3333-333333333333"
+        self.client._call_flow_frontend_rpc = AsyncMock(
+            return_value=[[operation_id, project_id, media_id]]
+        )
+
+        await self.client.generate_video_text(
+            at="at-token",
+            project_id=project_id,
+            prompt="猫猫",
+            model_key="veo_3_1_t2v_lite",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            use_v2_model_config=True,
+            google_cookies="SID=session-cookie",
+        )
+
+        rpc = self.client._call_flow_frontend_rpc.await_args.kwargs
+        self.assertEqual(rpc["rpc_id"], "YhhmEf")
+        request_data = rpc["argument"][0][0]
+        self.assertEqual(request_data[0], [None, None, [[["猫猫"]]]])
+        self.assertEqual(request_data[1], "veo_3_1_t2v_lite")
+        self.assertEqual(request_data[2], 2)
+        self.assertTrue(rpc["argument"][2][0])
+
+    def test_reference_video_uses_current_prompt_and_media_envelopes(self):
+        rpc_id, argument = self.client._build_frontend_video_generation_argument(
+            project_id="22222222-2222-2222-2222-222222222222",
+            prompt="参考图视频",
+            model_key="abra_r2v_10s",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            recaptcha_token="recaptcha-token",
+            session_id="session-id",
+            mode="references",
+            reference_media_ids=["reference-media"],
+        )
+
+        self.assertEqual(rpc_id, "MZZa6b")
+        request_data = argument[0][0]
+        self.assertEqual(request_data[0], [None, None, [[["参考图视频"]]]])
+        self.assertEqual(request_data[1], [[None, "reference-media"]])
+
+    async def test_generate_video_text_normalizes_media_only_create_response(self):
+        operation_id = "11111111-1111-1111-1111-111111111111"
+        project_id = "22222222-2222-2222-2222-222222222222"
+        media_id = "33333333-3333-3333-3333-333333333333"
+        self.client._call_flow_frontend_rpc = AsyncMock(
+            return_value=[[operation_id, project_id, media_id]]
+        )
+
+        result = await self.client.generate_video_text(
+            at="at-token",
+            project_id=project_id,
+            prompt="猫猫",
+            model_key="veo_3_1_t2v_lite",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            use_v2_model_config=True,
+            google_cookies="SID=session-cookie",
+        )
+
+        self.assertEqual(result["operations"][0]["operation"]["name"], operation_id)
+        self.assertEqual(result["operations"][0]["projectId"], project_id)
+        self.assertEqual(
+            result["operations"][0]["status"],
+            "MEDIA_GENERATION_STATUS_ACTIVE",
+        )
+
+
+class RouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.client = FlowClient(proxy_manager=None)
+        self.client._acquire_video_launch_gate = AsyncMock(
+            return_value=(True, None, None)
+        )
+        self.client._release_video_launch_gate = AsyncMock()
+        self.client._get_recaptcha_token = AsyncMock(
+            return_value=("recaptcha-token", "browser-1")
+        )
+        self.client._notify_browser_captcha_request_finished = AsyncMock()
+
+    async def test_openai_history_reference_image_can_drive_aspect_ratio(self):
+        portrait_image = _make_image_bytes((900, 1600))
+        request = ChatCompletionRequest(
+            model="gemini-3.0-pro-image",
+            messages=[
+                ChatMessage(role="user", content="先生成一张图"),
+                ChatMessage(
+                    role="assistant",
+                    content="![cat](https://example.com/cat.png)",
+                ),
+                ChatMessage(role="user", content="基于上一张图继续编辑"),
+            ],
+        )
+
+        with patch(
+            "src.api.routes.retrieve_image_data",
+            new=AsyncMock(return_value=portrait_image),
+        ):
+            normalized = await _normalize_openai_request(request)
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        self.assertEqual(len(normalized.images), 1)
+
+    async def test_check_video_status_uses_media_payload_and_normalizes_response(self):
+        operation_id = "11111111-1111-1111-1111-111111111111"
+        project_id = "22222222-2222-2222-2222-222222222222"
+        media_id = "33333333-3333-3333-3333-333333333333"
+        video_url = f"https://flow-content.google/video/{media_id}?token=abc"
+        self.client._call_flow_frontend_rpc = AsyncMock(
+            return_value=[operation_id, project_id, media_id, video_url]
+        )
+
+        result = await self.client.check_video_status(
+            at="at-token",
+            operations=[
+                {
+                    "operation": {"name": operation_id},
+                    "name": operation_id,
+                    "mediaName": media_id,
+                    "projectId": project_id,
+                }
+            ],
+            google_cookies="SID=session-cookie",
+        )
+
+        rpc = self.client._call_flow_frontend_rpc.await_args.kwargs
+        self.assertEqual(rpc["rpc_id"], "jwpduf")
+        self.assertEqual(rpc["argument"][2], [[operation_id]])
+        operation = result["operations"][0]
+        self.assertEqual(operation["operation"]["name"], operation_id)
+        self.assertEqual(operation["status"], "MEDIA_GENERATION_STATUS_SUCCESSFUL")
+        self.assertEqual(
+            operation["operation"]["metadata"]["video"]["fifeUrl"],
+            video_url,
+        )
+
+    async def test_check_video_status_surfaces_terminal_frontend_error(self):
+        operation_id = "11111111-1111-1111-1111-111111111111"
+        project_id = "22222222-2222-2222-2222-222222222222"
+        media_id = "33333333-3333-3333-3333-333333333333"
+        self.client._call_flow_frontend_rpc = AsyncMock(
+            return_value=[
+                operation_id,
+                project_id,
+                media_id,
+                None,
+                [4, [3, "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED"]],
+            ]
+        )
+
+        result = await self.client.check_video_status(
+            at="at-token",
+            operations=[
+                {
+                    "operation": {"name": operation_id},
+                    "name": operation_id,
+                    "mediaName": media_id,
+                    "projectId": project_id,
+                }
+            ],
+            google_cookies="SID=session-cookie",
+        )
+
+        operation = result["operations"][0]
+        self.assertEqual(operation["status"], "MEDIA_GENERATION_STATUS_FAILED")
+        self.assertEqual(
+            operation["operation"]["error"]["code"],
+            "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED",
+        )
+        self.assertIn("人物安全过滤", operation["operation"]["error"]["message"])
+
+    async def test_generate_video_start_end_uses_v2_payload_for_interpolation_lite(
+        self,
+    ):
+        operation_id = "11111111-1111-1111-1111-111111111111"
+        project_id = "22222222-2222-2222-2222-222222222222"
+        media_id = "33333333-3333-3333-3333-333333333333"
+        self.client._call_flow_frontend_rpc = AsyncMock(
+            return_value=[[operation_id, project_id, media_id]]
+        )
+
+        await self.client.generate_video_start_end(
+            at="at-token",
+            project_id=project_id,
+            prompt="变身猫猫",
+            model_key="veo_3_1_interpolation_lite",
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
+            start_media_id="start-media",
+            end_media_id="end-media",
+            use_v2_model_config=True,
+            google_cookies="SID=session-cookie",
+        )
+
+        rpc = self.client._call_flow_frontend_rpc.await_args.kwargs
+        self.assertEqual(rpc["rpc_id"], "nprQif")
+        request_data = rpc["argument"][0][0]
+        self.assertEqual(request_data[0], [None, None, [[["变身猫猫"]]]])
+        self.assertEqual(request_data[1], "veo_3_1_interpolation_lite")
+        self.assertEqual(request_data[2], 1)
+        self.assertEqual(request_data[4][1], "start-media")
+        self.assertEqual(request_data[5][1], "end-media")
+
+
+if __name__ == "__main__":
+    unittest.main()

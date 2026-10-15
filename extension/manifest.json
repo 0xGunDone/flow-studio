@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Flow Studio Session Sync",
+  "version": "1.0.0",
+  "description": "Обновляет вход в локальном Flow Studio из вашего профиля Chrome.",
+  "minimum_chrome_version": "120",
+  "incognito": "not_allowed",
+  "permissions": ["cookies", "storage", "alarms", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*", "https://*.google.com/*", "http://google.com/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_title": "Flow Studio Session Sync", "default_popup": "popup.html"}
+}

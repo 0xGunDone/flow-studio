@@ -1,0 +1,28 @@
+{
+  "name": "flow-studio",
+  "productName": "Flow Studio",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.cjs",
+  "description": "Local macOS studio for Google Flow image and video generation",
+  "license": "MIT",
+  "author": "0xgundone",
+  "repository": "https://github.com/0xgundone/flow-studio",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test *.test.cjs",
+    "check:release": "node ../scripts/check-release.cjs",
+    "dist:arm64": "node ../scripts/build.cjs arm64",
+    "dist:x64": "node ../scripts/build.cjs x64",
+    "dist:mac": "node ../scripts/build.cjs arm64 x64",
+    "dist:extras": "node ../scripts/package-extras.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.1",
+    "electron-builder": "26.15.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^3.25.76"
+  }
+}

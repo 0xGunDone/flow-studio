@@ -1,0 +1,77 @@
+name: macOS prerelease
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install pinned dependencies
+        run: npm ci
+        working-directory: app
+      - name: Build and inspect app bundle
+        run: npm run dist:${{ matrix.arch }}
+        working-directory: app
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mac-${{ matrix.arch }}
+          path: |
+            dist/Flow-Studio-*-mac-${{ matrix.arch }}.zip
+            dist/Flow-Studio-*-mac-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: mac-*
+          path: dist
+          merge-multiple: true
+      - name: Package extension and MCP source, calculate checksums
+        run: node scripts/package-extras.cjs
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(node -p 'require("./app/package.json").version')"
+          gh release create "$RELEASE_TAG" dist/*.zip dist/*.dmg dist/SHA256SUMS.txt \
+            --verify-tag --prerelease --title "Flow Studio $RELEASE_TAG" --generate-notes

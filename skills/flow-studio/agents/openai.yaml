@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flow Studio"
+  short_description: "Generate images and videos in local Flow Studio"
+  default_prompt: "Use $flow-studio to check available models and generate media from my prompt, references, or start and end frames."

@@ -1,0 +1,11 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path');
+const root=path.resolve(__dirname,'..');
+const start='<!-- FLOW_STUDIO_HELP_START -->',end='<!-- FLOW_STUDIO_HELP_END -->';
+const target=path.join(root,'index.html');
+let html=fs.readFileSync(target,'utf8');
+const fragment=fs.readFileSync(path.join(root,'help-content.html'),'utf8').trim();
+if(!fragment.startsWith('<section id="page-help"')||!fragment.endsWith('</section>'))throw new Error('Invalid help section');
+if(html.includes(start))html=html.slice(0,html.indexOf(start))+start+'\n'+fragment+'\n'+end+html.slice(html.indexOf(end)+end.length);
+else html=html.replace('  </main>','    '+start+'\n'+fragment+'\n'+end+'\n  </main>');
+fs.writeFileSync(target,html);

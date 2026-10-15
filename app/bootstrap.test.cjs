@@ -1,0 +1,20 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os');
+const {prepareEngine}=require('./bootstrap.cjs');
+test('fresh install isolates runtime data and preserves random credentials on upgrade',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'flow-release-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const backend=path.join(root,'backend $local');await fs.mkdir(path.join(backend,'config'),{recursive:true});
+ await fs.writeFile(path.join(backend,'config/setting_example.toml'),'api_key = "example"\nadmin_password = "example"\ncaptcha_method = "external"\npersonal_project_pool_size = 4\n');
+ const data=path.join(root,'user data');const cfg=await prepareEngine({dataDir:data,backendDir:backend});
+ const settings=await fs.readFile(path.join(data,'engine/setting.toml'),'utf8');
+ assert.match(settings,/api_key = "[a-f0-9]{64}"/);assert.match(settings,/captcha_method = "browser"/);
+ assert.equal((await fs.stat(path.join(data,'engine/setting.toml'))).mode&0o777,0o600);
+ await prepareEngine({dataDir:data,backendDir:backend,version:'1.0.1'});
+ assert.equal(await fs.readFile(path.join(data,'engine/setting.toml'),'utf8'),settings);
+ const compose=JSON.parse(await fs.readFile(cfg.composePath,'utf8'));
+ assert.equal(compose.services.flow2api.ports[0],'127.0.0.1:38000:8000');
+ assert.equal(compose.services.flow2api.build.context,backend.replace(/\$/g,()=> '$$'));
+ assert.equal(compose.services.flow2api.image,'flow-studio-engine:1.0.1');
+ assert.equal(cfg.databasePath,path.join(data,'engine/data/flow.db'));
+});

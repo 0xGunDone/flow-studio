@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  flow2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: flow2api:local
+    container_name: flow2api
+    ports:
+      - "38000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./tmp:/app/tmp
+      - ./config/setting.toml:/app/config/setting.toml
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
