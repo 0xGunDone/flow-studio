@@ -39,4 +39,6 @@ Google Flow использует изменяемые веб-интерфейс�
 
 Исходники и сборки не содержат аккаунтов разработчика, сессий Google, истории генераций или локальной базы данных.
 
-[Первый запуск](getting-started.md) · [MCP](mcp.md) · [Решение проблем](troubleshooting.md)
+[Первый запуск](https://github.com/0xGunDone/flow-studio/blob/main/docs/getting-started.md) · [MCP](https://github.com/0xGunDone/flow-studio/blob/main/docs/mcp.md) · [Решение проблем](https://github.com/0xGunDone/flow-studio/blob/main/docs/troubleshooting.md)
+
+GitHub Actions для аккаунта владельца сейчас отключён: GitHub возвращает `Actions has been disabled for this user`. Workflow-файлы включены в репозиторий; этот выпуск собран и проверен локально. Автоматические будущие сборки потребуют включения Actions со стороны GitHub.
