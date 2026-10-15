@@ -30,7 +30,6 @@ except ImportError:
 class _FlowClientBase(FlowFrontendMixin):
     """VideoFX API客户端"""
 
-    FLOW_PUBLIC_API_KEY = "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY"
     FLOW_BROWSER_CHANNEL_HEADER = "stable"
     FLOW_BROWSER_COPYRIGHT_HEADER = "Copyright 2026 Google LLC. All Rights Reserved."
     FLOW_BROWSER_VALIDATION_HEADER = "MRCPrt/rS3JY47x2Yiz9h3ag4U8="
@@ -2824,19 +2823,6 @@ class _FlowClientBase(FlowFrontendMixin):
                     f"[VIDEO WARMUP] Labs submitBatchLog 失败: {e}"
                 )
 
-        try:
-            await self._aisandbox_request(
-                "POST",
-                ":checkAppAvailability",
-                at=None,
-                raw_body=self._compact_json_dumps(
-                    {"clientContext": {"tool": "PINHOLE"}}
-                ),
-                api_key=self.FLOW_PUBLIC_API_KEY,
-                account_id=account_id,
-            )
-        except Exception as e:
-            debug_logger.log_warning(f"[VIDEO WARMUP] checkAppAvailability 失败: {e}")
 
         debug_logger.log_info(
             f"[VIDEO WARMUP] 当前视频最小初始化链路已补齐: project_id={project_id}, "

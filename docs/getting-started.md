@@ -23,7 +23,7 @@ colima start
 
 ## Установка приложения
 
-1. Откройте [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.0).
+1. Откройте [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1).
 2. Выберите `arm64`, если в «Об этом Mac» указан чип Apple, или `x64`, если указан процессор Intel.
 3. Распакуйте ZIP или откройте DMG и перенесите `Flow Studio.app` в `Applications`.
 4. Запустите приложение и дождитесь подключения движка. Локальный API-ключ и пароль создаются автоматически; вводить их в интерфейс не нужно.

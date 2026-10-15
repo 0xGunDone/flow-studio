@@ -64,7 +64,7 @@ npm run dist:arm64 --prefix app
 npm run dist:x64 --prefix app
 ```
 
-Обе архитектуры одной командой: `npm run dist:mac --prefix app`. Артефакты появляются в `dist/` в корне репозитория: `Flow-Studio-1.0.0-mac-arm64.zip`, `Flow-Studio-1.0.0-mac-arm64.dmg` и соответствующие файлы `x64`.
+Обе архитектуры одной командой: `npm run dist:mac --prefix app`. Артефакты появляются в `dist/` в корне репозитория: `Flow-Studio-1.0.1-mac-arm64.zip`, `Flow-Studio-1.0.1-mac-arm64.dmg` и соответствующие файлы `x64`.
 
 `npm run check:release --prefix app` проверяет исходники и конфигурацию упаковки. Команды сборки выполняют эту проверку, затем проверяют состав, архитектуру и ad-hoc подпись полученного `.app`. Они не публикуют артефакты автоматически.
 

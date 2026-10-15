@@ -41,7 +41,7 @@ try {
     execFileSync('zip', ['-qr', file, folder, '-x', '*/.DS_Store'], { cwd: temporary });
     console.log(path.basename(file));
   }
-  const assets = fs.readdirSync(output).filter(file => /^Flow-Studio-.*\.(zip|dmg)$/.test(file)).sort();
+  const assets = fs.readdirSync(output).filter(file => file.startsWith(`Flow-Studio-${pkg.version}-`) && /\.(zip|dmg)$/.test(file)).sort();
   fs.writeFileSync(path.join(output, 'SHA256SUMS.txt'), assets.map(file => `${crypto.createHash('sha256').update(fs.readFileSync(path.join(output, file))).digest('hex')}  ${file}`).join('\n') + '\n');
   console.log('SHA256SUMS.txt');
 } finally {

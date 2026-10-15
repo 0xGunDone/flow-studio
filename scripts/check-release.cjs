@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { assertNoSecretLiteral } = require('./secret-patterns.cjs');
 
 const root = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
@@ -19,6 +20,7 @@ const forbidden = /(?:^|\/)(?:machine\.json|\.env(?:\..*)?|\.git|\.DS_Store|__py
 function checkText(name, bytes) {
   if (/\.(?:cjs|js|json|html|css|md|py|toml|txt|sh)$/.test(name)) {
     assert(!/\/Users\/[^/\s]+\//.test(bytes.toString('utf8')), `Personal absolute path: ${name}`);
+    assertNoSecretLiteral(name, bytes.toString('utf8'));
   }
 }
 
@@ -45,7 +47,7 @@ function checkResources(resources) {
   }
 }
 
-assert.equal(packageJson.version, '1.0.0');
+assert(/^\d+\.\d+\.\d+$/.test(packageJson.version), 'Release version must use major.minor.patch');
 assert.equal(packageJson.devDependencies.electron, '44.7.1');
 assert.equal(packageJson.devDependencies['electron-builder'], '26.15.3');
 assert.equal(config.appId, 'io.github.0xgundone.flowstudio');

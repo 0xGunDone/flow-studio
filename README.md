@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.0">Скачать для macOS</a> ·
+  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1">Скачать для macOS</a> ·
   <a href="https://github.com/0xGunDone/flow-studio/releases">Все релизы</a> ·
   <a href="docs/getting-started.md">Первый запуск</a> ·
   <a href="docs/mcp.md">Подключить MCP</a> ·
@@ -35,7 +35,7 @@
 Понадобятся **Google Chrome** и работающий Docker: **Docker Desktop** либо **Colima + Docker CLI + Docker Compose**. Для готового приложения Node.js и Python на Mac не нужны. Для MCP потребуется Node.js 22 или новее.
 
 1. Установите Chrome и выбранную среду Docker. Запустите Docker Desktop либо Colima.
-2. Откройте [релиз v1.0.0](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.0) и скачайте сборку для своего Mac: `arm64` для Apple Silicon, `x64` для Intel.
+2. Откройте [релиз v1.0.1](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1) и скачайте сборку для своего Mac: `arm64` для Apple Silicon, `x64` для Intel.
 3. Перенесите `Flow Studio.app` в папку `Applications` и откройте приложение. Для неподписанной сборки используйте штатное разрешение macOS в разделе «Конфиденциальность и безопасность», если система блокирует запуск. Подробности — в [руководстве](docs/getting-started.md#если-macos-блокирует-запуск).
 4. Дождитесь запуска движка. В первый раз Docker загружает зависимости и собирает локальный образ; требуется интернет и свободное место на диске.
 5. Откройте **Аккаунты → Войти в Google**. В отдельном окне Chrome войдите в аккаунт, откройте Flow, затем вернитесь в приложение и нажмите **Я вошёл**.

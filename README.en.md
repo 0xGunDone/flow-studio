@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.0">Download for macOS</a> ·
+  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1">Download for macOS</a> ·
   <a href="https://github.com/0xGunDone/flow-studio/releases">All releases</a> ·
   <a href="docs/mcp.md">MCP guide</a> ·
   <a href="README.md">Русский</a>
@@ -32,7 +32,7 @@ The interface and history run locally. Generation runs on Google's services and 
 Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker CLI and Docker Compose**. The desktop app does not require host Node.js or Python. MCP requires Node.js 22 or later.
 
 1. Install Chrome and start your Docker environment.
-2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.0): `arm64` for Apple Silicon or `x64` for Intel.
+2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1): `arm64` for Apple Silicon or `x64` for Intel.
 3. Move `Flow Studio.app` to `Applications` and open it. If macOS blocks this unsigned build, review it in **System Settings → Privacy & Security** and use the normal macOS approval flow only if you trust the download.
 4. Wait for the first Docker build. This downloads dependencies and needs internet access and free disk space.
 5. Open **Аккаунты → Войти в Google**. Sign in inside the Chrome window, open Flow, return to the app, and choose **Я вошёл**.

@@ -1,7 +1,7 @@
 {
   "name": "flow-studio",
   "productName": "Flow Studio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "main": "main.cjs",
   "description": "Local macOS studio for Google Flow image and video generation",
