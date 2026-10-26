@@ -12,15 +12,56 @@ test('MCP frame and reference inputs map to correct model payload',async t=>{
  const frames=await generationInput(runtime,{...base,model:runtime.models[0].id,startFramePath:start,endFramePath:end});
  assert.equal(frames.images[0],'data:image/png;base64,c3RhcnQ=');assert.equal(frames.images[1],'data:image/jpeg;base64,ZW5k');
  await assert.rejects(generationInput(runtime,{...base,model:runtime.models[0].id,endFramePath:end}),/startFramePath/);
- await assert.rejects(generationInput(runtime,{...base,model:runtime.models[1].id,referencePaths:Array(4).fill(start)}),/от 0 до 3/);
+ const omni=await generationInput(runtime,{...base,model:runtime.models[1].id,referencePaths:Array(7).fill(start)});
+ assert.equal(omni.images.length,7);
+ await assert.rejects(generationInput(runtime,{...base,model:runtime.models[1].id,referencePaths:Array(8).fill(start)}),/от 0 до 7/);
+ await assert.rejects(generationInput(runtime,{...base,model:runtime.models[2].id,referencePaths:Array(6).fill(start)}),/от 0 до 5/);
  await assert.rejects(generationInput(runtime,{...base,model:runtime.models[1].id,confirmCreditSpend:false}),/confirmCreditSpend/);
  assert.equal(capabilities(runtime.models[2]).resolution,'4K');
+ assert.equal(capabilities(runtime.models[0]).requiredTier,'Ultra');
+});
+test('Omni edit forwards source video path with image references and advertises input limits',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'flow-agent-edit-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const photo=path.join(dir,'photo.png'),video=path.join(dir,'source.MOV');
+ await fs.writeFile(photo,'image');await fs.writeFile(video,'fake video bytes; backend validates media');
+ const model={id:'omni-1.1-flash-edit-landscape'},runtime={models:[model]};
+ const params={model:model.id,prompt:'change light',requestId:'edit-one',confirmCreditSpend:true,videoPaths:[video]};
+ const info=capabilities(model);
+ assert.equal(info.mode,'edit');assert.equal(info.maxImages,5);assert.equal(info.maxVideos,1);assert.equal(info.maxReferences,6);assert.equal(info.supportsVideoReferences,true);
+ const input=await generationInput(runtime,{...params,referencePaths:Array(5).fill(photo)});
+ assert.equal(input.images,undefined);assert.equal(input.references.length,6);
+ assert.deepEqual(input.references[0],{kind:'image',dataUrl:'data:image/png;base64,aW1hZ2U='});
+ assert.deepEqual(input.references[5],{kind:'video',path:video});
+ assert.deepEqual((await generationInput(runtime,params)).references,[{kind:'video',path:video}]);
+ await assert.rejects(generationInput(runtime,{...params,videoPaths:undefined}),/исходное видео/);
+ await assert.rejects(generationInput(runtime,{...params,referencePaths:Array(6).fill(photo)}),/от 0 до 5/);
+ await assert.rejects(generationInput(runtime,{...params,videoPaths:[video,video]}),/не больше 1 видео/);
+ await assert.rejects(generationInput(runtime,{...params,startFramePath:photo}),/нельзя смешивать/);
+ await assert.rejects(generationInput(runtime,{...params,sourceVideoId:'existing-id'}),/sourceVideoId/);
+});
+test('video references reject unsupported models, invalid paths, directories, and oversized files',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'flow-agent-video-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const video=path.join(dir,'source.mp4'),huge=path.join(dir,'large.m4v'),directory=path.join(dir,'folder.mp4');
+ await fs.writeFile(video,'fake');await fs.writeFile(huge,'');await fs.truncate(huge,100*1024*1024+1);await fs.mkdir(directory);
+ const models=['omni-1.1-flash-edit-portrait','omni-1.1-flash','veo-3.1-fast-r2v-8s-landscape','veo-3.1-fast-i2v-8s-landscape','gemini-3.1-flash-image-landscape-4k'].map(id=>({id}));
+ const runtime={models},base={model:models[0].id,prompt:'edit',requestId:'video-test',confirmCreditSpend:true};
+ for(const model of models.slice(1))await assert.rejects(generationInput(runtime,{...base,model:model.id,videoPaths:[video]}),/только модель Omni/);
+ await assert.rejects(generationInput(runtime,{...base,videoPaths:'source.mp4'}),/массивом/);
+ await assert.rejects(generationInput(runtime,{...base,videoPaths:['relative.mp4']}),/абсолютным/);
+ await assert.rejects(generationInput(runtime,{...base,videoPaths:[path.join(dir,'bad.avi')]}),/MP4, MOV и M4V/);
+ for(const file of [huge,directory])await assert.rejects(generationInput(runtime,{...base,videoPaths:[file]}),/обычным файлом до 100 МБ/);
 });
 test('stable requestId never submits same paid task twice and rejects changed input',()=>{
  const runtime=new Runtime({});runtime.ready=true;runtime.models=[{id:'omni-1.1-flash'}];let count=0;runtime.runJob=async()=>{count++;};
  const p={model:'omni-1.1-flash',prompt:'move',requestId:'stable'};
  const a=runtime.generate(p),b=runtime.generate(p);assert.deepEqual(a,b);assert.equal(count,1);
  assert.throws(()=>runtime.generate({...p,prompt:'different'}),/другими параметрами/);
+});
+test('mixed references retain stable requestId dedup and reject changed source video',()=>{
+ const runtime=new Runtime({});runtime.ready=true;runtime.models=[{id:'omni-1.1-flash-edit-landscape'}];let count=0;runtime.runJob=async()=>{count++;};
+ const p={model:runtime.models[0].id,prompt:'edit',requestId:'stable-edit',references:[{kind:'image',dataUrl:'data:image/png;base64,aW1hZ2U='},{kind:'video',path:'/tmp/source.mp4'}]};
+ assert.deepEqual(runtime.generate(p),runtime.generate(p));assert.equal(count,1);
+ assert.throws(()=>runtime.generate({...p,references:[...p.references.slice(0,1),{kind:'video',path:'/tmp/different.mp4'}]}),/другими параметрами/);
 });
 test('bridge accepts only authenticated local requests, stores private discovery file',async t=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'flow-bridge-'));

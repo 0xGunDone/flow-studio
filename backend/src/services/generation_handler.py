@@ -20,6 +20,7 @@ from ..core.account_tiers import (
 )
 from .file_cache import FileCache
 from .flow_frontend import FlowFrontendAuthError
+from .video_inputs import read_video_reference
 
 
 def _video_poll_attempt_budget(
@@ -1180,8 +1181,7 @@ def _apply_current_flow_model_catalog():
             "allow_tier_upgrade": False,
         }
 
-    # Veo 3.1 Lite. 实测 2026-09：Pro 账号对 lite 全系（含 *_low_priority 变体）
-    # 均返回 MODEL_ACCESS_DENIED，veo 系需更高级别订阅；key 保持上游默认值。
+    # Current GetModels usages: 4s/6s Veo requires Ultra; 8s also supports Pro.
     for seconds, key in (
         (4, "veo_3_1_t2v_lite_4s"),
         (6, "veo_3_1_t2v_lite_6s"),
@@ -1194,20 +1194,20 @@ def _apply_current_flow_model_catalog():
                 f"Veo 3.1 - Lite · {seconds}s · {orientation}",
             )
 
-    # Veo 3.1 Fast. Current 4s/6s consumer access uses relaxed usage keys.
+    # Use exact GetModels usage keys; the old *_relaxed keys are unavailable.
     for seconds, landscape_key, portrait_key in (
-        (4, "veo_3_1_t2v_fast_4s_relaxed", "veo_3_1_t2v_fast_4s_relaxed"),
-        (6, "veo_3_1_t2v_fast_6s_relaxed", "veo_3_1_t2v_fast_6s_relaxed"),
+        (4, "veo_3_1_t2v_fast_4s", "veo_3_1_t2v_fast_4s"),
+        (6, "veo_3_1_t2v_fast_6s", "veo_3_1_t2v_fast_6s"),
         (8, "veo_3_1_t2v_fast", "veo_3_1_t2v_fast_portrait"),
     ):
         register(
             f"veo-3.1-fast-{seconds}s-landscape",
-            t2v(landscape_key, landscape),
+            {**t2v(landscape_key, landscape), "allow_tier_upgrade": seconds == 8},
             f"Veo 3.1 - Fast · {seconds}s · landscape",
         )
         register(
             f"veo-3.1-fast-{seconds}s-portrait",
-            t2v(portrait_key, portrait),
+            {**t2v(portrait_key, portrait), "allow_tier_upgrade": seconds == 8},
             f"Veo 3.1 - Fast · {seconds}s · portrait",
         )
 
@@ -1243,7 +1243,7 @@ def _apply_current_flow_model_catalog():
                     "aspect_ratio": ratio,
                     "supports_images": True,
                     "min_images": 0,
-                    "max_images": 3,
+                    "max_images": 7,
                     "use_v2_model_config": True,
                     "allow_tier_upgrade": False,
                 },
@@ -1255,13 +1255,13 @@ def _apply_current_flow_model_catalog():
         (
             4,
             "veo_3_1_i2v_s_lite_4s_fl",
-            "veo_3_1_i2v_s_fast_4s_fl_relaxed",
+            "veo_3_1_i2v_s_fast_4s_fl",
             "veo_3_1_i2v_s_quality_4s_fl",
         ),
         (
             6,
             "veo_3_1_i2v_s_lite_6s_fl",
-            "veo_3_1_i2v_s_fast_6s_fl_relaxed",
+            "veo_3_1_i2v_s_fast_6s_fl",
             "veo_3_1_i2v_s_quality_6s_fl",
         ),
     ):
@@ -1280,13 +1280,51 @@ def _apply_current_flow_model_catalog():
                     f"Veo 3.1 - {family.title()} I2V · {seconds}s · {orientation}",
                 )
 
+    for orientation, ratio, fast_key, quality_key in (
+        ("landscape", landscape, "veo_3_1_i2v_s_fast_fl", "veo_3_1_i2v_s_fl"),
+        ("portrait", portrait, "veo_3_1_i2v_s_fast_portrait_fl", "veo_3_1_i2v_s_portrait_fl"),
+    ):
+        for family, key in (
+            ("lite", "veo_3_1_interpolation_lite"),
+            ("fast", fast_key),
+            ("quality", quality_key),
+        ):
+            entry = i2v(key, ratio)
+            if family == "lite":
+                entry["start_model_key"] = "veo_3_1_i2v_lite"
+            elif family == "fast":
+                entry["allow_tier_upgrade"] = True
+            register(
+                f"veo-3.1-{family}-i2v-8s-{orientation}",
+                entry,
+                f"Veo 3.1 - {family.title()} I2V · 8s · {orientation}",
+            )
+
+        register(
+            f"omni-1.1-flash-edit-{orientation}",
+            {
+                "type": "video",
+                "video_type": "omni_edit",
+                "model_key": "abra_edit",
+                "aspect_ratio": ratio,
+                "supports_images": True,
+                "min_images": 0,
+                "max_images": 5,
+                "max_videos": 1,
+                "max_input_duration": 10,
+                "use_v2_model_config": True,
+                "allow_tier_upgrade": False,
+            },
+            f"Omni 1.1 Flash · Video Edit · {orientation}",
+        )
+
     for orientation, ratio, fast_key in (
         ("landscape", landscape, "veo_3_1_r2v_fast_landscape"),
         ("portrait", portrait, "veo_3_1_r2v_fast_portrait"),
     ):
         register(
             f"veo-3.1-fast-r2v-8s-{orientation}",
-            r2v(fast_key, ratio),
+            {**r2v(fast_key, ratio), "allow_tier_upgrade": True},
             f"Veo 3.1 - Fast R2V · 8s · {orientation}",
         )
         register(
@@ -1299,19 +1337,19 @@ def _apply_current_flow_model_catalog():
         (
             "landscape",
             landscape,
-            "veo_3_1_extend_fast_landscape_ultra_relaxed",
+            "veo_3_1_extend_fast_landscape",
             "veo_3_1_extend_landscape",
         ),
         (
             "portrait",
             portrait,
-            "veo_3_1_extend_fast_portrait_ultra_relaxed",
+            "veo_3_1_extend_fast_portrait",
             "veo_3_1_extend_portrait",
         ),
     ):
         register(
             f"veo-3.1-fast-extend-8s-{orientation}",
-            extend(fast_key, ratio),
+            {**extend(fast_key, ratio), "allow_tier_upgrade": True},
             f"Veo 3.1 - Fast Extend · {orientation}",
         )
         register(
@@ -1324,6 +1362,10 @@ def _apply_current_flow_model_catalog():
             extend("veo_3_1_extension_lite", ratio),
             f"Veo 3.1 - Lite Extend · {orientation}",
         )
+        MODEL_CONFIG[f"{fast_key}_ultra"] = {
+            **extend(f"{fast_key}_ultra", ratio),
+            "listed": False,
+        }
 
     register(
         "veo-3.1-lite",
@@ -1332,7 +1374,7 @@ def _apply_current_flow_model_catalog():
     )
     register(
         "veo-3.1-fast",
-        t2v("veo_3_1_t2v_fast", landscape),
+        {**t2v("veo_3_1_t2v_fast", landscape), "allow_tier_upgrade": True},
         "Veo 3.1 - Fast · 8s · landscape",
     )
     register(
@@ -1351,7 +1393,7 @@ def _apply_current_flow_model_catalog():
             "aspect_ratio": landscape,
             "supports_images": True,
             "min_images": 0,
-            "max_images": 3,
+            "max_images": 7,
             "use_v2_model_config": True,
             "allow_tier_upgrade": False,
         },
@@ -1572,6 +1614,7 @@ class GenerationHandler:
         stream: bool = False,
         base_url_override: Optional[str] = None,
         video_media_id: Optional[str] = None,
+        video_references: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1611,6 +1654,20 @@ class GenerationHandler:
             return
 
         model_config = MODEL_CONFIG[model]
+        loaded_videos = []
+        if video_references:
+            if model_config.get("video_type") != "omni_edit" or len(video_references) != 1 or video_media_id:
+                yield self._create_error_response("Видео-референс поддерживает только Omni Edit: один ролик и до пяти изображений.", status_code=400)
+                return
+            try:
+                loaded_videos = [await read_video_reference(video_references[0])]
+            except (ValueError, OSError, asyncio.TimeoutError) as error:
+                message = str(error) if isinstance(error, ValueError) else "Не удалось прочитать локальный видео-референс. Выберите файл заново."
+                yield self._create_error_response(message, status_code=400)
+                return
+        elif model_config.get("video_type") == "omni_edit":
+            yield self._create_error_response("Для Omni Edit добавьте одно исходное видео до 10 секунд.", status_code=400)
+            return
         generation_type = model_config["type"]
         video_type_for_op = model_config.get("video_type", "")
         request_operation = (
@@ -1825,6 +1882,7 @@ class GenerationHandler:
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state,
                     video_media_id=video_media_id,
+                    video_references=loaded_videos,
                 ):
                     yield chunk
             perf_trace["generation_pipeline_ms"] = int(
@@ -2474,6 +2532,7 @@ class GenerationHandler:
         request_log_state: Optional[Dict[str, Any]] = None,
         pending_token_state: Optional[Dict[str, bool]] = None,
         video_media_id: Optional[str] = None,
+        video_references: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncGenerator:
         """处理视频生成 (异步轮询)"""
 
@@ -2547,7 +2606,7 @@ class GenerationHandler:
                 image_count = 0
 
             # Omni: 无图走 T2V，有图走当前上游 Reference Images 直连链路
-            elif video_type == "omni":
+            elif video_type in {"omni", "omni_edit"}:
                 if max_images is not None and image_count > max_images:
                     error_msg = f"Модель Omni поддерживает не более {max_images} референсов. Передано: {image_count}."
                     if stream:
@@ -2580,6 +2639,22 @@ class GenerationHandler:
             start_media_id = None
             end_media_id = None
             reference_images = []
+            uploaded_video_id = None
+            if video_type == "omni_edit":
+                if not video_references or len(video_references) != 1:
+                    raise ValueError("Для Omni Edit нужно одно видео.")
+                video = video_references[0]
+                if stream:
+                    yield self._create_stream_chunk("Загрузка видео-референса…\n")
+                uploaded_video_id = await self.flow_client.upload_video(
+                    token.at, video["bytes"], video["filename"], video["mime_type"],
+                    project_id=project_id, token_id=token.id,
+                    google_cookies=getattr(token, "google_cookies", None),
+                )
+                # The native upload can rotate cookies; use the same account's latest snapshot.
+                refreshed = await self.db.get_token(token.id)
+                if refreshed and str(refreshed.login_account or refreshed.email).casefold() == str(token.login_account or token.email).casefold():
+                    token = refreshed
 
             # I2V: 首尾帧处理
             if video_type == "i2v" and images:
@@ -2648,7 +2723,7 @@ class GenerationHandler:
                 )
 
             # Omni R2V: 参考图上传到 project，随后走当前参考图视频 RPC
-            elif video_type == "omni" and images:
+            elif video_type in {"omni", "omni_edit"} and images:
                 if stream:
                     yield self._create_stream_chunk(
                         f"Загрузка референсов Omni: {image_count}…\n"
@@ -2679,7 +2754,16 @@ class GenerationHandler:
             submit_started_at = time.time()
 
             # I2V: 首尾帧生成
-            if video_type == "i2v" and start_media_id:
+            if video_type == "omni_edit" and uploaded_video_id:
+                result = await self.flow_client.generate_video_edit(
+                    token.at, project_id, prompt, model_config["model_key"],
+                    model_config["aspect_ratio"], uploaded_video_id,
+                    start_frame=0, end_frame=video_references[0]["end_frame"],
+                    reference_media_ids=[item["mediaId"] for item in reference_images],
+                    token_id=token.id, token_video_concurrency=token.video_concurrency,
+                    google_cookies=getattr(token, "google_cookies", None),
+                )
+            elif video_type == "i2v" and start_media_id:
                 if end_media_id:
                     # 有首尾帧
                     result = await self.flow_client.generate_video_start_end(
@@ -2700,7 +2784,7 @@ class GenerationHandler:
                     # 只有首帧 - 需要去掉 model_key 中的 _fl
                     # 情况1: _fl_ 在中间 (如 veo_3_1_i2v_s_fast_fl_ultra_relaxed -> veo_3_1_i2v_s_fast_ultra_relaxed)
                     # 情况2: _fl 在结尾 (如 veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_ultra)
-                    actual_model_key = model_config["model_key"].replace("_fl_", "_")
+                    actual_model_key = model_config.get("start_model_key") or model_config["model_key"].replace("_fl_", "_")
                     if actual_model_key.endswith("_fl"):
                         actual_model_key = actual_model_key[:-3]
                     debug_logger.log_info(

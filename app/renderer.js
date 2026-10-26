@@ -8,31 +8,56 @@ function modelInfo(model) {
   const i2v = /(?:-|_)(?:i2v|interpolation)(?:-|_)/.test(id);
   const r2v = /(?:-|_)r2v(?:-|_)/.test(id);
   const omni = /^omni[-_]/.test(id);
+  const edit = omni && /(?:-|_)edit(?:-|_)/.test(id);
   const aspect = /portrait/.test(id) ? '9:16' : /square/.test(id) ? '1:1' : /four-three/.test(id) ? '4:3' : /three-four/.test(id) ? '3:4' : /landscape/.test(id) || kind === 'video' ? '16:9' : '';
   const seconds = id.match(/(?:-|_)(\d+)s(?:-|_|$)/)?.[1] || description.match(/\b(\d+)s\b/)?.[1];
   const resolution = id.match(/(?:-|_)(2k|4k|1080p)(?:-|_|$)/i)?.[1].toUpperCase();
-  let name = description.split(' · ')[0].replace(' - ', ' ').replace(/\s+(?:I2V|R2V|Extend)$/, '');
+  let name = description.split(' · ')[0].replace(' - ', ' ').replace(/\s+(?:I2V|R2V|Extend|Edit)$/, '');
   if (/generation\s*-/.test(name)) name = id;
-  const operation = extend ? 'Продолжение' : i2v ? 'По кадрам' : r2v ? 'По образцам' : '';
-  const maxImages = kind === 'image' ? 5 : omni || r2v ? 3 : i2v ? (/interpolation/.test(id) ? 2 : /(?:_|-)i2v(?:_|-)lite(?:_|-)/.test(id) ? 1 : 2) : 0;
+  const operation = edit ? 'Редактирование' : extend ? 'Продолжение' : i2v ? 'По кадрам' : r2v ? 'По образцам' : '';
+  const maxImages = kind === 'image' ? 5 : omni ? edit ? 5 : 7 : r2v ? 3 : i2v ? (/interpolation/.test(id) ? 2 : /(?:_|-)i2v(?:_|-)lite(?:_|-)/.test(id) ? 1 : 2) : 0;
   const minImages = r2v || i2v ? (/interpolation/.test(id) ? 2 : 1) : 0;
-  const label = [name, operation, seconds ? `${seconds}\u00a0с` : '', aspect, resolution].filter(Boolean).join(' · ');
-  return { id, kind, extend, i2v, r2v, omni, maxImages, minImages, label, aspect, seconds, resolution };
+  const maxVideos = edit ? 1 : 0;
+  const maxReferences = maxImages + maxVideos;
+  const requiredTier = /^veo/.test(id) && ['4','6'].includes(seconds) ? 'Ultra' : '';
+  const label = [name, operation, seconds ? `${seconds}\u00a0с` : '', aspect, resolution, requiredTier].filter(Boolean).join(' · ');
+  return { id, kind, extend, i2v, r2v, omni, edit, maxImages, minImages, maxVideos, minVideos: edit ? 1 : 0, maxReferences, supportsVideoReferences: maxVideos > 0, requiredTier, label, aspect, seconds, resolution };
 }
 
-function requestFor(model, prompt, images, sourceVideoId) {
+function referenceKind(reference) {
+  return reference.kind || (/^data:video\//i.test(reference.dataUrl || '') ? 'video' : 'image');
+}
+
+function referenceError(info, references, required = false) {
+  const images = references.filter(reference => referenceKind(reference) === 'image');
+  const videos = references.filter(reference => referenceKind(reference) === 'video');
+  if (images.length + videos.length !== references.length) return 'Файл должен быть изображением или видео';
+  if (videos.length && !info.maxVideos) return info.omni ? 'Для видео выберите Omni Редактирование' : 'Эта модель не принимает видео. Выберите Omni Редактирование или удалите видео';
+  if (videos.length > info.maxVideos) return `Эта модель принимает не больше ${info.maxVideos} видео. Удалите лишние`;
+  if (videos.some(reference => typeof reference.path !== 'string' || !reference.path.trim())) return 'Не удалось прочитать исходное видео. Добавьте файл заново';
+  if (info.maxImages && images.length > info.maxImages) return `Эта модель принимает не больше ${info.maxImages} изображений. Удалите лишние`;
+  if (info.maxReferences && references.length > info.maxReferences) return `Эта модель принимает не больше ${info.maxReferences} исходных файлов. Удалите лишние`;
+  if (required && info.minVideos && videos.length < info.minVideos) return 'Добавьте исходное видео для редактирования';
+  if (required && images.length < info.minImages) return info.minImages === 2 ? 'Добавьте начальный и\u00a0конечный кадры' : 'Добавьте хотя бы одно исходное изображение';
+  return '';
+}
+
+function requestFor(model, prompt, references, sourceVideoId) {
   const info = modelInfo(model);
   if (!model?.id) throw new Error('Выберите модель');
   if (!prompt.trim()) throw new Error('Опишите, что хотите создать');
-  if (info.maxImages && images.length < info.minImages) throw new Error(info.minImages === 2 ? 'Добавьте начальный и\u00a0конечный кадры' : 'Добавьте хотя бы одно исходное изображение');
-  if (info.maxImages && images.length > info.maxImages) throw new Error(`Эта модель принимает не больше ${info.maxImages} изображений. Удалите лишние`);
+  const invalid = referenceError(info, references, true);
+  if (invalid) throw new Error(invalid);
   if (info.extend && !sourceVideoId.trim()) throw new Error('Укажите ID исходного видео из Flow');
-  return { model: model.id, prompt: prompt.trim(), images: info.maxImages ? images.map(item => item.dataUrl) : [], ...(info.extend ? { sourceVideoId: sourceVideoId.trim() } : {}) };
+  const inputs = references.some(reference => referenceKind(reference) === 'video')
+    ? { references: references.map(reference => referenceKind(reference) === 'video' ? { kind: 'video', path: reference.path } : { kind: 'image', dataUrl: reference.dataUrl }) }
+    : { images: info.maxImages ? references.map(reference => reference.dataUrl) : [] };
+  return { model: model.id, prompt: prompt.trim(), ...inputs, ...(info.extend ? { sourceVideoId: sourceVideoId.trim() } : {}) };
 }
 
 function mediaUrl(url) {
   if (typeof url !== 'string') return '';
-  if (/^(?:flow-media:\/\/|https:\/\/|data:image\/|blob:)/i.test(url)) return url;
+  if (/^(?:flow-media:\/\/|flow-input:\/\/|https:\/\/|data:(?:image|video)\/|blob:)/i.test(url)) return url;
   try {
     const parsed = new URL(url);
     return parsed.origin === 'http://127.0.0.1:38000' && parsed.pathname.startsWith('/tmp/') && !parsed.username && !parsed.password ? url : '';
@@ -171,28 +196,47 @@ function initialize() {
     const info = modelInfo(selectedModel());
     $('source-field').hidden = !info.extend;
     $('source-video-id').required = info.extend;
-    $('references-field').hidden = !info.maxImages || !selectedModel();
-    $('model-description').textContent = !selectedModel() ? '' : info.extend ? 'Продолжает исходное видео по вашему запросу' : info.i2v ? 'Первое изображение — начальный кадр, второе — конечный' : info.r2v ? 'Использует изображения как образцы для видео' : info.omni ? 'По тексту или по тексту с изображениями' : info.kind === 'image' ? 'По тексту или с исходными изображениями' : 'Видео по текстовому описанию';
-    $('references-hint').textContent = info.i2v ? 'Порядок изображений задает начальный и конечный кадры' : info.minImages ? `От ${info.minImages} до ${info.maxImages} изображений` : `До ${info.maxImages} изображений, если нужны`;
+    $('pick-images-label').textContent = info.supportsVideoReferences ? 'Добавить фото или видео' : 'Добавить изображения';
+    $('model-description').textContent = !selectedModel() ? '' : info.edit ? 'Редактирует исходное видео по вашему запросу и образцам' : info.extend ? 'Продолжает исходное видео по вашему запросу' : info.i2v ? 'Первое изображение — начальный кадр, второе — конечный' : info.r2v ? 'Использует изображения как образцы для видео' : info.omni ? 'По тексту или по тексту с изображениями' : info.kind === 'image' ? 'По тексту или с исходными изображениями' : 'Видео по текстовому описанию';
+    $('references-hint').textContent = info.edit ? '1 исходное видео MP4, MOV или M4V до 10 с и до 5 изображений. Порядок образцов сохраняется' : info.i2v ? 'Порядок изображений задает начальный и конечный кадры' : info.minImages ? `От ${info.minImages} до ${info.maxImages} изображений` : info.maxImages ? `До ${info.maxImages} изображений, если нужны` : 'Эта модель не использует исходные изображения';
     renderReferences();
-    setError('form-error', '');
+    setError('form-error', referenceError(info, state.references));
     updateGenerate();
   }
   function renderReferences() {
     const info = modelInfo(selectedModel());
     $('references').replaceChildren();
-    $('references-count').textContent = `${state.references.length} / ${info.maxImages}`;
+    const videos = state.references.filter(reference => referenceKind(reference) === 'video').length;
+    const images = state.references.length - videos;
+    $('references-field').hidden = !selectedModel() || (!info.maxReferences && !state.references.length);
+    $('references-label').textContent = info.supportsVideoReferences || videos ? 'Исходные фото и видео' : 'Исходные изображения';
+    $('references-count').textContent = info.maxVideos || videos ? `${images} / ${info.maxImages} фото · ${videos} / ${info.maxVideos} видео` : `${images} / ${info.maxImages}`;
+    function changed() { renderReferences(); setError('form-error', referenceError(info, state.references)); }
     state.references.forEach((reference, index) => {
       const item = element('figure', 'reference');
-      const image = element('img');
-      image.src = mediaUrl(reference.dataUrl);
-      image.alt = reference.name;
-      const remove = button('×', '', () => { state.references.splice(index, 1); renderReferences(); setError('form-error', ''); });
+      item.setAttribute('role', 'listitem');
+      const video = referenceKind(reference) === 'video';
+      const preview = element(video ? 'video' : 'img');
+      preview.src = mediaUrl(video ? reference.previewUrl : reference.dataUrl);
+      if (video) { preview.controls = true; preview.muted = true; preview.preload = 'metadata'; preview.setAttribute('aria-label', reference.name); }
+      else preview.alt = reference.name;
+      const remove = button('×', 'reference-remove', () => { state.references.splice(index, 1); changed(); });
       remove.setAttribute('aria-label', `Удалить ${reference.name}`);
-      item.append(image, element('figcaption', '', info.i2v ? index ? 'Конечный кадр' : 'Начальный кадр' : reference.name), remove);
+      const caption = element('figcaption');
+      const name = element('span', 'reference-name', reference.name);
+      name.title = reference.name;
+      caption.append(name, element('span', 'reference-kind', info.i2v && !video ? index ? 'Конечный кадр' : 'Начальный кадр' : video ? 'Видео' : 'Изображение'));
+      const actions = element('div', 'reference-actions');
+      for (const [offset, symbol, label] of [[-1, '←', 'Переместить влево'], [1, '→', 'Переместить вправо']]) {
+        const move = button(symbol, 'secondary', () => { const target = index + offset; if (target < 0 || target >= state.references.length) return; [state.references[index], state.references[target]] = [state.references[target], state.references[index]]; changed(); });
+        move.disabled = index + offset < 0 || index + offset >= state.references.length;
+        move.setAttribute('aria-label', `${label}: ${reference.name}`);
+        actions.append(move);
+      }
+      item.append(preview, caption, actions, remove);
       $('references').append(item);
     });
-    $('pick-images').disabled = state.references.length >= info.maxImages;
+    $('pick-images').disabled = state.references.length >= info.maxReferences;
   }
   function emptyResult() {
     const empty = element('div', 'empty-result');
@@ -494,10 +538,12 @@ function initialize() {
   $('pick-images').addEventListener('click', async () => {
     $('pick-images').disabled = true;
     try {
-      const images = await api.pickImages();
-      const limit = modelInfo(selectedModel()).maxImages;
-      const unique = images.filter(image => !state.references.some(existing => existing.dataUrl === image.dataUrl));
-      if (state.references.length + unique.length > limit) setError('form-error', `Не удалось добавить изображения: эта модель принимает не больше ${limit}. Выберите меньше файлов`);
+      const references = await api.pickImages({ allowVideos: modelInfo(selectedModel()).supportsVideoReferences });
+      const key = reference => referenceKind(reference) === 'video' ? `video:${reference.path}` : `image:${reference.dataUrl}`;
+      const seen = new Set(state.references.map(key));
+      const unique = references.filter(reference => { const value = key(reference); if (seen.has(value)) return false; seen.add(value); return true; });
+      const invalid = referenceError(modelInfo(selectedModel()), [...state.references, ...unique]);
+      if (invalid) setError('form-error', invalid);
       else { state.references.push(...unique); setError('form-error', ''); }
     } catch (error) { setError('form-error', errorMessage(error)); }
     finally { renderReferences(); }

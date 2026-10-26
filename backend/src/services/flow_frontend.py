@@ -5,7 +5,7 @@ import random
 import re
 import uuid
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 from curl_cffi import CurlInfo
 from curl_cffi.requests import AsyncSession, Cookies
@@ -254,13 +254,13 @@ class FlowFrontendMixin:
         if not normalized:
             return None
         if "4K" in normalized:
-            return 4
-        if "1080" in normalized:
             return 3
-        if "720" in normalized:
+        if "1080" in normalized:
             return 2
-        if "360" in normalized:
+        if "720" in normalized:
             return 1
+        if "360" in normalized:
+            return 4
         return None
 
     @classmethod
@@ -331,6 +331,8 @@ class FlowFrontendMixin:
         start_media_id: Optional[str] = None,
         end_media_id: Optional[str] = None,
         video_media_id: Optional[str] = None,
+        start_frame: int = 0,
+        end_frame: Optional[int] = None,
         resolution: Optional[str] = None,
         output_spec: Optional[Any] = None,
     ) -> tuple[str, List[Any]]:
@@ -339,9 +341,27 @@ class FlowFrontendMixin:
         aspect_value = self._map_frontend_video_aspect_ratio(aspect_ratio)
         metadata = self._frontend_generation_metadata(session_id)
         resolution_value = self._frontend_video_resolution(resolution)
+        resolution_message = [resolution_value] if resolution_value not in {None, 1} else None
         normalized_mode = str(mode or "text").strip().lower()
 
-        if normalized_mode == "references":
+        if normalized_mode == "edit":
+            rpc_id = "jIps6"
+            request = [
+                [None, str(video_media_id or "").strip(), start_frame, end_frame],
+                prompt_message,
+                model_key,
+                aspect_value,
+                metadata,
+                output_spec,
+                None,
+                None,
+                [self._frontend_media_reference(media_id) for media_id in (reference_media_ids or [])] or None,
+                None,
+                None,
+                None,
+                resolution_message,
+            ]
+        elif normalized_mode == "references":
             references = [
                 self._frontend_media_reference(media_id)
                 for media_id in (reference_media_ids or [])
@@ -360,7 +380,7 @@ class FlowFrontendMixin:
                 output_spec,
                 None,
                 None,
-                resolution_value,
+                resolution_message,
             ]
         elif normalized_mode == "start_end":
             rpc_id = "nprQif"
@@ -387,7 +407,7 @@ class FlowFrontendMixin:
                 None,
                 None,
                 output_spec,
-                resolution_value,
+                resolution_message,
             ]
         elif normalized_mode == "extend":
             rpc_id = "fZytfe"
@@ -426,7 +446,7 @@ class FlowFrontendMixin:
                 metadata,
                 None,
                 output_spec,
-                resolution_value,
+                resolution_message,
             ]
         return rpc_id, [
             [request],
@@ -687,6 +707,111 @@ class FlowFrontendMixin:
                 f"Flow frontend bootstrap failed: HTTP {response.status_code}"
             )
         return response.text
+
+    @staticmethod
+    def _flow_video_upload_url(value: str) -> str:
+        url = urljoin("https://flow.google.com/", str(value or ""))
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https" or parsed.hostname != "flow.google.com"
+            or parsed.port not in {None, 443} or parsed.username or parsed.password
+            or parsed.fragment or not parsed.path.startswith("/upload/")
+        ):
+            raise RuntimeError("Flow video upload returned an unsupported upload URL")
+        return url
+
+    async def _upload_flow_frontend_video(
+        self, *, project_id: str, video_bytes: bytes, filename: str,
+        mime_type: str, cookie_storage: str, timeout: int,
+        session_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Use Flow's native Scotty upload; send original video bytes unchanged."""
+        page_url = self._build_flow_frontend_project_page_url(project_id)
+        cookie_header = serialize_cookie_header_for_url(cookie_storage, page_url)
+        if not cookie_header:
+            raise RuntimeError("Flow video upload requires Google session cookies")
+        cookie_jar = Cookies(_cookie_jar(cookie_storage))
+        bootstrap = await self._load_flow_frontend_bootstrap(
+            page_url, cookie_header, timeout, cookie_jar=cookie_jar,
+        )
+        if session_context is not None and session_context.get("expected_email"):
+            email = extract_flow_account_email(bootstrap).casefold()
+            if email != str(session_context["expected_email"]).strip().casefold():
+                raise FlowFrontendAuthError("Аккаунт Flow не совпадает с аккаунтом токена.")
+        proxy_url = None
+        if self.proxy_manager:
+            get_proxy = getattr(self.proxy_manager, "get_request_proxy_url", None)
+            proxy_url = await (get_proxy() if get_proxy else self.proxy_manager.get_proxy_url())
+        fingerprint = self.get_request_fingerprint() or {}
+        if "proxy_url" in fingerprint:
+            proxy_url = str(fingerprint.get("proxy_url") or "").strip() or None
+        headers = {
+            "Accept": "*/*", "Origin": "https://flow.google.com",
+            "Referer": page_url, "User-Agent": self._get_effective_request_user_agent(),
+            "Slug": quote(filename, safe=""),
+        }
+        # qcb/SCOTTY_UPLOADER_FACTORY reads XSRF-TOKEN from document.cookie.
+        # This is distinct from the batchexecute WIZ_global_data.SNlM0e token.
+        scoped_cookies = serialize_cookie_header_for_url(
+            _export_cookie_jar(cookie_jar.jar, cookie_storage), page_url,
+        )
+        for cookie in scoped_cookies.split(";"):
+            name, separator, value = cookie.strip().partition("=")
+            if separator and name == "XSRF-TOKEN":
+                headers["X-Framework-Xsrf-Token"] = unquote(value).strip('"')
+                break
+        start_headers = {
+            **headers, "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(len(video_bytes)),
+        }
+        async with AsyncSession(
+            trust_env=False, cookies=cookie_jar, curl_infos=[CurlInfo.COOKIELIST],
+        ) as session:
+            async def post(url, body, request_headers):
+                # curl_cffi copies Cookies at session construction. Replace its
+                # snapshot too, so cookies deleted by Scotty cannot reappear.
+                session.cookies = cookie_jar
+                response = await session.post(
+                    url, data=body, headers=request_headers, proxy=proxy_url,
+                    timeout=timeout, impersonate=self._resolve_runtime_impersonate(),
+                    allow_redirects=False,
+                )
+                self._update_flow_frontend_cookie_jar(cookie_jar, response)
+                if response.status_code == 401:
+                    raise FlowFrontendAuthError("Google Flow отклонил авторизацию загрузки видео (code=401).")
+                if not 200 <= response.status_code < 300:
+                    raise RuntimeError(f"Flow video upload failed: HTTP {response.status_code}")
+                return response
+
+            start = await post(
+                f"https://flow.google.com/upload/v1/flow/upload/video/{quote(project_id, safe='')}",
+                b"", start_headers,
+            )
+            upload_url = next((value for name, value in start.headers.items()
+                               if name.lower() == "x-goog-upload-url"), "")
+            if not upload_url:
+                raise RuntimeError("Flow video upload response missing X-Goog-Upload-URL")
+            final = await post(self._flow_video_upload_url(upload_url), video_bytes, {
+                **headers, "Content-Type": mime_type,
+                "X-Goog-Upload-Command": "upload, finalize", "X-Goog-Upload-Offset": "0",
+            })
+        try:
+            result = json.loads(final.text)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Flow video upload returned invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise RuntimeError("Flow video upload returned invalid media")
+        media = result.get("media") or {}
+        media_id = result.get("mediaId") or result.get("media_id")
+        if not media_id and isinstance(media, dict):
+            media_id = media.get("name")
+        media_id = str(media_id or "").rstrip("/").rsplit("/", 1)[-1]
+        if not self._is_uuid(media_id):
+            raise RuntimeError("Flow video upload response missing mediaId")
+        if session_context is not None:
+            session_context["google_cookies"] = _export_cookie_jar(cookie_jar.jar, cookie_storage)
+        return media_id
 
     async def _call_flow_frontend_rpc(
         self,

@@ -35,7 +35,7 @@ class VeoLiteModelResolverTests(unittest.TestCase):
     def test_current_aliases_use_live_upstream_keys(self):
         self.assertEqual(
             MODEL_CONFIG["veo-3.1-fast-4s-landscape"]["model_key"],
-            "veo_3_1_t2v_fast_4s_relaxed",
+            "veo_3_1_t2v_fast_4s",
         )
         self.assertEqual(
             MODEL_CONFIG["omni-1.1-flash-4s-landscape"]["model_key"],

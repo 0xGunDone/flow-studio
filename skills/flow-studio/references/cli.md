@@ -21,7 +21,7 @@ Pass exactly one allowlisted method and a JSON object. Preserve stdout as struct
 | --- | --- | --- |
 | `flow_studio_status` | `status` | `{}` |
 | `flow_studio_list_models` | `models` | Optional `kind`, `mode`, `query` |
-| `flow_studio_generate` | `generate` | `model`, `prompt`, `confirmCreditSpend`, UUID `requestId`; optional `referencePaths`, `startFramePath`, `endFramePath`, `sourceVideoId` |
+| `flow_studio_generate` | `generate` | `model`, `prompt`, `confirmCreditSpend`, UUID `requestId`; optional `referencePaths`, `videoPaths` (Omni Edit only), `startFramePath`, `endFramePath`, `sourceVideoId` |
 | `flow_studio_get_job` | `job` | `jobId` |
 | `flow_studio_wait_job` | `wait` | `jobId`; optional `timeoutSeconds` from 0 to 30 |
 | `flow_studio_list_jobs` | `history` | Optional `limit` from 1 to 100 |

@@ -37,13 +37,21 @@ test('current catalog models expose format, duration, and correct input requirem
   assert.equal(image.label, 'Nano Banana 2 Lite · 3:4 · 4K');
   assert.equal(image.maxImages, 5);
   const video = modelInfo({ id: 'veo-3.1-fast-i2v-6s-portrait', description: 'Veo 3.1 - Fast I2V · 6s · portrait' });
-  assert.equal(video.label, 'Veo 3.1 Fast · По кадрам · 6\u00a0с · 9:16');
+  assert.equal(video.label, 'Veo 3.1 Fast · По кадрам · 6\u00a0с · 9:16 · Ultra');
   assert.equal(video.kind, 'video');
   assert.equal(video.minImages, 1);
   assert.equal(video.maxImages, 2);
   assert.equal(modelInfo({ id: 'veo-3.1-lite-i2v-4s-landscape' }).maxImages, 2);
   assert.equal(modelInfo({ id: 'veo-3.1-fast-r2v-8s-landscape' }).minImages, 1);
-  assert.equal(modelInfo({ id: 'omni-1.1-flash-10s-portrait' }).maxImages, 3);
+  assert.equal(modelInfo({ id: 'omni-1.1-flash-10s-portrait' }).maxImages, 7);
+  const edit = modelInfo({ id: 'omni-1.1-flash-edit-landscape', description: 'Omni 1.1 Flash Edit' });
+  assert.equal(edit.label, 'Omni 1.1 Flash · Редактирование · 16:9');
+  assert.equal(edit.maxImages, 5);
+  assert.equal(edit.maxVideos, 1);
+  assert.equal(edit.minVideos, 1);
+  assert.equal(edit.maxReferences, 6);
+  assert.equal(edit.supportsVideoReferences, true);
+  assert.equal(modelInfo({ id: 'veo-3.1-fast-r2v-8s-landscape' }).supportsVideoReferences, false);
   assert.equal(modelInfo({ id: 'veo-3.1-fast-8s-landscape' }).maxImages, 0);
   assert.equal(modelInfo({ id: 'veo-3.1-fast-extend-8s-landscape' }).extend, true);
 });
@@ -61,8 +69,27 @@ test('generation payload validates exact model needs and excludes irrelevant inp
   assert.deepEqual(requestFor(extend, 'Prompt', [ref], ' source '), { model: extend.id, prompt: 'Prompt', images: [], sourceVideoId: 'source' });
 });
 
+test('mixed references keep their order and videos require Omni editing', () => {
+  const image = { name: 'one.png', dataUrl: 'data:image/png;base64,abc' };
+  const second = { kind: 'image', name: 'two.jpg', dataUrl: 'data:image/jpeg;base64,def' };
+  const video = { kind: 'video', name: 'source.mov', path: '/chosen/source.mov', previewUrl: 'flow-input://source-id' };
+  const edit = { id: 'omni-1.1-flash-edit-landscape' };
+  assert.deepEqual(requestFor(edit, ' Edit this ', [second, video, image], ''), { model: edit.id, prompt: 'Edit this', references: [{ kind: 'image', dataUrl: second.dataUrl }, { kind: 'video', path: video.path }, { kind: 'image', dataUrl: image.dataUrl }] });
+  assert.throws(() => requestFor(edit, 'Prompt', [image], ''), /исходное видео/);
+  assert.throws(() => requestFor(edit, 'Prompt', [video, video], ''), /не больше 1 видео/);
+  assert.throws(() => requestFor(edit, 'Prompt', [video, ...Array(6).fill(image)], ''), /не больше 5 изображений/);
+  assert.throws(() => requestFor(edit, 'Prompt', [{ kind: 'video', name: 'missing.mp4' }], ''), /Добавьте файл заново/);
+  for (const id of ['veo-3.1-fast-r2v-8s-landscape', 'veo-3.1-fast-i2v-6s-portrait', 'veo-3.1-fast-extend-8s-landscape', 'veo-3.1-fast-8s-landscape']) assert.throws(() => requestFor({ id }, 'Prompt', [video, image], 'source'), /не принимает видео/);
+  const omni = { id: 'omni-1.1-flash-10s-landscape' };
+  assert.throws(() => requestFor(omni, 'Prompt', [video], ''), /Для видео выберите Omni Редактирование/);
+  assert.equal(requestFor(omni, 'Prompt', Array(7).fill(image), '').images.length, 7);
+  assert.throws(() => requestFor(omni, 'Prompt', Array(8).fill(image), ''), /не больше 7/);
+});
+
 test('media previews accept only intended media protocols', () => {
   assert.equal(mediaUrl('flow-media://job/0'), 'flow-media://job/0');
+  assert.equal(mediaUrl('flow-input://source-id'), 'flow-input://source-id');
+  assert.equal(mediaUrl('data:video/mp4;base64,YQ=='), 'data:video/mp4;base64,YQ==');
   assert.equal(mediaUrl('https://example.com/result.png'), 'https://example.com/result.png');
   assert.equal(mediaUrl('http://127.0.0.1:38000/tmp/result.mp4'), 'http://127.0.0.1:38000/tmp/result.mp4');
   assert.equal(mediaUrl('http://127.0.0.1:38000/api/tokens'), '');
@@ -121,6 +148,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   let completionCall = 0;
   const reconnected = [];
   const checked = [];
+  const pickerOptions = [];
   let saved = 0;
   const copied = [];
   let saveResult = null;
@@ -128,11 +156,14 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   const snapshot = { ready: true, message: 'Готово', models: [
     { id: 'gemini-3.1-flash-image-landscape', description: 'Nano Banana 2.1' },
     { id: 'veo-3.1-fast-i2v-6s-portrait', description: 'Veo 3.1 - Fast I2V · 6s · portrait' },
-    { id: 'veo-3.1-fast-extend-8s-landscape', description: 'Veo 3.1 - Fast Extend · landscape' }
+    { id: 'veo-3.1-fast-extend-8s-landscape', description: 'Veo 3.1 - Fast Extend · landscape' },
+    { id: 'omni-1.1-flash-edit-landscape', description: 'Omni 1.1 Flash Edit' },
+    { id: 'veo-3.1-fast-r2v-8s-landscape', description: 'Veo 3.1 - Fast R2V · 8s · landscape' },
+    { id: 'omni-1.1-flash-10s-landscape', description: 'Omni 1.1 Flash · 10s · landscape' }
   ], accounts: [{ id: 9, email: 'user@example.com', credits: 250, isActive: true, videoEnabled: true }], history: [], login: null };
   const bridge = {
     onEvent: callback => { eventHandler = callback; return () => {}; }, bootstrap: async () => snapshot,
-    pickImages: async () => picked, addAccount: async () => { loginCall++; return { state: 'waiting', canComplete: true, message: 'Войдите в Google' }; },
+    pickImages: async options => { pickerOptions.push(options); return picked; }, addAccount: async () => { loginCall++; return { state: 'waiting', canComplete: true, message: 'Войдите в Google' }; },
     reconnectAccount: async accountId => { reconnected.push(accountId); return { state: 'waiting', method: 'chrome', accountId, canComplete: true, completeLabel: 'Проверить подключение', message: 'Откройте Flow в вашем Chrome и войдите в user@example.com' }; },
     checkAccount: async accountId => { checked.push(accountId); return { ok: true, accountId, checkedAt: new Date().toISOString() }; },
     completeLogin: async () => { completionCall++; assert.equal(byId('complete-login').disabled, true); return { state: 'syncing', message: 'Проверяем вход' }; },
@@ -284,4 +315,51 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(reconnected.length, 1, 'Ambiguous account requires user selection');
   assert.match(byId('recovery-account').textContent, /Выберите нужный аккаунт/);
   assert.equal(generated.length, 2, 'Checking and completing login never spend generation credits');
+
+  await videoMode.dispatch('change');
+  byId('model').value = snapshot.models[3].id;
+  await byId('model').dispatch('change');
+  assert.equal(byId('pick-images-label').textContent, 'Добавить фото или видео');
+  assert.match(byId('references-hint').textContent, /до 10 с/);
+  picked = [
+    { name: 'source.mov', kind: 'video', path: '/chosen/source.mov', previewUrl: 'flow-input://source-id' },
+    { name: 'second.png', kind: 'image', dataUrl: 'data:image/png;base64,c2Vjb25k' },
+    { name: 'third.png', kind: 'image', dataUrl: 'data:image/png;base64,dGhpcmQ=' }
+  ];
+  await byId('pick-images').dispatch('click');
+  assert.equal(pickerOptions.at(-1).allowVideos, true);
+  assert.equal(byId('references').children.length, 4, 'Existing reference and several mixed files stay selected');
+  assert.equal(byId('references-count').textContent, '3 / 5 фото · 1 / 1 видео');
+  const referenceNodes = () => descendants(byId('references'));
+  const referenceButton = label => referenceNodes().find(node => node.tagName === 'BUTTON' && node.attributes['aria-label'] === label);
+  const videoPreview = referenceNodes().find(node => node.tagName === 'VIDEO');
+  assert.equal(videoPreview.src, 'flow-input://source-id');
+  assert.equal(videoPreview.controls, true);
+  assert.equal(videoPreview.muted, true);
+  assert.equal(videoPreview.preload, 'metadata');
+  assert.equal(referenceNodes().filter(node => node.tagName === 'IMG').length, 3);
+  await referenceButton('Переместить влево: source.mov').dispatch('click');
+  await referenceButton('Переместить вправо: second.png').dispatch('click');
+  assert.deepEqual(byId('references').children.map(node => descendants(node).find(child => child.className === 'reference-name').textContent), ['source.mov', 'input.png', 'third.png', 'second.png']);
+  await referenceButton('Удалить third.png').dispatch('click');
+  assert.equal(byId('references-count').textContent, '2 / 5 фото · 1 / 1 видео');
+  await byId('generation-form').dispatch('submit');
+  assert.equal(generated.length, 3);
+  assert.deepEqual(JSON.parse(JSON.stringify(generated[2])), { model: snapshot.models[3].id, prompt: 'Current editor draft', references: [{ kind: 'video', path: '/chosen/source.mov' }, { kind: 'image', dataUrl: 'data:image/png;base64,aGVsbG8=' }, { kind: 'image', dataUrl: 'data:image/png;base64,c2Vjb25k' }] });
+  assert.equal(Object.hasOwn(generated[2], 'images'), false, 'Mixed request never also sends images');
+  eventHandler({ type: 'job', job: { id: 'job-3', model: snapshot.models[3].id, kind: 'video', prompt: 'Current editor draft', status: 'failed', error: 'TEST_DONE', media: [] } });
+  byId('model').value = snapshot.models[4].id;
+  await byId('model').dispatch('change');
+  assert.equal(byId('references').children.length, 3, 'Switching models preserves every selected file');
+  assert.match(byId('form-error').textContent, /не принимает видео/);
+  assert.equal(byId('pick-images-label').textContent, 'Добавить изображения');
+  await byId('generation-form').dispatch('submit');
+  assert.equal(generated.length, 3, 'Veo cannot silently drop source video and submit images');
+  byId('model').value = snapshot.models[5].id;
+  await byId('model').dispatch('change');
+  assert.match(byId('form-error').textContent, /Для видео выберите Omni Редактирование/);
+  await referenceButton('Удалить source.mov').dispatch('click');
+  assert.equal(byId('form-error').hidden, true);
+  assert.equal(byId('references-count').textContent, '2 / 7');
+  assert.equal(byId('references-label').textContent, 'Исходные изображения');
 });

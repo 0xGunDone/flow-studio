@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1">Download for macOS</a> ·
+  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.1.0">Download for macOS</a> ·
   <a href="https://github.com/0xGunDone/flow-studio/releases">All releases</a> ·
   <a href="docs/mcp.md">MCP guide</a> ·
   <a href="README.md">Русский</a>
@@ -20,19 +20,25 @@
 
 - Text-to-image, editing and image references, subject to each model's limits.
 - Text-to-video, reference-guided video, start/end frames, and video extension on supported models.
+- Up to 7 image references for Omni; a separate Omni Edit model accepts a source video and up to 5 images.
+- Multiple file selection, image/video previews, arrow controls to reorder references, and individual removal.
 - Multiple Google accounts with separate managed Chrome profiles and explicit reauthentication.
 - Local previews, export, Finder integration, and the latest 100 jobs in persistent history.
 - A local MCP server exposing 13 tools for models, jobs, media, and accounts.
 - Bundled Flow2API source, built into a local Docker image on first launch.
 
-The interface and history run locally. Generation runs on Google's services and may spend your Google Flow credits. Prompts, input images, and session data are sent to the service. A model appearing in the catalog does not guarantee access under your plan.
+The interface and history run locally. Generation runs on Google's services and may spend your Google Flow credits. Prompts, input images/videos, and session data are sent to the service. A model appearing in the catalog does not guarantee access under your plan.
+
+Omni Edit accepts MP4, MOV, or M4V up to 10 seconds and 100 MB. Google's current editing mode accepts one source video, so multiple videos in one request are not supported. The app uploads the video itself without extracting frames.
+
+The current Veo catalog requires Google AI Ultra for 4- and 6-second variants; Pro users should choose an available 8-second variant. Eight-second frame models are available for Lite, Fast, and Quality. Check the current catalog and Google's [model feature table](https://support.google.com/flow/answer/16352836) and [frames and references guide](https://support.google.com/flow/answer/16353334) as availability changes.
 
 ## Install
 
-Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker CLI and Docker Compose**. The desktop app does not require host Node.js or Python. MCP requires Node.js 22 or later.
+Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker CLI and Docker Compose**. The desktop app does not require host Node.js, Python, or FFmpeg: video validation uses `ffprobe` inside the container. MCP requires Node.js 22 or later.
 
 1. Install Chrome and start your Docker environment.
-2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.0.1): `arm64` for Apple Silicon or `x64` for Intel.
+2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.1.0): `arm64` for Apple Silicon or `x64` for Intel.
 3. Move `Flow Studio.app` to `Applications` and open it. If macOS blocks this unsigned build, review it in **System Settings → Privacy & Security** and use the normal macOS approval flow only if you trust the download.
 4. Wait for the first Docker build. This downloads dependencies and needs internet access and free disk space.
 5. Open **Аккаунты → Войти в Google**. Sign in inside the Chrome window, open Flow, return to the app, and choose **Я вошёл**.

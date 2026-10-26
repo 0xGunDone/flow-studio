@@ -70,7 +70,9 @@ codex mcp add flow-studio -- node /absolute/path/flow-studio/app/mcp-server.cjs
 5. Для успешной задачи вызовите `flow_studio_save_result`. Родительская папка `outputPath` должна существовать. Поле `index` выбирает результат с нуля; по умолчанию используется первый. Существующий файл не перезаписывается без `overwrite: true`.
 6. Верните пользователю сохраненный файл. Открывайте Finder только по запросу пользователя.
 
-В каталоге `mode: "references"` относится к видеомоделям по образцам. Модели изображений могут принимать референсы, оставаясь в `mode: "text"`; проверяйте `maxImages`. Параметры формата кадра, разрешения и длительности задает ID модели — отдельных полей для них у `generate` нет.
+В каталоге `mode: "references"` относится к видеомоделям по образцам, `mode: "edit"` — к Omni Edit. Модели изображений могут принимать референсы, оставаясь в `mode: "text"`. Проверяйте `minImages`, `maxImages`, `maxVideos`, `maxReferences`, `supportsVideoReferences`, `supportsStartFrame`, `supportsEndFrame` и `requiredTier`. Параметры формата кадра, разрешения и длительности задает ID модели — отдельных полей для них у `generate` нет.
+
+Варианты Veo на 4 и 6 секунд требуют Google AI Ultra; на Pro они недоступны. Варианты «По кадрам» на 8 секунд есть у Lite, Fast и Quality. Наличие модели в каталоге не гарантирует доступ аккаунта. [Официальные возможности моделей Google](https://support.google.com/flow/answer/16352836), [кадры и образцы](https://support.google.com/flow/answer/16353334).
 
 ### Текст и референсы
 
@@ -86,7 +88,24 @@ codex mcp add flow-studio -- node /absolute/path/flow-studio/app/mcp-server.cjs
 }
 ```
 
-Для запроса только по тексту уберите `referencePaths`. Для изображения разрешено до пяти референсов, для видео — до трех, всегда с учетом более строгого лимита модели. Входные форматы: PNG, JPEG, WebP, GIF, до 20 МБ каждый. URL и base64 вместо локальных путей не принимаются.
+Для запроса только по тексту уберите `referencePaths`. Лимиты изображений: до пяти для генерации изображений, до трех для Veo по образцам и до семи для обычного Omni, с учетом более строгого лимита модели. Входные форматы: PNG, JPEG, WebP, GIF, до 20 МБ каждый. URL и base64 вместо локальных путей не принимаются.
+
+### Редактирование исходного видео в Omni
+
+```json
+{
+  "model": "<OMNI_EDIT_MODEL_ID_FROM_LIST_MODELS>",
+  "prompt": "<USER_PROMPT>",
+  "videoPaths": ["/absolute/path/source.mp4"],
+  "referencePaths": ["/absolute/path/style.png", "/absolute/path/subject.jpg"],
+  "confirmCreditSpend": true,
+  "requestId": "<NEW_UUID>"
+}
+```
+
+Omni Edit требует один путь в `videoPaths` и принимает до пяти необязательных изображений в `referencePaths`. Порядок изображений сохраняется. Для исходного видео поддерживаются MP4, MOV и M4V до 10 секунд и 100 МБ. Приложение загружает сам видеофайл; извлечение кадров не используется. Обычный Omni и Veo поле `videoPaths` не принимают.
+
+Проверка длительности выполняется через `ffprobe` в контейнере. FFmpeg на Mac для этого не нужен.
 
 ### Начальный и конечный кадры
 
@@ -115,7 +134,7 @@ codex mcp add flow-studio -- node /absolute/path/flow-studio/app/mcp-server.cjs
 }
 ```
 
-Возьмите `sourceVideoId` из проверенного `media[index].mediaGenerationId` существующей задачи или получите ID исходного видео от пользователя. `jobId` — локальная задача Flow Studio, он не подходит. Поля `referencePaths`, кадры и `sourceVideoId` взаимно исключают друг друга.
+Возьмите `sourceVideoId` из проверенного `media[index].mediaGenerationId` существующей задачи или получите ID исходного видео от пользователя. `jobId` — локальная задача Flow Studio, он не подходит. Группа референсов (`referencePaths` и, для Omni Edit, `videoPaths`), поля кадров и `sourceVideoId` взаимно исключают друг друга.
 
 ## Повторы, ошибки и отмена
 

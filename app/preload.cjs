@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld('flowStudio',{
   bootstrap:()=>ipcRenderer.invoke('studio:bootstrap'),
   retryStartup:()=>ipcRenderer.invoke('studio:retryStartup'),
   generate:input=>ipcRenderer.invoke('studio:generate',input),
-  pickImages:()=>ipcRenderer.invoke('studio:pickImages'),
+  pickImages:options=>ipcRenderer.invoke('studio:pickImages',options),
   addAccount:()=>ipcRenderer.invoke('studio:addAccount'),
   reconnectAccount:id=>ipcRenderer.invoke('studio:reconnectAccount',id),
   checkAccount:id=>ipcRenderer.invoke('studio:checkAccount',id),

@@ -62,6 +62,9 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   }
   const generate = tools.find(tool => tool.name === 'flow_studio_generate');
   assert.equal(generate.inputSchema.properties.confirmCreditSpend.const, true);
+  assert.equal(generate.inputSchema.properties.referencePaths.maxItems, 7);
+  assert.equal(generate.inputSchema.properties.videoPaths.maxItems, 1);
+  assert.ok(tools.find(tool => tool.name === 'flow_studio_list_models').inputSchema.properties.mode.enum.includes('edit'));
   assert.ok(generate.inputSchema.required.includes('requestId'));
   assert.equal(generate.annotations.idempotentHint, true);
   const status = await client.callTool({ name: 'flow_studio_status', arguments: {} });
@@ -76,6 +79,16 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
     { ...valid, referencePaths: ['/tmp/reference.png'], startFramePath: '/tmp/start.png' },
     { ...valid, endFramePath: '/tmp/end.png' },
     { ...valid, referencePaths: ['https://example.com/image.png'] },
+    { ...valid, referencePaths: Array(8).fill('/tmp/image.png') },
+    { ...valid, videoPaths: ['/tmp/source.mp4'] },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape' },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.mp4'], referencePaths: Array(6).fill('/tmp/image.png') },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.mp4', '/tmp/second.mov'] },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['relative.mp4'] },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['https://example.com/source.mp4'] },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.avi'] },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.mp4'], startFramePath: '/tmp/start.png' },
+    { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.mp4'], sourceVideoId: 'source-id' },
   ]) {
     const result = await client.callTool({ name: 'flow_studio_generate', arguments: args });
     assert.equal(result.isError, true);
@@ -84,6 +97,12 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   const started = await client.callTool({ name: 'flow_studio_generate', arguments: valid });
   assert.equal(started.structuredContent.jobId, 'fake-job');
   assert.deepEqual(bridge.calls[1], { method: 'generate', params: valid });
+  const mixed = { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.MOV'], referencePaths: Array(5).fill('/tmp/image.png'), requestId: 'fake-edit-id' };
+  assert.equal((await client.callTool({ name: 'flow_studio_generate', arguments: mixed })).isError, undefined);
+  assert.deepEqual(bridge.calls[2], { method: 'generate', params: mixed });
+  const images = { ...valid, model: 'omni-1.1-flash-8s-landscape', referencePaths: Array(7).fill('/tmp/image.png'), requestId: 'fake-seven-id' };
+  assert.equal((await client.callTool({ name: 'flow_studio_generate', arguments: images })).isError, undefined);
+  assert.deepEqual(bridge.calls[3], { method: 'generate', params: images });
   const unknown = await client.callTool({ name: 'flow_studio_arbitrary_method', arguments: {} });
   assert.equal(unknown.isError, true);
   assert.equal(stderr, '', 'stdio server must emit no diagnostic noise during normal calls');

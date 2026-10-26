@@ -7,7 +7,7 @@ const {modelInfo}=require('./renderer.js');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 function capabilities(model){
  const info=modelInfo(model);
- return {id:model.id,description:info.label,kind:info.kind,mode:info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,aspectRatio:info.aspect,durationSeconds:info.seconds?Number(info.seconds):undefined,resolution:info.resolution||undefined,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1};
+ return {id:model.id,description:info.label,kind:info.kind,mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:info.aspect,durationSeconds:info.seconds?Number(info.seconds):undefined,resolution:info.resolution||undefined,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1};
 }
 function externalJob(job){
  const {requestHash,...result}=job;
@@ -27,27 +27,39 @@ async function readReference(file){
  if(!['png','jpeg','webp','gif'].includes(mime))throw new Error('Поддерживаются PNG, JPEG, WebP и GIF.');
  return 'data:image/'+mime+';base64,'+(await fs.readFile(file)).toString('base64');
 }
+async function videoReference(file){
+ if(typeof file!=='string'||!path.isAbsolute(file)||file.includes('\0'))throw new Error('Путь видео должен быть абсолютным.');
+ if(!/\.(mp4|mov|m4v)$/i.test(file))throw new Error('Поддерживаются MP4, MOV и M4V.');
+ const stat=await fs.stat(file);
+ if(!stat.isFile()||stat.size>100*1024*1024)throw new Error('Видео должно быть обычным файлом до 100 МБ.');
+ return {kind:'video',path:file};
+}
 async function generationInput(runtime,params){
  if(params.confirmCreditSpend!==true)throw new Error('Генерация расходует кредиты. Требуется confirmCreditSpend:true для запроса пользователя.');
  if(typeof params.requestId!=='string'||!params.requestId.trim()||params.requestId.length>128)throw new Error('Укажите стабильный requestId длиной до 128 символов.');
  if(typeof params.prompt!=='string'||!params.prompt.trim()||params.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
  const model=runtime.models.find(m=>m.id===params.model);
  if(!model)throw new Error('Модель отсутствует в текущем каталоге. Сначала вызовите list_models.');
- const info=capabilities(model),refs=params.referencePaths||[];
+ const info=capabilities(model),refs=params.referencePaths||[],videos=params.videoPaths||[];
  if(!Array.isArray(refs))throw new Error('referencePaths должен быть массивом путей.');
+ if(!Array.isArray(videos))throw new Error('videoPaths должен быть массивом путей.');
  const hasFrames=!!(params.startFramePath||params.endFramePath);
- if(refs.length&&hasFrames)throw new Error('Референсы и начальный/конечный кадры нельзя смешивать.');
+ if((refs.length||videos.length)&&hasFrames)throw new Error('Референсы и начальный/конечный кадры нельзя смешивать.');
+ if(videos.length&&!info.supportsVideoReferences)throw new Error('Видео принимает только модель Omni Редактирование.');
+ if(videos.length>info.maxVideos)throw new Error('Модель принимает не больше '+info.maxVideos+' видео.');
+ if(info.mode==='edit'&&videos.length!==1)throw new Error('Для редактирования укажите одно исходное видео в videoPaths.');
  if(info.mode==='frames'){
   if(refs.length||!params.startFramePath)throw new Error('Для этой модели укажите startFramePath и при необходимости endFramePath.');
  }else if(hasFrames)throw new Error('Начальный и конечный кадры поддерживают только модели I2V.');
  if(params.endFramePath&&!params.startFramePath)throw new Error('Конечный кадр требует начального.');
  if(info.mode==='extend'){
-  if(refs.length||hasFrames||typeof params.sourceVideoId!=='string'||!params.sourceVideoId.trim())throw new Error('Продление требует sourceVideoId и не принимает изображения.');
+  if(refs.length||videos.length||hasFrames||typeof params.sourceVideoId!=='string'||!params.sourceVideoId.trim())throw new Error('Продление требует sourceVideoId и не принимает референсы.');
  }else if(params.sourceVideoId)throw new Error('sourceVideoId предназначен для моделей продления.');
  const files=hasFrames?[params.startFramePath,...(params.endFramePath?[params.endFramePath]:[])]:refs;
  if(files.length<info.minImages||files.length>info.maxImages)throw new Error('Модель принимает от '+info.minImages+' до '+info.maxImages+' изображений.');
  const images=await Promise.all(files.map(readReference));
- return {model:params.model,prompt:params.prompt,images,sourceVideoId:params.sourceVideoId,requestId:params.requestId.trim()};
+ const inputs=videos.length?{references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...await Promise.all(videos.map(videoReference))]}:{images};
+ return {model:params.model,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId,requestId:params.requestId.trim()};
 }
 function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell}){
  const jobById=id=>{const job=runtime.jobs.find(j=>j.id===id);if(!job)throw new Error('Задача не найдена.');return job;};

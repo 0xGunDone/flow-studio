@@ -6,6 +6,8 @@ const {promisify} = require('node:util');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const {Readable} = require('node:stream');
+const {modelInfo}=require('./renderer.js');
+const {stageVideo}=require('./input-files.cjs');
 const exec = promisify(execFile);
 const BASE = 'http://127.0.0.1:38000';
 const COMMAND_ENV = {...process.env, PATH:[process.env.PATH,'/opt/homebrew/bin','/usr/local/bin','/Applications/Docker.app/Contents/Resources/bin','/usr/bin','/bin','/usr/sbin','/sbin'].filter(Boolean).join(':')};
@@ -215,9 +217,14 @@ class Runtime {
     if(!this.ready)throw new Error('Генератор ещё запускается.');
     if(!input||!this.models.some(m=>m.id===input.model))throw new Error('Выберите доступную модель.');
     if(typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
-    const images=input.images||[];
-    if(!Array.isArray(images)||images.length>5||images.some(s=>typeof s!=='string'||s.length>28*1024*1024||!/^data:image\/(?:png|jpeg|webp|gif);base64,/.test(s)))throw new Error('Поддерживаются до пяти изображений PNG, JPEG, WebP или GIF, не более 20 МБ каждое.');
-    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,sourceVideoId:input.sourceVideoId||''})).digest('hex');
+    const info=modelInfo(this.models.find(m=>m.id===input.model));
+    if(input.images&&input.references)throw new Error('Передайте images или references.');
+    const refs=input.references||(input.images||[]).map(dataUrl=>({kind:'image',dataUrl}));
+    if(!Array.isArray(refs)||refs.length>7||refs.some(r=>!r||!['image','video'].includes(r.kind)))throw new Error('Некорректные референсы.');
+    const images=refs.filter(r=>r.kind==='image').map(r=>r.dataUrl),videos=refs.filter(r=>r.kind==='video').map(r=>r.path);
+    if(images.length>info.maxImages||images.some(s=>typeof s!=='string'||s.length>28*1024*1024||!/^data:image\/(?:png|jpeg|webp|gif);base64,/.test(s)))throw new Error('Слишком много изображений или неверный формат. Изображение: до 20 МБ.');
+    if(videos.length>(info.maxVideos||0)||videos.some(p=>typeof p!=='string'||!path.isAbsolute(p)||! /\.(mp4|mov|m4v)$/i.test(p))||info.edit&&videos.length!==1)throw new Error('Для редактирования Omni нужно одно видео MP4/MOV/M4V до 10 секунд и до 100 МБ.');
+    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||''})).digest('hex');
     if(input.requestId){
       const existing=this.jobs.find(j=>j.requestId===input.requestId);
       if(existing){if(existing.requestHash!==requestHash)throw new Error('requestId уже использован с другими параметрами.');return {jobId:existing.id};}
@@ -225,12 +232,13 @@ class Runtime {
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
     const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{})};
     this.jobs.unshift(job);this.emitJob(job);
-    this.runJob(job,images,input.sourceVideoId).catch(()=>{});
+    this.runJob(job,images,input.sourceVideoId,videos).catch(()=>{});
     return {jobId:id};
   }
-  async runJob(job,images,sourceVideoId){
+  async runJob(job,images,sourceVideoId,videos=[]){
     const start=Date.now(),controller=new AbortController();this.aborts.set(job.id,controller);
     const timer=setTimeout(()=>controller.abort(),35*60*1000);
+    const staged=[];
     try{
       const content=[{type:'text',text:job.prompt},...images.map(url=>({type:'image_url',image_url:{url}}))];
       if(/(?:-|_)extend(?:-|_)/.test(job.model)){
@@ -240,8 +248,9 @@ class Runtime {
       await this.persist();
       await this.start();
       if(!this.ready)throw new Error(this.message);
+      for(const file of videos)staged.push(await stageVideo(file,path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs')));
       this.credentials=await readCredentials(this.databasePath,this.composePath);
-      const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true},this.credentials.apiKey,controller.signal);
+      const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true,...(staged.length?{video_references:staged.map(x=>x.reference)}:{})},this.credentials.apiKey,controller.signal);
       const media=await consumeGeneration(response,text=>{job.progress=text;this.emitJob(job);},account=>{job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);});
       job.media=media;
       for(let i=0;i<media.length;i++){
@@ -250,6 +259,7 @@ class Runtime {
       job.status='succeeded';job.progress='Готово';
     }catch(e){job.status='failed';job.error=job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
     finally{
+      for(const file of staged)await fs.unlink(file.target).catch(()=>{});
       clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});await this.refreshAccounts().catch(()=>{});
     }
   }

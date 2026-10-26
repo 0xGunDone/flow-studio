@@ -1,6 +1,6 @@
 ---
 name: flow-studio
-description: Use the local Flow Studio app to generate images or videos, work with image references or start/end frames, inspect jobs and models, save results, or add Google accounts when the user chooses Flow Studio or invokes this skill. Generic image requests keep the built-in image_gen route.
+description: Use the local Flow Studio app to generate images or videos, edit a source video with optional image references, work with start/end frames, inspect jobs and models, save results, or add Google accounts when the user chooses Flow Studio or invokes this skill. Generic image requests keep the built-in image_gen route.
 ---
 
 # Flow Studio
@@ -13,7 +13,7 @@ This skill is the selected generation route when the user explicitly chooses Flo
 
 Discover tools whose names end in the `flow_studio_*` names below. If the MCP server is not loaded in this session, use the same app bridge through the CLI in [references/cli.md](references/cli.md); a Codex restart is not required for that fallback.
 
-Before choosing a model, call `flow_studio_status` and `flow_studio_list_models` with the required `kind` and, when useful, `mode`. Use the returned exact model ID and constraints, never a remembered model list. Useful filters: `kind: "image" | "video"`, `mode: "text" | "references" | "frames" | "extend"`, and `query`. For image references, query `kind: "image"` and inspect `maxImages`: image models can accept references while reporting `mode: "text"`. The `references` mode identifies video reference models.
+Before choosing a model, call `flow_studio_status` and `flow_studio_list_models` with the required `kind` and, when useful, `mode`. Use the returned exact model ID and constraints, never a remembered model list. Useful filters: `kind: "image" | "video"`, `mode: "text" | "references" | "frames" | "extend" | "edit"`, and `query`. For image references, query `kind: "image"` and inspect `maxImages`: image models can accept references while reporting `mode: "text"`. The `references` mode identifies video generation from image references; `edit` identifies editing an uploaded source video.
 
 The catalog reports configured capabilities; it does **not** prove that the active Google account can access a model or has enough credits. Preserve a user-chosen model. If it is absent or unavailable, explain the returned state and ask for their choice before substituting another model.
 
@@ -30,13 +30,14 @@ The catalog reports configured capabilities; it does **not** prove that the acti
 | Text to image or video | No reference/frame/source fields |
 | Image generation/edit or reference-guided video | `referencePaths: ["/absolute/image.png", ...]`, in the user's reference order |
 | Image to video | `startFramePath`, with optional `endFramePath` only when supported |
+| Edit a source video with Omni | `videoPaths: ["/absolute/source.mp4"]`, optionally with up to five `referencePaths` images |
 | Extend an existing video | `sourceVideoId` from a verified existing source, only for an `extend` model |
 
 For extension of a previous result, read `flow_studio_get_job` and reuse the chosen `media[index].mediaGenerationId` as `sourceVideoId`. The app's `jobId` identifies a local job, not the Google source video. If no source media ID is available, obtain the existing video ID from the user instead of guessing.
 
-`referencePaths`, frame inputs, and `sourceVideoId` are mutually exclusive. Start/end frames are distinct roles: start is required for frame mode; end follows start and is required when the model reports `minImages: 2`, otherwise optional when supported. Do not turn ordinary references into boundary frames. When the roles cannot be inferred from the request, ask which image is start and which is end before spending credits.
+References (`referencePaths` and `videoPaths`), frame inputs, and `sourceVideoId` are mutually exclusive input forms. Only Omni Edit accepts `videoPaths`: one source video is required, with optional image references. Ordinary Omni accepts up to seven image references and no source video. Start/end frames are distinct roles: start is required for frame mode; end follows start and is required when the model reports `minImages: 2`, otherwise optional when supported. Do not turn ordinary references into boundary frames. When the roles cannot be inferred from the request, ask which image is start and which is end before spending credits.
 
-Inputs must be local PNG, JPEG, WebP, or GIF files, at most 20 MB each. Respect returned `minImages`, `maxImages`, `supportsStartFrame`, and `supportsEndFrame`, plus bridge limits of five image-generation references or three video references. The model ID carries its advertised aspect ratio, duration, and resolution; `generate` does not accept extra settings. Select a matching catalog model or explain the unavailable combination.
+Images must be local PNG, JPEG, WebP, or GIF files, at most 20 MB each. Omni Edit source videos must be local MP4, MOV, or M4V files, at most 100 MB and 10 seconds. The app validates video duration and media before upload; pass the local path, never read or encode the video as base64. Respect returned `minImages`, `maxImages`, `maxVideos`, `maxReferences`, `supportsVideoReferences`, `supportsStartFrame`, `supportsEndFrame`, and `requiredTier`. Image generation accepts up to five images, Veo R2V up to three, ordinary Omni up to seven, and Omni Edit one video plus up to five images. Veo 4s/6s requires Ultra; select an 8s model only if it matches the user's request or they approve the change. The model ID carries its advertised aspect ratio, duration, and resolution; `generate` does not accept extra settings. Select a matching catalog model or explain the unavailable combination.
 
 Open the saved location with `flow_studio_open_result_folder` only when the user asks to show/open its folder. Saving does not itself authorize opening Finder.
 

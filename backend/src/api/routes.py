@@ -90,6 +90,7 @@ class NormalizedGenerationRequest:
     images: List[bytes]
     messages: Optional[List[ChatMessage]] = None
     video_media_id: Optional[str] = None
+    video_references: Optional[List[Dict[str, Any]]] = None
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -467,6 +468,7 @@ async def _normalize_openai_request(
             images=images,
             messages=request.messages,
             video_media_id=video_media_id,
+            video_references=request.video_references,
         )
 
     if request.contents:
@@ -519,6 +521,7 @@ async def _collect_non_stream_result(
     images: List[bytes],
     base_url_override: Optional[str] = None,
     video_media_id: Optional[str] = None,
+    video_references: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -529,6 +532,7 @@ async def _collect_non_stream_result(
         stream=False,
         base_url_override=base_url_override,
         video_media_id=video_media_id,
+        **({"video_references": video_references} if video_references else {}),
     ):
         result = chunk
 
@@ -760,6 +764,7 @@ async def _iterate_openai_stream(
         stream=True,
         base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
+        **({"video_references": normalized.video_references} if normalized.video_references else {}),
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -911,6 +916,7 @@ async def create_chat_completion(
                 normalized.images,
                 base_url_override=request_base_url,
                 video_media_id=normalized.video_media_id,
+                video_references=normalized.video_references,
             )
         )
         return _build_openai_json_response(payload)

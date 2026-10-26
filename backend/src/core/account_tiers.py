@@ -1,6 +1,7 @@
 """Account tier and model capability helpers."""
 
 from typing import Optional
+import re
 
 
 PAYGATE_TIER_NOT_PAID = "PAYGATE_TIER_NOT_PAID"
@@ -41,6 +42,10 @@ def get_required_paygate_tier_for_model(model_name: Optional[str]) -> str:
     normalized = (model_name or "").strip().lower()
     if not normalized:
         return PAYGATE_TIER_NOT_PAID
+
+    # Current Flow GetModels exposes Veo 4s/6s usages only to service tier 3 (Ultra).
+    if normalized.startswith("veo") and re.search(r"(?:-|_)(?:4|6)s(?:-|_|$)", normalized):
+        return PAYGATE_TIER_TWO
 
     if (
         normalized.endswith("-4k")

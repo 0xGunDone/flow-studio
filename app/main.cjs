@@ -6,7 +6,7 @@ const {pathToFileURL}=require('node:url');
 const {Runtime}=require('./runtime.cjs');
 const {saveWithDialog,revealSaved}=require('./exports.cjs');
 const {startAgentBridge,createAgentActions}=require('./agent-bridge.cjs');
-protocol.registerSchemesAsPrivileged([{scheme:'flow-media',privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}}]);
+protocol.registerSchemesAsPrivileged(['flow-media','flow-input'].map(scheme=>({scheme,privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}})));
 let window,runtime,accountManager,recoveryManager,managedAccounts,agentBridge,loginState=null,quitting=false;
 app.setName('Flow Studio');
 if(!app.requestSingleInstanceLock()){app.quit();}
@@ -42,6 +42,12 @@ app.whenReady().then(async()=>{
   if(!file||!Number.isInteger(index)||index<0)return new Response('Not found',{status:404});
   return net.fetch(pathToFileURL(file).href,{headers:request.headers});
  });
+ const inputFiles=new Map();
+ protocol.handle('flow-input',request=>{
+  const url=new URL(request.url),file=inputFiles.get(url.hostname);
+  if(!file||url.pathname!=='/')return new Response('Not found',{status:404});
+  return net.fetch(pathToFileURL(file).href,{headers:request.headers});
+ });
  const localPage=pathToFileURL(path.join(__dirname,'index.html')).href;
  const handle=(name,fn)=>ipcMain.handle('studio:'+name,(event,...args)=>{
   if(event.sender!==window?.webContents||event.senderFrame?.url!==localPage)throw new Error('Недопустимый источник запроса');
@@ -60,16 +66,24 @@ app.whenReady().then(async()=>{
   if(typeof text!=='string'||text.length>20000)throw new Error('Не удалось скопировать текст.');
   clipboard.writeText(text);return {copied:true};
  });
- handle('pickImages',async()=>{
-  const result=await dialog.showOpenDialog(window,{title:'Выбрать изображения',properties:['openFile','multiSelections'],filters:[{name:'Изображения',extensions:['png','jpg','jpeg','webp','gif']}]});
+ handle('pickImages',async(options={})=>{
+  const allowVideos=options?.allowVideos===true;
+  const result=await dialog.showOpenDialog(window,{title:allowVideos?'Выбрать фото и видео':'Выбрать изображения',properties:['openFile','multiSelections'],filters:[{name:allowVideos?'Фото и видео':'Изображения',extensions:['png','jpg','jpeg','webp','gif',...(allowVideos?['mp4','mov','m4v']:[])]}]});
   if(result.canceled)return[];
-  if(result.filePaths.length>5)throw new Error('Выберите не больше пяти изображений.');
+  if(result.filePaths.length>7)throw new Error('Выберите не больше семи файлов.');
   const items=[];
   for(const file of result.filePaths){
-   const stat=await fs.stat(file);if(stat.size>20*1024*1024)throw new Error('Изображение больше 20 МБ.');
+   const stat=await fs.stat(file);if(!stat.isFile())throw new Error('Выберите обычный файл.');
    const ext=path.extname(file).slice(1).toLowerCase(),mime=ext==='jpg'?'jpeg':ext;
+   if(allowVideos&&['mp4','mov','m4v'].includes(ext)){
+    if(stat.size>100*1024*1024)throw new Error('Видео больше 100 МБ.');
+    if(inputFiles.size>=100)inputFiles.delete(inputFiles.keys().next().value);
+    const id=require('node:crypto').randomUUID();inputFiles.set(id,file);
+    items.push({kind:'video',name:path.basename(file),path:file,previewUrl:'flow-input://'+id+'/'});continue;
+   }
+   if(stat.size>20*1024*1024)throw new Error('Изображение больше 20 МБ.');
    if(!['jpeg','png','webp','gif'].includes(mime))throw new Error('Неподдерживаемый формат изображения.');
-   items.push({name:path.basename(file),dataUrl:'data:image/'+mime+';base64,'+(await fs.readFile(file)).toString('base64')});
+   items.push({kind:'image',name:path.basename(file),dataUrl:'data:image/'+mime+';base64,'+(await fs.readFile(file)).toString('base64')});
   }return items;
  });
  handle('revealFile',file=>revealSaved({runtime,shell},file));

@@ -17,6 +17,11 @@ from .browser_cookie_utils import validate_flow_cookie_storage
 
 class CurrentFlowClientMixin:
     FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
+    @staticmethod
+    def _frontend_paygate_tier(payload: Any) -> str:
+        # GetCredits field 4 is serviceTier; a positive credit balance proves no subscription.
+        tier = payload[3] if isinstance(payload, list) and len(payload) > 3 else None
+        return {2: "PAYGATE_TIER_ONE", 3: "PAYGATE_TIER_TWO"}.get(tier, "PAYGATE_TIER_NOT_PAID")
     CURRENT_IMAGE_MODELS = frozenset({"BELUGA", "HARBOR_SEAL", "GEM_PIX_2"})
 
     def _get_runtime_config(self):
@@ -149,7 +154,7 @@ class CurrentFlowClientMixin:
             "expires": (datetime.now(timezone.utc) + timedelta(minutes=55)).isoformat().replace("+00:00", "Z"),
             "email": context["email"], "user": {"email": context["email"]},
             "google_cookies": cookies, "credits": int(credits),
-            "userPaygateTier": "PAYGATE_TIER_ONE" if credits > 0 else "PAYGATE_TIER_NOT_PAID",
+            "userPaygateTier": self._frontend_paygate_tier(payload),
         }
 
     async def st_to_at(
@@ -231,9 +236,7 @@ class CurrentFlowClientMixin:
         )
         return {
             "credits": credits,
-            "userPaygateTier": (
-                "PAYGATE_TIER_ONE" if credits > 0 else "PAYGATE_TIER_NOT_PAID"
-            ),
+            "userPaygateTier": self._frontend_paygate_tier(payload),
             "frontendRpc": "nzlxg",
         }
 
@@ -377,6 +380,43 @@ class CurrentFlowClientMixin:
             return media_id
         finally:
             await self._notify_browser_captcha_request_finished(browser_id)
+
+    async def upload_video(
+        self, at: str, video_bytes: bytes, filename: str, mime_type: str,
+        project_id: str, token_id: Optional[int] = None,
+        google_cookies: Optional[str] = None,
+    ) -> str:
+        if not self._is_uuid(project_id):
+            raise ValueError("Flow video upload requires a valid project_id")
+        if not isinstance(video_bytes, bytes) or not 0 < len(video_bytes) <= 100 * 1024 * 1024:
+            raise ValueError("Видео должно быть не пустым и не больше 100 МБ.")
+        extensions = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v"}
+        extension = "." + str(filename or "").rsplit(".", 1)[-1].lower()
+        if (
+            not isinstance(filename, str) or not 1 <= len(filename) <= 256
+            or re.search(r"[\x00-\x1f\x7f/\\]", filename)
+            or extensions.get(extension) != mime_type
+        ):
+            raise ValueError("Поддерживаются видео MP4, MOV и M4V с корректным именем файла.")
+        cookie_storage = await self._resolve_flow_frontend_cookie_storage(
+            google_cookies=google_cookies, token_id=token_id,
+        )
+        context = {}
+        if token_id is not None and self.db is not None:
+            token = await self.db.get_token(int(token_id))
+            if token:
+                context["expected_email"] = getattr(token, "login_account", "") or token.email
+        media_id = await self._upload_flow_frontend_video(
+            project_id=project_id, video_bytes=video_bytes, filename=filename,
+            mime_type=mime_type, cookie_storage=cookie_storage,
+            timeout=max(self._get_control_plane_timeout(), 300), session_context=context,
+        )
+        refreshed_cookies = context.get("google_cookies")
+        if token_id is not None and self.db is not None and refreshed_cookies:
+            await self.db.update_token_if_cookie_matches(
+                token_id, cookie_storage, google_cookies=refreshed_cookies,
+            )
+        return media_id
 
     async def generate_image(
         self,
@@ -552,10 +592,12 @@ class CurrentFlowClientMixin:
         start_media_id: Optional[str] = None,
         end_media_id: Optional[str] = None,
         video_media_id: Optional[str] = None,
+        start_frame: int = 0,
+        end_frame: Optional[int] = None,
         resolution: Optional[str] = None,
     ) -> dict:
         await self._frontend_cookie(google_cookies, token_id)
-        max_retries = max(1, int(self._get_runtime_config().flow_max_retries or 1))
+        max_retries = 1 if mode == "edit" else max(1, int(self._get_runtime_config().flow_max_retries or 1))
         last_error: Optional[Exception] = None
         for retry_attempt in range(max_retries):
             browser_id = None
@@ -582,6 +624,8 @@ class CurrentFlowClientMixin:
                     start_media_id=start_media_id,
                     end_media_id=end_media_id,
                     video_media_id=video_media_id,
+                    start_frame=start_frame,
+                    end_frame=end_frame,
                     resolution=resolution,
                 )
                 payload = await self._current_rpc(
@@ -662,6 +706,35 @@ class CurrentFlowClientMixin:
             token_id=token_id,
             token_video_concurrency=token_video_concurrency,
             google_cookies=google_cookies,
+        )
+
+    async def generate_video_edit(
+        self, at: str, project_id: str, prompt: str, model_key: str,
+        aspect_ratio: str, source_video_id: str, start_frame: int = 0,
+        end_frame: Optional[int] = None,
+        reference_media_ids: Optional[List[str]] = None,
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+        google_cookies: Optional[str] = None,
+    ) -> dict:
+        references = reference_media_ids or []
+        if model_key not in {"abra_edit", "abra_edit_360p"}:
+            raise ValueError("Видеореференс поддерживает только модель Omni Edit.")
+        if not self._is_uuid(source_video_id) or any(not self._is_uuid(value) for value in references):
+            raise ValueError("Укажите корректные ID видеореференса и изображений.")
+        if len(references) > 5:
+            raise ValueError("Omni Edit принимает не больше пяти изображений.")
+        if (
+            type(start_frame) is not int or type(end_frame) is not int
+            or start_frame < 0 or end_frame <= start_frame or end_frame - start_frame > 300
+        ):
+            raise ValueError("Укажите сегмент видеореференса длиной до 10 секунд (30 кадров/с).")
+        return await self._current_generate_video(
+            project_id=project_id, prompt=prompt, model_key=model_key,
+            aspect_ratio=aspect_ratio, mode="edit", video_media_id=source_video_id,
+            start_frame=start_frame, end_frame=end_frame,
+            reference_media_ids=references, token_id=token_id,
+            token_video_concurrency=token_video_concurrency, google_cookies=google_cookies,
         )
 
     async def generate_video_start_end(

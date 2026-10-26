@@ -10,16 +10,18 @@ const { BridgeClient, BridgeError } = require('./bridge-client.cjs');
 const text = (max = 200) => z.string().min(1).max(max).refine(value => value.trim().length > 0, 'Must not be blank');
 const absolutePath = text(4096).refine(value => path.isAbsolute(value) && !value.includes('\0'), 'Use an absolute local file path');
 const imagePath = absolutePath.refine(value => /\.(png|jpe?g|webp|gif)$/i.test(value), 'Use a PNG, JPEG, WebP, or GIF file path');
+const videoPath = absolutePath.refine(value => /\.(mp4|mov|m4v)$/i.test(value), 'Use an MP4, MOV, or M4V file path');
 const jobId = text();
 const index = z.number().int().min(0).optional();
 const schemas = {
   status: z.object({}).strict(),
-  models: z.object({ kind: z.enum(['image', 'video']).optional(), mode: z.enum(['text', 'references', 'frames', 'extend']).optional(), query: text(300).optional() }).strict(),
+  models: z.object({ kind: z.enum(['image', 'video']).optional(), mode: z.enum(['text', 'references', 'frames', 'extend', 'edit']).optional(), query: text(300).optional() }).strict(),
   generate: z.object({
     model: text().describe('Exact id from list_models; do not silently substitute another model.'),
     prompt: text(20000).describe('User-requested prompt, preserved without silent edits.'),
-    referencePaths: z.array(imagePath).min(1).max(5).optional().describe('Absolute local image paths. Up to 5 image references or 3 video references, subject to model limits. Do not combine with frames or sourceVideoId.'),
-    startFramePath: imagePath.optional().describe('Required start image for a frames model. Do not combine with referencePaths or sourceVideoId.'),
+    referencePaths: z.array(imagePath).min(1).max(7).optional().describe('Absolute local image paths in reference order. Up to 7 for Omni, 5 for image generation or Omni Edit, 3 for Veo R2V. Omni Edit can combine these with videoPaths. Do not combine with frames or sourceVideoId.'),
+    videoPaths: z.array(videoPath).min(1).max(1).optional().describe('One absolute local MP4, MOV, or M4V path, up to 100 MB and 10 seconds. Required only for Omni Edit; may combine with up to 5 referencePaths. Never combine with frames or sourceVideoId.'),
+    startFramePath: imagePath.optional().describe('Required start image for a frames model. Do not combine with referencePaths, videoPaths, or sourceVideoId.'),
     endFramePath: imagePath.optional().describe('Optional end image, only with startFramePath and a model supporting end frames.'),
     sourceVideoId: text().optional().describe('Existing video media id for a supported extension model. Do not combine with references or frames.'),
     confirmCreditSpend: z.literal(true).describe('Set true only when user requested this generation. That request authorizes credit spend; do not ask redundantly.'),
@@ -38,15 +40,19 @@ const schemas = {
 };
 
 const generateSchema = schemas.generate.superRefine((value, context) => {
-  const sources = Number(Boolean(value.referencePaths)) + Number(Boolean(value.startFramePath || value.endFramePath)) + Number(Boolean(value.sourceVideoId));
-  if (sources > 1) context.addIssue({ code: z.ZodIssueCode.custom, message: 'referencePaths, frame paths, and sourceVideoId are mutually exclusive.' });
+  const sources = Number(Boolean(value.referencePaths || value.videoPaths)) + Number(Boolean(value.startFramePath || value.endFramePath)) + Number(Boolean(value.sourceVideoId));
+  if (sources > 1) context.addIssue({ code: z.ZodIssueCode.custom, message: 'References, frame paths, and sourceVideoId are mutually exclusive.' });
   if (value.endFramePath && !value.startFramePath) context.addIssue({ code: z.ZodIssueCode.custom, path: ['startFramePath'], message: 'endFramePath requires startFramePath.' });
+  const edit = /^omni-1\.1-flash-edit-(?:landscape|portrait)$/.test(value.model);
+  if (value.videoPaths && !edit) context.addIssue({ code: z.ZodIssueCode.custom, path: ['videoPaths'], message: 'Only an Omni Edit model accepts videoPaths.' });
+  if (edit && !value.videoPaths) context.addIssue({ code: z.ZodIssueCode.custom, path: ['videoPaths'], message: 'Omni Edit requires one source video.' });
+  if (edit && value.referencePaths?.length > 5) context.addIssue({ code: z.ZodIssueCode.custom, path: ['referencePaths'], message: 'Omni Edit accepts up to 5 image references.' });
 });
 
 const definitions = [
   ['status', 'status', 'Read app status', 'Read readiness, account summaries, credits, running jobs, and history count. Starts installed Flow Studio if needed.', true, false, true, false],
   ['list_models', 'models', 'List generation models', 'List current exact model ids and supported inputs. Catalog presence does not guarantee Google account access. Choose requested model; no silent fallback.', true, false, true, true],
-  ['generate', 'generate', 'Generate image or video', 'Spend credits on one user-requested generation, returning jobId immediately. Call get_job or bounded wait_job until done, then save_result. Reuse requestId and exact inputs for retry. Never automatically resubmit a failed or cancelled job. References, frames, and sourceVideoId are mutually exclusive; frame order is start then end.', false, true, true, true],
+  ['generate', 'generate', 'Generate image or video', 'Spend credits on one user-requested generation, returning jobId immediately. Call get_job or bounded wait_job until done, then save_result. Reuse requestId and exact inputs for retry. Never automatically resubmit a failed or cancelled job. References, frames, and sourceVideoId are mutually exclusive; frame order is start then end. Omni Edit requires one videoPaths source and optionally up to 5 referencePaths images; regular Omni accepts up to 7 image references.', false, true, true, true],
   ['get_job', 'job', 'Read generation job', 'Read job status and returned media localPath/url/savedPath. No authentication data is returned.', true, false, true, false],
   ['wait_job', 'wait', 'Wait for generation job', 'Wait up to 30 seconds for a job; returns {job, done}. Repeat bounded waits while unfinished. Timeout does not start another job.', true, false, true, false],
   ['list_jobs', 'history', 'Read recent jobs', 'List persisted generation jobs, newest first, including saved result paths.', true, false, true, false],
