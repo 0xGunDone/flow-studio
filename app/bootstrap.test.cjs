@@ -16,5 +16,6 @@ test('fresh install isolates runtime data and preserves random credentials on up
  assert.equal(compose.services.flow2api.ports[0],'127.0.0.1:38000:8000');
  assert.equal(compose.services.flow2api.build.context,backend.replace(/\$/g,()=> '$$'));
  assert.equal(compose.services.flow2api.image,'flow-studio-engine:1.0.1');
+ assert.equal(compose.services.flow2api.restart,'no');
  assert.equal(cfg.databasePath,path.join(data,'engine/data/flow.db'));
 });

@@ -2,6 +2,8 @@
 
 Use this only when Flow Studio MCP tools are unavailable. It connects to the same local app and can launch it automatically; it is not a separate generator. Node must be version 22 or newer.
 
+Closing the app window with × or quitting with `⌘Q` stops its engine; minimizing keeps the app open. The CLI does not keep a standalone backend running, but a later call can reopen the app. Stop polling if the user closes Flow Studio to stop work. Google may continue an accepted generation after exit; check Flow before retrying.
+
 Persistent app-engine entrypoint:
 
 ```text

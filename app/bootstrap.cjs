@@ -33,7 +33,7 @@ async function prepareEngine({dataDir,backendDir,version='1.0.0'}){
       {type:'bind',source:source(configPath),target:'/app/config/setting.toml',read_only:true},
     ],
     environment:{PYTHONUNBUFFERED:'1',ALLOW_DOCKER_HEADED_CAPTCHA:'true',DISPLAY:':99',XVFB_SCREEN:'1440x900x24'},
-    shm_size:'2gb',restart:'unless-stopped',
+    shm_size:'2gb',restart:'no',
     healthcheck:{test:['CMD','python','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"],interval:'30s',timeout:'10s',start_period:'60s',retries:3},
   }}};
   await fs.writeFile(composePath,JSON.stringify(compose,null,2),{mode:0o600});

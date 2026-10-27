@@ -46,6 +46,8 @@ Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker
 
 The interface and detailed guides are currently in Russian. The app creates local server credentials automatically. The optional Chrome extension is not required for the normal sign-in flow.
 
+The local engine runs while Flow Studio is open. Closing its window with × or quitting with `⌘Q` exits the app and stops its engine. Minimizing the window keeps the app open. Google may continue an accepted generation after exit; check its result in Flow before retrying.
+
 ## MCP
 
 ```bash
@@ -67,7 +69,7 @@ Configure a `stdio` MCP server with an absolute script path:
 }
 ```
 
-Open Flow Studio before the first call. Use `flow_studio_status`, read `flow_studio_list_models`, then generate, wait, and save. Each new generation requires a stable `requestId` and user authorization to spend credits. The bridge and app share accounts and jobs; do not start a separate backend for MCP. See [MCP tools and examples](docs/mcp.md).
+Open Flow Studio before the first call. Use `flow_studio_status`, read `flow_studio_list_models`, then generate, wait, and save. Each new generation requires a stable `requestId` and user authorization to spend credits. The bridge can launch the installed app when needed and shares its accounts and jobs. The MCP server does not keep the engine running after the app exits; do not start a separate backend for MCP. See [MCP tools and examples](docs/mcp.md).
 
 ## Develop
 

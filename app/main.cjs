@@ -7,17 +7,19 @@ const {Runtime}=require('./runtime.cjs');
 const {saveWithDialog,revealSaved}=require('./exports.cjs');
 const {startAgentBridge,createAgentActions}=require('./agent-bridge.cjs');
 protocol.registerSchemesAsPrivileged(['flow-media','flow-input'].map(scheme=>({scheme,privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}})));
-let window,runtime,accountManager,recoveryManager,managedAccounts,agentBridge,loginState=null,quitting=false;
+let window,runtime,accountManager,recoveryManager,managedAccounts,agentBridge,shutdownTask,loginState=null,quitting=false;
 app.setName('Flow Studio');
 if(!app.requestSingleInstanceLock()){app.quit();}
 else{
 app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
 app.whenReady().then(async()=>{
  const dataDir=app.getPath('userData');await fs.mkdir(dataDir,{recursive:true,mode:0o700});
+ if(shutdownTask||quitting)return;
  const {prepareEngine}=require('./bootstrap.cjs');
  const config=await prepareEngine({dataDir,backendDir:app.isPackaged?path.join(process.resourcesPath,'backend'):path.resolve(__dirname,'../backend'),version:app.getVersion()});
  const send=event=>{if(window&&!window.isDestroyed())window.webContents.send('studio:event',event);};
  runtime=new Runtime({...config,dataDir,onEvent:send});await runtime.initializeHistory();
+ if(shutdownTask||quitting)return;
  const {createAccountManager}=require('./accounts.cjs');
  const onLoginState=state=>{loginState=state;send({type:'login',login:state});};
  const chromePath='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -98,10 +100,7 @@ app.whenReady().then(async()=>{
   window.webContents.session.setPermissionRequestHandler((_web, _permission, callback)=>callback(false));
   window.loadFile(path.join(__dirname,'index.html'));
   window.on('close',event=>{
-   if(runtime.jobs.some(j=>j.status==='running')&&!quitting){
-    const choice=dialog.showMessageBoxSync(window,{type:'question',message:'Генерация ещё идёт',detail:'Окно можно скрыть. Приложение продолжит ждать результат.',buttons:['Продолжить в фоне','Вернуться'],defaultId:0,cancelId:1});
-    event.preventDefault();if(choice===0)window.hide();
-   }
+   if(!quitting){event.preventDefault();app.quit();}
   });
   window.on('closed',()=>{window=null;});
  }
@@ -113,9 +112,27 @@ app.whenReady().then(async()=>{
  ]));
  createWindow();
  agentBridge=await startAgentBridge({dataDir,dispatch:createAgentActions({runtime,accountManager,getLoginState:()=>loginState,shell})});
+ if(shutdownTask||quitting){await agentBridge.close();return;}
  app.on('activate',()=>{if(!window)createWindow();else{window.show();window.focus();}});
- runtime.start().then(()=>accountManager.startAutoSync()).catch(e=>send({type:'error',message:e.message}));
+ runtime.start().then(()=>{if(!runtime.closing)accountManager.startAutoSync();}).catch(e=>send({type:'error',message:e.message}));
 });
 app.on('window-all-closed',()=>app.quit());
-app.on('before-quit',()=>{quitting=true;runtime?.close();accountManager?.shutdown();agentBridge?.close().catch(()=>{});});
+app.on('before-quit',event=>{
+ if(quitting)return;
+ event.preventDefault();if(shutdownTask)return;
+ if(runtime?.jobs.some(j=>j.status==='running')){
+  const choice=dialog.showMessageBoxSync(window,{type:'question',message:'Генерация ещё идёт',detail:'Закрытие остановит локальный движок и ожидание результата. Задача Google может продолжиться — перед повтором проверьте её в Flow.',buttons:['Вернуться','Закрыть и остановить'],defaultId:0,cancelId:0});
+  if(choice!==1)return;
+ }
+ accountManager?.shutdown();
+ shutdownTask=(async()=>{
+  await agentBridge?.close();
+  await runtime?.close();
+  quitting=true;app.quit();
+ })().catch(()=>{
+  shutdownTask=null;
+  dialog.showErrorBox('Не удалось завершить Flow Studio','Не удалось остановить локальный движок или сохранить историю. Проверьте Docker и повторите выход из приложения.');
+  window?.show();
+ });
+});
 }

@@ -115,3 +115,66 @@ test('parallel history updates serialize without losing exported path',async t=>
  await Promise.all(pending);
  const history=JSON.parse(await fs.readFile(path.join(folder,'history.json'),'utf8'));assert.equal(history[0].media[0].savedPath,'/user/export.mp4');
 });
+
+test('engine startup reconciles its own healthy service and refuses a different server',async()=>{
+ const r=new Runtime({composePath:'/own/compose.json'}),calls=[];
+ r.health=async()=>true;
+ r.command=async(command,args,options)=>{calls.push({command,args,options});};
+ await r.ensureEngine();
+ assert.deepEqual(calls.map(c=>c.args.slice(3)),[
+  ['exec','-T','flow2api','python','-c','import sys; sys.exit(0)'],
+  ['up','-d','--build','flow2api'],
+ ]);
+ assert.equal(r.engineManaged,true);
+ const other=new Runtime({composePath:'/own/compose.json'});
+ other.health=async()=>true;let attempts=0;
+ other.command=async()=>{attempts++;throw new Error('No own compose service');};
+ await assert.rejects(other.ensureEngine(),/занят другим сервером/);
+ assert.equal(attempts,1);assert.equal(other.engineManaged,false);
+});
+
+test('closing waits for startup and jobs, stops only its service, and blocks new work',async()=>{
+ const r=new Runtime({composePath:'/own/compose.json'}),events=[],controller=new AbortController();
+ r.engineManaged=true;r.ready=true;r.aborts.set('job',controller);
+ let finishStart,finishJob;
+ r.startTask=new Promise(resolve=>{finishStart=resolve;});
+ r.jobTasks.add(new Promise(resolve=>{finishJob=resolve;}));
+ r.persist=async()=>events.push('persist');
+ r.command=async(command,args)=>events.push([command,args]);
+ const closing=r.close();assert.equal(r.close(),closing);
+ assert.equal(controller.signal.aborted,true);assert.equal(r.ready,false);
+ await assert.rejects(r.start(),/закрывается/);
+ finishStart();await new Promise(setImmediate);assert.deepEqual(events,[]);
+ finishJob();await closing;
+ assert.deepEqual(events,['persist',['docker',['compose','-f','/own/compose.json','stop','--timeout','15','flow2api']]]);
+ assert.equal(r.engineManaged,false);
+});
+
+test('close cancels startup commands and permits retry after an engine stop failure',async()=>{
+ const r=new Runtime({composePath:'/own/compose.json'});r.engineManaged=true;
+ r.startTask=new Promise(resolve=>r.startController.signal.addEventListener('abort',resolve,{once:true}));
+ r.persist=async()=>{};let attempts=0;
+ r.command=async()=>{if(++attempts===1)throw new Error('Docker unavailable');};
+ await assert.rejects(r.close(),/Docker unavailable/);
+ assert.equal(r.engineManaged,true);
+ await r.close();assert.equal(attempts,2);assert.equal(r.engineManaged,false);
+});
+
+test('close waits for history load before persisting',async t=>{
+ const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os');
+ const folder=await fs.mkdtemp(path.join(os.tmpdir(),'flow-history-close-'));t.after(()=>fs.rm(folder,{recursive:true,force:true}));
+ const historyPath=path.join(folder,'history.json');
+ const expected=[{id:'saved-job',status:'succeeded',media:[]}];
+ await fs.writeFile(historyPath,JSON.stringify(expected));
+ const originalReadFile=fs.readFile;let readStarted,releaseRead;
+ const started=new Promise(resolve=>{readStarted=resolve});
+ const release=new Promise(resolve=>{releaseRead=resolve});
+ fs.readFile=async(target,...args)=>{const result=await originalReadFile(target,...args);if(target===historyPath){readStarted();await release;}return result;};
+ t.after(()=>{fs.readFile=originalReadFile;releaseRead();});
+ const r=new Runtime({dataDir:folder});
+ const loading=r.initializeHistory();await started;
+ let closed=false;const closing=r.close().finally(()=>{closed=true});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(closed,false);
+ releaseRead();await loading;await closing;
+ assert.deepEqual(JSON.parse(await originalReadFile(historyPath,'utf8')),expected);
+});

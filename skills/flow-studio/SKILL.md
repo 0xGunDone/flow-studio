@@ -7,6 +7,8 @@ description: Use the local Flow Studio app to generate images or videos, edit a 
 
 Operate the installed Flow Studio app through its MCP tools. It owns the running backend, Google sessions, job history, and local media. The bridge can launch the app when needed; do not start a second backend or call Google endpoints directly.
 
+The engine runs while Flow Studio is open. Closing its window with × or quitting with `⌘Q` exits the app and stops the engine; minimizing keeps the app open. The MCP server does not keep a standalone backend running after exit, but a later tool call can launch the app again. If the user closes Flow Studio to stop work, stop polling instead of reopening it through another call.
+
 ## Route and discover
 
 This skill is the selected generation route when the user explicitly chooses Flow Studio or invokes `$flow-studio`. Keep generic image requests on the user's default built-in `image_gen` route. Do not silently switch between routes after a failure.
@@ -52,6 +54,8 @@ On failure, state that no successful result was produced, quote the returned err
 `PUBLIC_ERROR_MINOR` is an explicit Google rejection. Its exact public definition is not documented; a content-age check is possible, but the code alone does not identify the offending input or prove anyone's age. Do not confuse it with `PUBLIC_ERROR_USER_MINOR`, an authentication `401`, or a quota error. Read the same task's message in the Flow web UI if available. Do not retry identical rejected inputs, rotate accounts, change references, or rewrite the prompt automatically. Google states that editing uploaded videos of identifiable minors is unsupported; if adult content was misclassified, use the product's feedback/support flow.
 
 `flow_studio_cancel_job` stops the app's own request; Google may still complete or charge for it. Explain that limit when cancellation matters. Do not automatically resubmit a cancelled job.
+
+Quitting Flow Studio also stops local waiting. Google may continue the accepted generation in the cloud; check its result in Flow before retrying.
 
 ## Accounts
 

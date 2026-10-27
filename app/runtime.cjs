@@ -111,62 +111,79 @@ class Runtime {
     Object.assign(this,{composePath,databasePath,dataDir,onEvent});
     this.ready=false;this.message='Запускаем Flow Studio…';this.models=[];this.accounts=[];this.jobs=[];
     this.sessionCookie='';this.startTask=null;this.aborts=new Map();this.persistTask=Promise.resolve();
+    this.closing=false;this.closeTask=null;this.engineManaged=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();
   }
   status(message,ready=this.ready){this.message=message;this.ready=ready;this.onEvent({type:'status',message,ready});}
-  async initializeHistory(){
-    await fs.mkdir(this.dataDir,{recursive:true,mode:0o700});
-    try{this.jobs=JSON.parse(await fs.readFile(path.join(this.dataDir,'history.json'),'utf8')).filter(j=>j&&typeof j.id==='string');}catch{this.jobs=[];}
-    for(const job of this.jobs)if(job.status==='running'){job.status='failed';job.error='Приложение закрылось до завершения генерации.';}
-    this.jobs=this.jobs.slice(0,100);
+  initializeHistory(){
+    if(this.historyTask)return this.historyTask;
+    this.historyTask=(async()=>{
+      await fs.mkdir(this.dataDir,{recursive:true,mode:0o700});
+      try{this.jobs=JSON.parse(await fs.readFile(path.join(this.dataDir,'history.json'),'utf8')).filter(j=>j&&typeof j.id==='string');}catch{this.jobs=[];}
+      for(const job of this.jobs)if(job.status==='running'){job.status='failed';job.error='Приложение закрылось до завершения генерации.';}
+      this.jobs=this.jobs.slice(0,100);
+    })();
+    return this.historyTask;
   }
   async health(){try{const r=await fetch(BASE+'/health',{signal:AbortSignal.timeout(2000)});const d=await r.json();return r.ok&&d.backend_running;}catch{return false;}}
   async login(){
     this.credentials=await readCredentials(this.databasePath,this.composePath);
-    const r=await fetch(BASE+'/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:this.credentials.username,password:this.credentials.password}),signal:AbortSignal.timeout(10000)});
+    const r=await fetch(BASE+'/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:this.credentials.username,password:this.credentials.password}),signal:AbortSignal.any([this.startController.signal,AbortSignal.timeout(10000)])});
     if(!r.ok)throw new Error('Не удалось войти в локальный Flow2API. Проверьте его настройки и нажмите «Повторить».');
     const d=await r.json();this.sessionCookie=d.token;
     if(!this.sessionCookie)throw new Error('Flow2API не вернул сессию.');
   }
   async request(endpoint,{method='GET',body,retry=true,signal}={}){
+    if(this.closing)throw new Error('Приложение закрывается.');
     if(!this.sessionCookie)await this.login();
-    let r=await fetch(BASE+endpoint,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+this.sessionCookie},body:body===undefined?undefined:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(60000)]):AbortSignal.timeout(60000)});
+    let r=await fetch(BASE+endpoint,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+this.sessionCookie},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.any([this.startController.signal,AbortSignal.timeout(60000),...(signal?[signal]:[])])});
     let d;try{d=await r.json();}catch{throw new Error('Локальный сервер вернул неверный ответ.');}
     if(r.status===401&&retry&&!String(d?.detail||'').includes('Google Flow')){await this.login();return this.request(endpoint,{method,body,retry:false,signal});}
     if(!r.ok)throw new Error(String(errorMessage(d,'Ошибка сервера: '+r.status)));
     return d;
   }
   async start(){
+    if(this.closing)throw new Error('Приложение закрывается.');
     if(this.ready&&await this.health())return this.snapshot();
     if(this.startTask)return this.startTask;
     this.startTask=this._start().finally(()=>{this.startTask=null;});
     return this.startTask;
   }
+  command(command,args,options){return exec(command,args,{env:COMMAND_ENV,...options});}
+  async ensureEngine(){
+    const signal=this.startController.signal;
+    if(await this.health()){
+      try{await this.command('docker',['compose','-f',this.composePath,'exec','-T','flow2api','python','-c','import sys; sys.exit(0)'],{timeout:15000,signal});}
+      catch{throw new Error('Порт 38000 занят другим сервером. Остановите его и нажмите «Повторить».');}
+    }else{
+        try{await this.command('docker',['info','--format','{{.ServerVersion}}'],{timeout:10000,signal});}
+        catch{
+          this.status('Запускаем локальный движок…',false);
+          try{await this.command('colima',['start'],{timeout:240000,maxBuffer:4*1024*1024,signal});}
+          catch{throw new Error('Запустите Docker Desktop или установите и запустите Colima с Docker CLI. Затем нажмите «Повторить».');}
+        }
+    }
+    signal.throwIfAborted();this.engineManaged=true;
+    this.status('Подготавливаем генератор. Первый запуск скачивает зависимости и может занять 10–20 минут…',false);
+    await this.command('docker',['compose','-f',this.composePath,'up','-d','--build','flow2api'],{timeout:1800000,maxBuffer:16*1024*1024,signal});
+    for(let i=0;i<60;i++){
+      signal.throwIfAborted();
+      if(await this.health())return;
+      await delay(1000);
+    }
+    throw new Error('Генератор не запустился. Нажмите «Повторить» через минуту.');
+  }
   async _start(){
     this.status('Подключаем локальный движок…',false);
     try{
-      if(!await this.health()){
-        try{await exec('docker',['info','--format','{{.ServerVersion}}'],{env:COMMAND_ENV,timeout:10000});}
-        catch{
-          this.status('Запускаем локальный движок…',false);
-          try{await exec('colima',['start'],{env:COMMAND_ENV,timeout:240000,maxBuffer:4*1024*1024});}
-          catch{throw new Error('Запустите Docker Desktop или установите и запустите Colima с Docker CLI. Затем нажмите «Повторить».');}
-        }
-        this.status('Подготавливаем генератор. Первый запуск скачивает зависимости и может занять 10–20 минут…',false);
-        await exec('docker',['compose','-f',this.composePath,'up','-d','--build'],{env:COMMAND_ENV,timeout:1800000,maxBuffer:16*1024*1024});
-        let healthy=false;
-        for(let i=0;i<60;i++){if(await this.health()){healthy=true;break;}await delay(1000);}
-        if(!healthy)throw new Error('Генератор не запустился. Нажмите «Повторить» через минуту.');
-      }
-      // Do not attach a different locally running backend or its accounts.
-      try{await exec('docker',['compose','-f',this.composePath,'exec','-T','flow2api','python','-c','import sys; sys.exit(0)'],{env:COMMAND_ENV,timeout:15000});}
-      catch{throw new Error('Порт 38000 занят другим сервером. Остановите его и нажмите «Повторить».');}
+      await this.ensureEngine();
+      this.startController.signal.throwIfAborted();
       await this.login();
-      const r=await fetch(BASE+'/v1/models',{headers:{Authorization:'Bearer '+this.credentials.apiKey},signal:AbortSignal.timeout(10000)});
+      const r=await fetch(BASE+'/v1/models',{headers:{Authorization:'Bearer '+this.credentials.apiKey},signal:AbortSignal.any([this.startController.signal,AbortSignal.timeout(10000)])});
       if(!r.ok)throw new Error('Не удалось загрузить модели.');
       this.models=(await r.json()).data.map(m=>({id:m.id,description:m.description||m.id}));
       await this.refreshAccounts();
       this.status('Готово',true);
-    }catch(e){this.status(e.message?.includes('Command failed')?'Не удалось запустить локальный движок. Проверьте, что Colima и Docker установлены, и нажмите «Повторить».':e.message,false);}
+    }catch(e){if(!this.closing)this.status(e.message?.includes('Command failed')?'Не удалось запустить локальный движок. Проверьте, что Colima и Docker установлены, и нажмите «Повторить».':e.message,false);}
     return this.snapshot();
   }
   snapshot(){return {ready:this.ready,message:this.message,models:this.models,accounts:this.accounts,history:this.publicJobs()};}
@@ -232,7 +249,8 @@ class Runtime {
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
     const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{})};
     this.jobs.unshift(job);this.emitJob(job);
-    this.runJob(job,images,input.sourceVideoId,videos).catch(()=>{});
+    const task=this.runJob(job,images,input.sourceVideoId,videos).catch(()=>{});
+    this.jobTasks.add(task);task.finally(()=>this.jobTasks.delete(task));
     return {jobId:id};
   }
   async runJob(job,images,sourceVideoId,videos=[]){
@@ -254,16 +272,16 @@ class Runtime {
       const media=await consumeGeneration(response,text=>{job.progress=text;this.emitJob(job);},account=>{job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);});
       job.media=media;
       for(let i=0;i<media.length;i++){
-        try{media[i].path=await this.cacheMedia(job.id,i,media[i]);}catch{ /* Original URL remains usable; save can retry. */ }
+        try{media[i].path=await this.cacheMedia(job.id,i,media[i],controller.signal);}catch{ /* Original URL remains usable; save can retry. */ }
       }
       job.status='succeeded';job.progress='Готово';
-    }catch(e){job.status='failed';job.error=job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
+    }catch(e){job.status='failed';job.error=this.closing?'Приложение закрыто. Задача Google могла продолжиться; проверьте Flow перед повтором.':job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
     finally{
       for(const file of staged)await fs.unlink(file.target).catch(()=>{});
-      clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});await this.refreshAccounts().catch(()=>{});
+      clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});if(!this.closing)await this.refreshAccounts().catch(()=>{});
     }
   }
-  async cacheMedia(jobId,index,media){
+  async cacheMedia(jobId,index,media,signal){
     if(!allowedMediaUrl(media.url))throw new Error('Этот адрес результата не поддерживается.');
     const folder=path.join(this.dataDir,'media',jobId);await fs.mkdir(folder,{recursive:true,mode:0o700});
     const ext=media.kind==='video'?'.mp4':media.url.startsWith('data:image/jpeg')?'.jpg':'.png';
@@ -273,7 +291,7 @@ class Runtime {
       let url=media.url,response;
       for(let redirects=0;redirects<6;redirects++){
         if(!allowedMediaUrl(url))throw new Error('Неподдерживаемый адрес результата.');
-        response=await fetch(url,{redirect:'manual',signal:AbortSignal.timeout(120000)});
+        response=await fetch(url,{redirect:'manual',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(120000)]):AbortSignal.timeout(120000)});
         if(response.status>=300&&response.status<400){url=new URL(response.headers.get('location'),url).href;await response.body?.cancel();continue;}
         break;
       }
@@ -283,6 +301,23 @@ class Runtime {
     }catch(e){await handle.close().catch(()=>{});await fs.unlink(tmp).catch(()=>{});throw e;}
   }
   mediaFile(jobId,index){return this.jobs.find(j=>j.id===jobId)?.media?.[index]?.path||null;}
-  close(){for(const controller of this.aborts.values())controller.abort();}
+  close(){
+    if(this.closeTask)return this.closeTask;
+    this.closing=true;this.ready=false;this.startController.abort();
+    for(const controller of this.aborts.values())controller.abort();
+    this.closeTask=(async()=>{
+      await this.historyTask?.catch(()=>{});
+      await this.startTask?.catch(()=>{});
+      await Promise.allSettled([...this.jobTasks]);
+      try{await this.persist();}
+      finally{
+        if(this.engineManaged){
+          await this.command('docker',['compose','-f',this.composePath,'stop','--timeout','15','flow2api'],{timeout:45000,maxBuffer:1024*1024});
+          this.engineManaged=false;
+        }
+      }
+    })().catch(error=>{this.closeTask=null;throw error;});
+    return this.closeTask;
+  }
 }
 module.exports={Runtime,consumeGeneration,splitSSE,extractMedia,allowedMediaUrl,publicAccount,readCredentials};
