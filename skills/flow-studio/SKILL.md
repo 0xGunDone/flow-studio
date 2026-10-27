@@ -49,6 +49,8 @@ If a generate call loses its response, inspect job history, then retry only with
 
 On failure, state that no successful result was produced, quote the returned error/message and technical code, and distinguish an unknown outcome from a confirmed failed job. Do not infer moderation from an empty response. Offer a concrete next step without starting another paid request.
 
+`PUBLIC_ERROR_MINOR` is an explicit Google rejection. Its exact public definition is not documented; a content-age check is possible, but the code alone does not identify the offending input or prove anyone's age. Do not confuse it with `PUBLIC_ERROR_USER_MINOR`, an authentication `401`, or a quota error. Read the same task's message in the Flow web UI if available. Do not retry identical rejected inputs, rotate accounts, change references, or rewrite the prompt automatically. Google states that editing uploaded videos of identifiable minors is unsupported; if adult content was misclassified, use the product's feedback/support flow.
+
 `flow_studio_cancel_job` stops the app's own request; Google may still complete or charge for it. Explain that limit when cancellation matters. Do not automatically resubmit a cancelled job.
 
 ## Accounts

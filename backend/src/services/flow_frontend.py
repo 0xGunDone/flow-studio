@@ -20,6 +20,50 @@ class FlowFrontendAuthError(RuntimeError):
     """Flow rejected the session or could not confirm its expected identity."""
 
 
+def flow_public_error_code(error: Any) -> str:
+    match = re.search(r"\bPUBLIC_ERROR_[A-Z0-9_]+\b", str(error or ""))
+    return match.group(0) if match else ""
+
+
+def is_flow_content_policy_error(error: Any) -> bool:
+    # MINOR is distinct from USER_MINOR; unknown codes do not prove a policy failure.
+    return flow_public_error_code(error) in {
+        "PUBLIC_ERROR_MINOR",
+        "PUBLIC_ERROR_UNSAFE_GENERATION",
+        "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED",
+    }
+
+
+def is_terminal_flow_public_error(error: Any) -> bool:
+    error_text = str(error or "")
+    code = flow_public_error_code(error_text)
+    return bool(code) and not code.startswith("PUBLIC_ERROR_UNUSUAL_ACTIVITY") and not (
+        "429" in error_text or "too many requests" in error_text.lower()
+    )
+
+
+def flow_public_error_message(error: Any, media_kind: str = "видео") -> str:
+    code = flow_public_error_code(error) or str(error or "")
+    detail = {
+        "PUBLIC_ERROR_MINOR": (
+            "Возможна возрастная проверка содержимого. "
+            "Сервис не сообщил, какой элемент вызвал отказ."
+        ),
+        "PUBLIC_ERROR_USER_MINOR": (
+            "Возможны возрастные ограничения аккаунта. "
+            "Сервис не сообщил подробности отказа."
+        ),
+        "PUBLIC_ERROR_UNSAFE_GENERATION": "Сработала проверка безопасности содержимого.",
+        "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED": (
+            "Сработала проверка ограничений на изображение известных людей."
+        ),
+    }.get(code, "Сервис не сообщил причину отказа.")
+    return (
+        f"Google Flow отклонил создание {media_kind} ({code}). {detail} "
+        "Проверьте сообщение этой задачи в веб-версии Flow."
+    )
+
+
 class FlowFrontendMixin:
     """Frontend RPC helpers shared by project and media generation flows."""
 
@@ -90,6 +134,11 @@ class FlowFrontendMixin:
             return value if value.startswith(("PUBLIC_ERROR_", "ERROR_")) else ""
         if isinstance(value, (list, tuple)):
             for item in value:
+                code = FlowFrontendMixin._extract_frontend_rpc_error_code(item)
+                if code:
+                    return code
+        if isinstance(value, dict):
+            for item in value.values():
                 code = FlowFrontendMixin._extract_frontend_rpc_error_code(item)
                 if code:
                     return code
@@ -295,6 +344,9 @@ class FlowFrontendMixin:
     def _normalize_frontend_image_generation_response(
         cls, payload: Any
     ) -> Dict[str, Any]:
+        error_code = cls._extract_frontend_rpc_error_code(payload)
+        if flow_public_error_code(error_code):
+            raise RuntimeError(flow_public_error_message(error_code, "изображения"))
         media_items = (
             payload[0]
             if isinstance(payload, list) and payload and isinstance(payload[0], list)
@@ -498,6 +550,9 @@ class FlowFrontendMixin:
         model_key: str,
         rpc_id: str = "YhhmEf",
     ) -> Dict[str, Any]:
+        error_code = cls._extract_frontend_rpc_error_code(payload)
+        if flow_public_error_code(error_code):
+            raise RuntimeError(flow_public_error_message(error_code))
         records = cls._extract_frontend_video_records(payload, project_id)
         operations: List[Dict[str, Any]] = []
         for record in records:
@@ -591,12 +646,7 @@ class FlowFrontendMixin:
                 previous.get("modelKey") if isinstance(previous, dict) else None,
             )
             metadata["video"] = video_info
-            error_message = {
-                "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED": (
-                    "提示词或参考素材触发了人物安全过滤"
-                ),
-                "PUBLIC_ERROR_UNSAFE_GENERATION": "提示词或参考素材触发了内容安全过滤",
-            }.get(error_code, f"Flow 上游拒绝视频生成：{error_code}")
+            error_message = flow_public_error_message(error_code)
             operation_body = {"name": operation_id, "metadata": metadata}
             if error_code:
                 operation_body["error"] = {
@@ -621,7 +671,7 @@ class FlowFrontendMixin:
         if not normalized:
             error_code = cls._extract_frontend_rpc_error_code(payload)
             if error_code:
-                error_message = f"Flow 上游拒绝视频生成：{error_code}"
+                error_message = flow_public_error_message(error_code)
                 for previous in operations:
                     operation_id = str(
                         (previous or {}).get("name")

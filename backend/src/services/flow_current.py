@@ -14,6 +14,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..core.logger import debug_logger
 from .browser_cookie_utils import validate_flow_cookie_storage
+from .flow_frontend import (
+    flow_public_error_code,
+    flow_public_error_message,
+    is_terminal_flow_public_error,
+)
 
 class CurrentFlowClientMixin:
     FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
@@ -504,6 +509,10 @@ class CurrentFlowClientMixin:
                 attempt["error"] = str(error)[:240]
                 attempt["duration_ms"] = int((time.time() - started_at) * 1000)
                 trace["generation_attempts"].append(attempt)
+                if is_terminal_flow_public_error(error):
+                    raise RuntimeError(
+                        flow_public_error_message(error, "изображения")
+                    ) from error
                 if (
                     submission_accepted
                     or bool(getattr(error, "outcome_unknown", False))
@@ -645,6 +654,8 @@ class CurrentFlowClientMixin:
                 )
             except Exception as error:
                 last_error = error
+                if is_terminal_flow_public_error(error):
+                    raise RuntimeError(flow_public_error_message(error)) from error
                 # MODEL_ACCESS_DENIED 为账号权限拒绝，重试不会改变结果
                 if "MODEL_ACCESS_DENIED" in str(error):
                     raise
@@ -890,18 +901,25 @@ class CurrentFlowClientMixin:
             raise ValueError("视频状态查询缺少 Flow frontend operation ID")
         first_operation = operations[0] if operations else {}
         project_id = str((first_operation or {}).get("projectId") or "").strip()
-        payload = await self._current_rpc(
-            rpc_id="jwpduf",
-            argument=[None, None, [[operation_id] for operation_id in operation_ids]],
-            google_cookies=google_cookies,
-            token_id=token_id,
-            project_id=project_id or None,
-            timeout=max(self._get_video_poll_timeout(), 30),
-        )
+        try:
+            payload = await self._current_rpc(
+                rpc_id="jwpduf",
+                argument=[None, None, [[operation_id] for operation_id in operation_ids]],
+                google_cookies=google_cookies,
+                token_id=token_id,
+                project_id=project_id or None,
+                timeout=max(self._get_video_poll_timeout(), 30),
+            )
+        except Exception as error:
+            if not is_terminal_flow_public_error(error):
+                raise
+            payload = [flow_public_error_code(error)]
         normalized = self._normalize_frontend_video_status(payload, operations)
         checked_operations = normalized.get("operations") or []
         for operation in checked_operations:
-            if "SUCCESSFUL" in str(operation.get("status") or ""):
+            if operation.get("status") in {
+                "MEDIA_GENERATION_STATUS_SUCCESSFUL", "MEDIA_GENERATION_STATUS_FAILED",
+            }:
                 continue
             operation_body = operation.get("operation") or {}
             metadata = operation_body.get("metadata") or {}

@@ -19,7 +19,12 @@ from ..core.account_tiers import (
     supports_model_for_tier,
 )
 from .file_cache import FileCache
-from .flow_frontend import FlowFrontendAuthError
+from .flow_frontend import (
+    FlowFrontendAuthError,
+    flow_public_error_code,
+    flow_public_error_message,
+    is_flow_content_policy_error,
+)
 from .video_inputs import read_video_reference
 
 
@@ -1895,7 +1900,7 @@ class GenerationHandler:
                 debug_logger.log_warning(
                     f"[GENERATION] 生成未成功，不扣次数: {error_msg}"
                 )
-                if token:
+                if token and not is_flow_content_policy_error(error_msg):
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
@@ -2062,12 +2067,14 @@ class GenerationHandler:
         else:
             return "Нет доступных токенов для генерации видео. Все токены отключены, временно недоступны, просрочены или исчерпали квоту."
 
-    def _should_count_token_error(self, error: Exception) -> bool:
+    def _should_count_token_error(self, error: Any) -> bool:
         """判断失败是否应计入 token 连续错误。
 
         reCAPTCHA 获取失败、验证码供应商错误、打码资源不足等问题通常不是账号本身异常；
         若将其纳入连续错误，会在回归测试或代理波动时把 token 自动打成 inactive。
         """
+        if is_flow_content_policy_error(error):
+            return False
         error_text = str(error or "").strip().lower()
         if not error_text:
             return True
@@ -3345,8 +3352,11 @@ class GenerationHandler:
                         checked_operations, f"{error_message} (code: {error_code})"
                     )
                     
-                    # 返回友好的错误消息，提示用户重试
-                    friendly_error = f"Не удалось создать видео: {error_message}. Повторите попытку"
+                    friendly_error = (
+                        flow_public_error_message(error_code)
+                        if flow_public_error_code(error_code)
+                        else f"Не удалось создать видео: {error_message}. Повторите попытку"
+                    )
                     self._mark_generation_failed(generation_result, friendly_error)
                     if stream:
                         yield self._create_stream_chunk(f"Ошибка: {friendly_error}\n")

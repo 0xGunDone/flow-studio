@@ -432,7 +432,7 @@ class RouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
             operation["operation"]["error"]["code"],
             "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED",
         )
-        self.assertIn("人物安全过滤", operation["operation"]["error"]["message"])
+        self.assertIn("известных людей", operation["operation"]["error"]["message"])
 
     async def test_generate_video_start_end_uses_v2_payload_for_interpolation_lite(
         self,

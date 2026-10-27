@@ -19,7 +19,7 @@ from curl_cffi.requests import AsyncSession, Cookies
 from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
 from .flow_current import CurrentFlowClientMixin
-from .flow_frontend import FlowFrontendMixin
+from .flow_frontend import FlowFrontendMixin, is_terminal_flow_public_error
 
 try:
     import httpx
@@ -4522,6 +4522,8 @@ class _FlowClientBase(FlowFrontendMixin):
         defer_browser_error_notification: bool = False,
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
+        if is_terminal_flow_public_error(error):
+            return False
         error_str = str(error)
         retry_reason = self._get_retry_reason(error_str)
         retry_delay = self._get_retry_delay_seconds(error_str, retry_attempt)
@@ -4625,6 +4627,8 @@ class _FlowClientBase(FlowFrontendMixin):
             return "打码服务资源不足"
         if "model_access_denied" in error_lower:
             # 账号无对应模型权限，重试不会改变结果
+            return None
+        if is_terminal_flow_public_error(error_str):
             return None
         if "403" in error_lower:
             return "403错误"
