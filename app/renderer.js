@@ -93,7 +93,7 @@ if (typeof document !== 'undefined') initialize();
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true, refreshPending: false };
+  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
@@ -166,9 +166,9 @@ function initialize() {
   function updateGenerate() {
     const running = Boolean(activeJob()) || state.submitting;
     const available = state.accounts.some(account => account.isActive);
-    $('generate').disabled = !state.ready || !selectedModel() || running || !available;
+    $('generate').disabled = !state.ready || !selectedModel() || running || !available || state.importPending;
     $('generate-label').textContent = running ? 'Генерация идет…' : state.mode === 'video' ? 'Создать видео' : 'Создать изображение';
-    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : !available ? 'Подключите активный аккаунт в разделе «Аккаунты»' : '⌘ Enter — создать';
+    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.importPending ? 'Добавляем вложения…' : !available ? 'Подключите активный аккаунт в разделе «Аккаунты»' : '⌘ Enter — создать';
   }
   function renderModels() {
     const previous = $('model').value || draft.model;
@@ -236,7 +236,26 @@ function initialize() {
       item.append(preview, caption, actions, remove);
       $('references').append(item);
     });
-    $('pick-images').disabled = state.references.length >= info.maxReferences;
+    $('pick-images').disabled = state.importPending || state.references.length >= info.maxReferences;
+    $('references-field').setAttribute('aria-busy', String(state.importPending));
+  }
+  async function importReferences(read) {
+    if (state.importPending) return;
+    const info = modelInfo(selectedModel());
+    if (!selectedModel() || !info.maxReferences) { setError('form-error', 'Выбранная модель не принимает вложения'); return; }
+    state.importPending = true;
+    renderReferences(); updateGenerate();
+    try {
+      const references = await read(info);
+      const key = reference => referenceKind(reference) === 'video' ? `video:${reference.path}` : `image:${reference.dataUrl}`;
+      const seen = new Set(state.references.map(key));
+      const unique = references.filter(reference => { const value = key(reference); if (seen.has(value)) return false; seen.add(value); return true; });
+      const current = modelInfo(selectedModel());
+      const invalid = current.maxReferences ? referenceError(current, [...state.references, ...unique]) : 'Выбранная модель не принимает вложения';
+      if (invalid) setError('form-error', invalid);
+      else { state.references.push(...unique); setError('form-error', ''); }
+    } catch (error) { setError('form-error', errorMessage(error)); }
+    finally { state.importPending = false; renderReferences(); updateGenerate(); }
   }
   function emptyResult() {
     const empty = element('div', 'empty-result');
@@ -490,7 +509,7 @@ function initialize() {
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.submitting || activeJob() || !state.ready) return;
+    if (state.submitting || state.importPending || activeJob() || !state.ready) return;
     setError('form-error', '');
     let request;
     try { request = requestFor(selectedModel(), $('prompt').value, state.references, $('source-video-id').value); }
@@ -536,19 +555,32 @@ function initialize() {
   $('prompt').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); if (!$('generate').disabled) $('generation-form').requestSubmit(); } });
   $('generation-form').addEventListener('submit', generate);
   $('retry-startup').addEventListener('click', () => start(true));
-  $('pick-images').addEventListener('click', async () => {
-    $('pick-images').disabled = true;
-    try {
-      const references = await api.pickImages({ allowVideos: modelInfo(selectedModel()).supportsVideoReferences });
-      const key = reference => referenceKind(reference) === 'video' ? `video:${reference.path}` : `image:${reference.dataUrl}`;
-      const seen = new Set(state.references.map(key));
-      const unique = references.filter(reference => { const value = key(reference); if (seen.has(value)) return false; seen.add(value); return true; });
-      const invalid = referenceError(modelInfo(selectedModel()), [...state.references, ...unique]);
-      if (invalid) setError('form-error', invalid);
-      else { state.references.push(...unique); setError('form-error', ''); }
-    } catch (error) { setError('form-error', errorMessage(error)); }
-    finally { renderReferences(); }
+  $('pick-images').addEventListener('click', () => importReferences(info => api.pickImages({ allowVideos: info.supportsVideoReferences })));
+  const isFileDrag = event => Array.from(event.dataTransfer?.types || []).includes('Files') || Boolean(event.dataTransfer?.files?.length);
+  let dragDepth = 0;
+  function clearDrag() { dragDepth = 0; $('references-field').classList.toggle('drag-over', false); }
+  $('references-field').addEventListener('dragenter', event => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault(); dragDepth++;
+    $('references-field').classList.toggle('drag-over', !state.importPending);
   });
+  $('references-field').addEventListener('dragleave', event => {
+    if (!dragDepth) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) clearDrag();
+  });
+  $('references-field').addEventListener('dragover', event => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = state.importPending ? 'none' : 'copy';
+  });
+  $('references-field').addEventListener('drop', async event => {
+    event.preventDefault(); clearDrag();
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (!files.length) { setError('form-error', 'Перетащите локальные фото или видео. Ссылки не поддерживаются'); return; }
+    await importReferences(info => api.dropMedia(files, { allowVideos: info.supportsVideoReferences }));
+  });
+  for (const name of ['dragover', 'drop']) window.addEventListener(name, event => { if (isFileDrag(event)) event.preventDefault(); if (name === 'drop') clearDrag(); });
+  window.addEventListener('dragend', clearDrag);
   $('add-account').addEventListener('click', () => beginLogin());
   $('complete-login').addEventListener('click', async () => {
     if (state.loginPending || state.login?.state !== 'waiting' || state.login.canComplete !== true) return;

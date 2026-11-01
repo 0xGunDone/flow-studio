@@ -35,3 +35,5 @@ body::before{content:"";position:fixed;top:0;left:0;right:0;height:30px;z-index:
 .help-note{padding:12px 15px;border-left:3px solid #607963;background:#1b251c;border-radius:0 7px 7px 0;margin:14px 0}
 .help-table-wrap{overflow:auto}
 @media(max-width:1000px){.help-section{padding:17px}.help-section th,.help-section td{padding:8px}.help-section h2{font-size:17px}}
+
+.media-drop-zone.drag-over{outline:2px dashed var(--green);outline-offset:8px;border-radius:8px;background:#1c291d}

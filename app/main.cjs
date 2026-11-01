@@ -4,6 +4,7 @@ const path=require('node:path');
 const fs=require('node:fs/promises');
 const {pathToFileURL}=require('node:url');
 const {Runtime}=require('./runtime.cjs');
+const {importMedia}=require('./input-files.cjs');
 const {saveWithDialog,revealSaved}=require('./exports.cjs');
 const {startAgentBridge,createAgentActions}=require('./agent-bridge.cjs');
 protocol.registerSchemesAsPrivileged(['flow-media','flow-input'].map(scheme=>({scheme,privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}})));
@@ -45,6 +46,15 @@ app.whenReady().then(async()=>{
   return net.fetch(pathToFileURL(file).href,{headers:request.headers});
  });
  const inputFiles=new Map();
+ const importFiles=async(files,options)=>{
+  const items=await importMedia(files,options);
+  for(const item of items){
+   if(item.kind!=='video')continue;
+   if(inputFiles.size>=100)inputFiles.delete(inputFiles.keys().next().value);
+   const id=require('node:crypto').randomUUID();inputFiles.set(id,item.path);item.previewUrl='flow-input://'+id+'/';
+  }
+  return items;
+ };
  protocol.handle('flow-input',request=>{
   const url=new URL(request.url),file=inputFiles.get(url.hostname);
   if(!file||url.pathname!=='/')return new Response('Not found',{status:404});
@@ -72,22 +82,9 @@ app.whenReady().then(async()=>{
   const allowVideos=options?.allowVideos===true;
   const result=await dialog.showOpenDialog(window,{title:allowVideos?'Выбрать фото и видео':'Выбрать изображения',properties:['openFile','multiSelections'],filters:[{name:allowVideos?'Фото и видео':'Изображения',extensions:['png','jpg','jpeg','webp','gif',...(allowVideos?['mp4','mov','m4v']:[])]}]});
   if(result.canceled)return[];
-  if(result.filePaths.length>7)throw new Error('Выберите не больше семи файлов.');
-  const items=[];
-  for(const file of result.filePaths){
-   const stat=await fs.stat(file);if(!stat.isFile())throw new Error('Выберите обычный файл.');
-   const ext=path.extname(file).slice(1).toLowerCase(),mime=ext==='jpg'?'jpeg':ext;
-   if(allowVideos&&['mp4','mov','m4v'].includes(ext)){
-    if(stat.size>100*1024*1024)throw new Error('Видео больше 100 МБ.');
-    if(inputFiles.size>=100)inputFiles.delete(inputFiles.keys().next().value);
-    const id=require('node:crypto').randomUUID();inputFiles.set(id,file);
-    items.push({kind:'video',name:path.basename(file),path:file,previewUrl:'flow-input://'+id+'/'});continue;
-   }
-   if(stat.size>20*1024*1024)throw new Error('Изображение больше 20 МБ.');
-   if(!['jpeg','png','webp','gif'].includes(mime))throw new Error('Неподдерживаемый формат изображения.');
-   items.push({kind:'image',name:path.basename(file),dataUrl:'data:image/'+mime+';base64,'+(await fs.readFile(file)).toString('base64')});
-  }return items;
+  return importFiles(result.filePaths,{allowVideos});
  });
+ handle('dropMedia',importFiles);
  handle('revealFile',file=>revealSaved({runtime,shell},file));
  handle('saveMedia',input=>saveWithDialog({runtime,window,dialog,downloadsDir:app.getPath('downloads')},input));
  function createWindow(){

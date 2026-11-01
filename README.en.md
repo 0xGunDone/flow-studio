@@ -21,7 +21,7 @@
 - Text-to-image, editing and image references, subject to each model's limits.
 - Text-to-video, reference-guided video, start/end frames, and video extension on supported models.
 - Up to 7 image references for Omni; a separate Omni Edit model accepts a source video and up to 5 images.
-- Multiple file selection, image/video previews, arrow controls to reorder references, and individual removal.
+- Drag and drop from Finder or select multiple files, preview images/videos, reorder references with arrow controls, and remove individual files.
 - Multiple Google accounts with separate managed Chrome profiles and explicit reauthentication.
 - Local previews, export, Finder integration, and the latest 100 jobs in persistent history.
 - A local MCP server exposing 13 tools for models, jobs, media, and accounts.

@@ -1,10 +1,20 @@
 'use strict';
-const {contextBridge,ipcRenderer}=require('electron');
+const {contextBridge,ipcRenderer,webUtils}=require('electron');
 contextBridge.exposeInMainWorld('flowStudio',{
   bootstrap:()=>ipcRenderer.invoke('studio:bootstrap'),
   retryStartup:()=>ipcRenderer.invoke('studio:retryStartup'),
   generate:input=>ipcRenderer.invoke('studio:generate',input),
   pickImages:options=>ipcRenderer.invoke('studio:pickImages',options),
+  dropMedia:async(files,options={})=>{
+    if(!Array.isArray(files))throw new Error('Перетащите файлы с диска.');
+    if(files.length>7)throw new Error('Выберите не больше семи файлов.');
+    const paths=Array.from(files,file=>{
+      let filePath;try{filePath=webUtils.getPathForFile(file);}catch{throw new Error('Перетащите обычные файлы с диска.');}
+      if(typeof filePath!=='string'||!filePath)throw new Error('Перетащите обычные файлы с диска.');
+      return filePath;
+    });
+    return ipcRenderer.invoke('studio:dropMedia',paths,{allowVideos:options?.allowVideos===true});
+  },
   addAccount:()=>ipcRenderer.invoke('studio:addAccount'),
   reconnectAccount:id=>ipcRenderer.invoke('studio:reconnectAccount',id),
   checkAccount:id=>ipcRenderer.invoke('studio:checkAccount',id),

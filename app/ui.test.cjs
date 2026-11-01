@@ -144,6 +144,8 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   let eventHandler;
   let generated = [];
   let picked = [{ name: 'input.png', dataUrl: 'data:image/png;base64,aGVsbG8=' }];
+  let dropped = [], dropError = null, finishDrop;
+  const dropCalls = [], windowEvents = {};
   let loginCall = 0;
   let completionCall = 0;
   const reconnected = [];
@@ -167,6 +169,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   const bridge = {
     onEvent: callback => { eventHandler = callback; return () => {}; }, bootstrap: async () => bootstrap,
     pickImages: async options => { pickerOptions.push(options); return picked; }, addAccount: async () => { loginCall++; return { state: 'waiting', canComplete: true, message: 'Войдите в Google' }; },
+    dropMedia: async (files, options) => { dropCalls.push({ files, options }); if (dropError) throw dropError; return dropped; },
     reconnectAccount: async accountId => { reconnected.push(accountId); return { state: 'waiting', method: 'chrome', accountId, canComplete: true, completeLabel: 'Проверить подключение', message: 'Откройте Flow в вашем Chrome и войдите в user@example.com' }; },
     checkAccount: async accountId => { checked.push(accountId); return { ok: true, accountId, checkedAt: new Date().toISOString() }; },
     completeLogin: async () => { completionCall++; assert.equal(byId('complete-login').disabled, true); return { state: 'syncing', message: 'Проверяем вход' }; },
@@ -177,7 +180,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   };
   const stored = new Map([['flowStudio.draft', JSON.stringify({ mode: 'video', model: snapshot.models[2].id, prompt: 'Saved draft', sourceVideoId: 'saved-source' })]]);
   const localStorage = { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) };
-  vm.runInNewContext(fs.readFileSync(require.resolve('./renderer.js'), 'utf8'), { document, window: { flowStudio: bridge, localStorage, addEventListener() {} }, Intl, Date, setInterval: () => 1, clearInterval() {}, console });
+  vm.runInNewContext(fs.readFileSync(require.resolve('./renderer.js'), 'utf8'), { document, window: { flowStudio: bridge, localStorage, addEventListener(name, callback) { (windowEvents[name] ||= []).push(callback); } }, Intl, Date, setInterval: () => 1, clearInterval() {}, console });
   assert.equal(byId('refresh-accounts').disabled, true, 'Account refresh waits for startup');
   await byId('refresh-accounts').dispatch('click');
   assert.equal(accountRefreshes, 0, 'Early refresh must not reach the backend');
@@ -389,4 +392,48 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(byId('form-error').hidden, true);
   assert.equal(byId('references-count').textContent, '2 / 7');
   assert.equal(byId('references-label').textContent, 'Исходные изображения');
+
+  // File drops use the same reference state, validation, ordering and previews as the picker.
+  while (referenceNodes().some(node => node.className === 'reference-remove')) await referenceNodes().find(node => node.className === 'reference-remove').dispatch('click');
+  const zone = byId('references-field'), transfer = { types: ['Files'], files: [{ name: 'first.png' }, { name: 'second.png' }] };
+  const photo1 = { kind: 'image', name: 'first.png', dataUrl: 'data:image/png;base64,Zmlyc3Q=' };
+  const photo2 = { kind: 'image', name: 'second.png', dataUrl: 'data:image/png;base64,c2Vjb25k' };
+  let prevented = false;
+  await zone.dispatch('dragenter', { dataTransfer: transfer });
+  await zone.dispatch('dragenter', { dataTransfer: transfer });
+  await zone.dispatch('dragleave', { dataTransfer: transfer });
+  assert(zone.className.includes('drag-over'), 'Moving over children keeps the drop highlight');
+  await zone.dispatch('dragover', { dataTransfer: transfer, preventDefault() { prevented = true; } });
+  assert.equal(prevented, true); assert.equal(transfer.dropEffect, 'copy');
+  dropped = new Promise(resolve => { finishDrop = resolve; });
+  const importing = zone.dispatch('drop', { dataTransfer: transfer });
+  assert.equal(byId('pick-images').disabled, true); assert.equal(byId('generate').disabled, true);
+  assert.equal(zone.attributes['aria-busy'], 'true');
+  await zone.dispatch('drop', { dataTransfer: transfer });
+  await byId('generation-form').dispatch('submit');
+  assert.equal(dropCalls.length, 1); assert.equal(generated.length, 3, 'Dropping files never generates or submits incomplete references');
+  finishDrop([photo1, photo2]); await importing;
+  assert.equal(byId('references-count').textContent, '2 / 7');
+  assert.deepEqual(byId('references').children.map(node => descendants(node).find(child => child.className === 'reference-name').textContent), ['first.png', 'second.png']);
+  assert.equal(dropCalls[0].options.allowVideos, false); assert.equal(dropCalls[0].files.length, 2);
+  assert.equal(zone.className.includes('drag-over'), false); assert.equal(zone.attributes['aria-busy'], 'false');
+  dropped = [photo1, photo2]; await zone.dispatch('drop', { dataTransfer: transfer });
+  assert.equal(byId('references-count').textContent, '2 / 7', 'Duplicates are ignored');
+  const beforeUrl = dropCalls.length;
+  await zone.dispatch('drop', { dataTransfer: { types: ['text/uri-list'], files: [] } });
+  assert.match(byId('form-error').textContent, /Ссылки не поддерживаются/); assert.equal(dropCalls.length, beforeUrl);
+  dropped = Array.from({ length: 6 }, (_, n) => ({ ...photo1, name: `extra-${n}.png`, dataUrl: `data:image/png;base64,extra${n}` }));
+  await zone.dispatch('drop', { dataTransfer: transfer });
+  assert.match(byId('form-error').textContent, /не больше 7/); assert.equal(byId('references-count').textContent, '2 / 7');
+  dropError = new Error('Неподдерживаемый формат файла'); await zone.dispatch('drop', { dataTransfer: transfer });
+  assert.match(byId('form-error').textContent, /Неподдерживаемый формат/); assert.equal(byId('references-count').textContent, '2 / 7'); dropError = null;
+  byId('model').value = snapshot.models[3].id; await byId('model').dispatch('change');
+  dropped = [{ kind: 'video', name: 'clip.mov', path: '/chosen/clip.mov', previewUrl: 'flow-input://drop-video/' }];
+  await zone.dispatch('drop', { dataTransfer: { types: ['Files'], files: [{ name: 'clip.mov' }] } });
+  assert.equal(dropCalls.at(-1).options.allowVideos, true); assert.equal(byId('references-count').textContent, '2 / 5 фото · 1 / 1 видео');
+  assert.equal(referenceNodes().find(node => node.tagName === 'VIDEO').src, 'flow-input://drop-video/');
+  let outsidePrevented = false;
+  for (const listener of windowEvents.drop) listener({ dataTransfer: transfer, preventDefault() { outsidePrevented = true; } });
+  assert.equal(outsidePrevented, true, 'Files dropped outside attachments cannot navigate away from the app');
+  assert.equal(generated.length, 3);
 });
