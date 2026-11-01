@@ -40,7 +40,7 @@
               <tr><th scope="row">Изображение по образцам или редактирование</th><td>До 5 исходных изображений с учетом лимита выбранной модели</td></tr>
               <tr><th scope="row">«Текст → видео»</th><td>Только запрос</td></tr>
               <tr><th scope="row">Veo «Ingredients · Ингредиенты»</th><td>От 1 до 3 изображений для содержания или стиля. Они не задают начальный и конечный кадры</td></tr>
-              <tr><th scope="row">Omni «Ingredients · Ингредиенты»</th><td>До 7 изображений</td></tr>
+              <tr><th scope="row">Omni «Ingredients · Ингредиенты»</th><td>От 1 до 7 изображений</td></tr>
               <tr><th scope="row">Omni «Редактирование»</th><td>Одно исходное видео и до 5 изображений для содержания или стиля. Длительность определяется исходным видео</td></tr>
               <tr><th scope="row">«Frames · Кадры»</th><td>Изображение в отдельной области начального кадра и при необходимости в области конечного кадра</td></tr>
               <tr><th scope="row">«Продолжение» видео</th><td>ID исходного видео из Flow. Локальный файл видео и ID задачи Flow Studio не подходят</td></tr>
@@ -117,8 +117,8 @@
       <details id="help-mcp" class="help-section">
         <summary>Подключение MCP к Codex и другим агентам</summary>
         <p>MCP дает агенту доступ к тому же приложению, аккаунтам и истории. Локальный мост при необходимости запускает установленный Flow Studio. Второй движок для агента не нужен</p>
-        <p>Сам MCP-сервер не держит движок работающим после выхода из приложения. Следующий вызов инструмента может снова открыть Flow Studio</p>
-        <p>Добавьте сервер <code>flow-studio</code> в настройки своего клиента. Если подключение уже настроено, но инструменты не появились в текущем чате, используйте CLI ниже или перезапустите подключение MCP в клиенте</p>
+        <p>Сам MCP-сервер не держит движок работающим после выхода из приложения. Следующий вызов инструмента может снова открыть Flow Studio. Если вы закрыли приложение для остановки работы, агент должен прекратить опрос</p>
+        <p>Добавьте сервер <code>flow-studio</code> в настройки своего клиента. Текущий сеанс может хранить старую схему инструментов: переподключите MCP-клиент для обновления или используйте CLI ниже. Для CLI полный перезапуск Codex не нужен</p>
         <h2>Команда подключения Codex</h2>
         <p>Замените путь на абсолютный путь к файлу из вашей копии репозитория</p>
         <button type="button" class="small secondary" data-copy-target="help-codex-command">Копировать</button>
@@ -145,20 +145,21 @@
         <p>Если MCP недоступен в текущем сеансе, те же операции работают через CLI. Эти команды читают состояние и каталог, не создают медиа и не расходуют кредиты генерации</p>
         <button type="button" class="small secondary" data-copy-target="help-cli-check">Копировать</button>
         <pre id="help-cli-check"><code>node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call status '{}'
-node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call models '{"kind":"video","mode":"frames"}'</code></pre>
+node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call models '{"kind":"video","method":"frames","durationSeconds":8,"aspectRatio":"16:9"}'</code></pre>
         <p>Для запроса на генерацию явно назовите Flow Studio, желаемый результат, модель и роли исходных файлов. Если в клиенте установлен навык <code>$flow-studio</code>, можно вызвать его. Общий запрос на изображение без выбора Flow Studio может использовать другой маршрут</p>
       </details>
 
       <details id="help-tools" class="help-section">
-        <summary>13 инструментов MCP и примеры аргументов</summary>
+        <summary>14 инструментов MCP и примеры аргументов</summary>
         <div class="help-table-wrap">
           <table>
             <caption>Имена инструментов, методы CLI и аргументы</caption>
             <thead><tr><th scope="col">MCP / CLI</th><th scope="col">Назначение и аргументы</th></tr></thead>
             <tbody>
-              <tr><th scope="row"><code>flow_studio_status</code><br><code>status</code></th><td>Готовность, аккаунты, текущие задачи и размер истории. Аргументы: <code>{}</code></td></tr>
-              <tr><th scope="row"><code>flow_studio_list_models</code><br><code>models</code></th><td>Каталог. Необязательные фильтры: <code>kind</code> — <code>image</code> или <code>video</code>; <code>mode</code> — <code>text</code>, <code>references</code>, <code>frames</code>, <code>extend</code> или <code>edit</code>; <code>query</code> — строка поиска</td></tr>
-              <tr><th scope="row"><code>flow_studio_generate</code><br><code>generate</code></th><td>Создать задачу с расходом кредитов. Обязательны <code>model</code>, <code>prompt</code>, <code>confirmCreditSpend: true</code> и <code>requestId</code>. Входные файлы — по примерам ниже</td></tr>
+              <tr><th scope="row"><code>flow_studio_status</code><br><code>status</code></th><td>Готовность, <code>features</code>, аккаунты, текущие задачи и размер истории. Аргументы: <code>{}</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_list_models</code><br><code>models</code></th><td>Каталог. Необязательные фильтры: <code>kind</code>, <code>method</code>, <code>family</code>, <code>durationSeconds</code>, <code>aspectRatio</code>, <code>resolution</code>, прежние <code>mode</code> и <code>query</code></td></tr>
+              <tr><th scope="row"><code>flow_studio_prepare_generation</code><br><code>prepare</code></th><td>Подготовить запрос без загрузки, генерации, создания задачи и расхода кредитов. Обязательны <code>prompt</code> и ровно одно из <code>model</code> или <code>settings</code>. Проверяются локальные форматы, размеры, лимиты и роли; возвращаются точная модель и <code>generateArguments</code>. UUID и <code>confirmCreditSpend</code> не нужны</td></tr>
+              <tr><th scope="row"><code>flow_studio_generate</code><br><code>generate</code></th><td>Создать задачу с расходом кредитов. Принимает ровно одно из <code>model</code> или <code>settings</code>, <code>prompt</code>, <code>confirmCreditSpend: true</code> и стабильный <code>requestId</code>. Предпочтительны точные <code>generateArguments</code> из подготовки</td></tr>
               <tr><th scope="row"><code>flow_studio_get_job</code><br><code>job</code></th><td>Статус и результаты задачи. Обязателен <code>jobId</code></td></tr>
               <tr><th scope="row"><code>flow_studio_wait_job</code><br><code>wait</code></th><td>Ожидать известную задачу. Обязателен <code>jobId</code>; <code>timeoutSeconds</code> — от 0 до 30, по умолчанию 20. Возвращает <code>job</code> и <code>done</code></td></tr>
               <tr><th scope="row"><code>flow_studio_list_jobs</code><br><code>history</code></th><td>Недавние задачи, новые первыми. <code>limit</code> — от 1 до 100, по умолчанию 20</td></tr>
@@ -174,55 +175,74 @@ node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call models '{"kind":"vid
         </div>
         <h2>Порядок работы агента</h2>
         <ol>
-          <li>Вызовите <code>flow_studio_status</code> и <code>flow_studio_list_models</code>. Используйте точный <code>id</code> из текущего каталога</li>
-          <li>Проверьте <code>minImages</code>, <code>maxImages</code>, <code>maxVideos</code>, <code>maxReferences</code>, <code>supportsVideoReferences</code>, <code>supportsStartFrame</code>, <code>supportsEndFrame</code> и <code>requiredTier</code>. Для изображений с референсами фильтруйте по <code>kind: "image"</code>: такие модели могут иметь <code>mode: "text"</code></li>
-          <li>Создайте UUID для <code>requestId</code> и сохраните его вместе с аргументами. Передайте <code>confirmCreditSpend: true</code>, только если пользователь запросил эту генерацию</li>
+          <li>Вызовите <code>flow_studio_status</code>, прочитайте <code>features</code> и отфильтруйте <code>flow_studio_list_models</code> по запросу пользователя. Используйте точные <code>id</code>, <code>family</code> и ограничения текущего каталога</li>
+          <li>Вызовите <code>flow_studio_prepare_generation</code> с текстом, абсолютными путями и точной моделью либо отдельными настройками. Проверьте возвращенные модель, метод, настройки, счетчики исходников и <code>checks</code></li>
+          <li>Сохраните <code>generateArguments</code> без изменений: они фиксируют точный ID, метод, текст и исходные пути. Для запрошенной пользователем генерации добавьте новый UUID в <code>requestId</code> и <code>confirmCreditSpend: true</code>, затем сохраните полный запрос</li>
           <li>Вызовите <code>flow_studio_generate</code> и сохраните возвращенный <code>jobId</code>. Проверяйте задачу через <code>flow_studio_get_job</code> или повторяйте ожидания <code>flow_studio_wait_job</code> до 30 секунд каждое</li>
           <li>После успешного завершения создайте папку назначения и вызовите <code>flow_studio_save_result</code> с абсолютным путем и подходящим расширением. Не заменяйте существующий файл без разрешения пользователя</li>
           <li>Покажите сохраненный результат. Вызывайте <code>flow_studio_open_result_folder</code>, если пользователь попросил открыть папку</li>
         </ol>
-        <p><code>confirmCreditSpend</code> фиксирует уже полученное разрешение на конкретную генерацию. Повторное подтверждение того же запроса не нужно. Настройка аккаунта, чтение каталога и диагностика сами по себе расход кредитов не разрешают</p>
-        <h2>Примеры входных данных</h2>
-        <p>Ниже шаблоны, а не готовые запросы. Замените значения в угловых скобках данными пользователя и текущего каталога. Для каждой новой генерации создавайте новый UUID. Файлы должны существовать локально; не передавайте URL или данные изображения вместо пути</p>
+        <p><code>confirmCreditSpend</code> фиксирует уже полученное разрешение на конкретную генерацию. Повторное подтверждение того же запроса не нужно. Настройка аккаунта, чтение каталога, подготовка и диагностика сами по себе расход кредитов не разрешают. Платная генерация не нужна для проверки подключения</p>
+        <p>Текущий <code>status</code> сообщает <code>apiVersion: 2</code> и возможности <code>generation-settings</code>, <code>prepare-generation</code>, <code>explicit-methods</code> в <code>features</code>. Если сеанс хранит старую схему, используйте CLI или переподключите MCP</p>
+        <p>Успешная подготовка возвращает <code>valid</code>, модель, <code>method</code>, <code>settings</code>, счетчики <code>inputs</code>, <code>generateArguments</code> и <code>checks</code>. В проверках <code>localFiles: "passed"</code>, <code>accountAccess: "not_checked"</code> и <code>credits: "not_checked"</code>. <code>videoDuration</code> равно <code>checked_at_submission</code> для исходного видео и <code>not_applicable</code> без него</p>
+        <p>Подготовка проверяет абсолютные пути, форматы, наличие обычных файлов, размеры, лимиты и роли. Она не декодирует медиа, не проверяет длительность, доступ аккаунта или баланс, не подтверждает принятие запроса Google и ничего не сохраняет</p>
+        <h2>Точная модель или отдельные настройки</h2>
+        <p>В <code>prepare</code> и <code>generate</code> передайте ровно одно из <code>model</code> или <code>settings</code>. Для точного <code>model</code> внешний <code>method</code> необязателен. Вместе с <code>settings</code> внешний <code>method</code> запрещен</p>
+        <p><code>settings</code> принимает только <code>kind</code>, <code>method</code>, <code>family</code>, <code>durationSeconds</code>, <code>aspectRatio</code> и <code>resolution</code>. Значения семейства, формата и разрешения берутся из каталога; пропущенное разрешение означает <code>standard</code>. Длительность обязательна для видео, кроме <code>edit</code>, и запрещена для изображений и <code>edit</code>: редактирование следует исходному видео. Недоступное или неоднозначное сочетание возвращает ошибку без замены</p>
+        <p>Каталог возвращает <code>family</code>, <code>methods</code>, <code>durationSource</code>, <code>resolution</code> и ограничения <code>inputsByMethod</code>. Для редактирования <code>durationSource: "input_video"</code>. Прежнее <code>mode</code> сохранено: изображения имеют <code>mode: "text"</code> и метод <code>image</code>, видео по образцам — <code>mode: "references"</code> и метод <code>ingredients</code>. Обычный Omni поддерживает <code>text</code> и <code>ingredients</code>; без явного метода выбирает ингредиенты при наличии референсов, иначе текст. Явный <code>ingredients</code> требует хотя бы одно изображение</p>
+        <p>При выборе через <code>settings</code> только прежние псевдонимы <code>veo-3.1-lite</code>, <code>veo-3.1-fast</code>, <code>veo-3.1-quality</code> и <code>omni-1.1-flash</code> объединяются с явными вариантами <code>-8s-landscape</code>, если они есть в каталоге. Точный <code>model</code> сохраняет выбранный ID, включая псевдоним. Другие имена не подбираются по сходству</p>
+        <h2>Примеры подготовки без расхода кредитов</h2>
+        <p>Ниже аргументы <code>flow_studio_prepare_generation</code>, а не команды запуска. Замените шаблоны данными пользователя и текущего каталога. Файлы должны существовать локально; не передавайте URL или base64 вместо пути. Перетаскивание в интерфейсе не является API MCP: агент передает абсолютные пути, к которым применяются те же нативные проверки формата и размера. Объекты браузерного File API не принимаются</p>
         <p><strong>Изображения-референсы.</strong> <code>referencePaths</code> сохраняет порядок пользователя: до 5 файлов для генерации изображений, до 3 для Veo по образцам или до 7 для обычного Omni, с учетом ограничений модели. Поддерживаются PNG, JPEG, WebP и GIF до 20 МБ на файл</p>
         <button type="button" class="small secondary" data-copy-target="help-reference-example">Копировать</button>
         <pre id="help-reference-example"><code>{
   "model": "&lt;MODEL_ID_FROM_LIST_MODELS&gt;",
+  "method": "ingredients",
   "prompt": "&lt;USER_PROMPT&gt;",
-  "referencePaths": ["/absolute/path/reference.png"],
-  "confirmCreditSpend": true,
-  "requestId": "&lt;NEW_UUID&gt;"
+  "referencePaths": ["/absolute/path/reference.png"]
 }</code></pre>
-        <p><strong>Omni Edit: видео и изображения.</strong> Выберите модель с <code>mode: "edit"</code>. Укажите один путь в <code>videoPaths</code> и, при необходимости, до пяти путей в <code>referencePaths</code>. Видео — MP4, MOV или M4V до 10 секунд и 100 МБ; порядок изображений сохраняется</p>
+        <p>Этот пример — видео по ингредиентам. Для изображения используйте <code>method: "image"</code>, референсы необязательны. Для видео только по тексту выберите <code>method: "text"</code> и уберите исходники</p>
+        <p><strong>Omni Edit: видео и изображения.</strong> Выберите модель с методом <code>edit</code>. Укажите один путь в <code>videoPaths</code> и, при необходимости, до пяти путей в <code>referencePaths</code>. Видео — MP4, MOV или M4V до 10 секунд и 100 МБ; порядок изображений сохраняется. Лимит длительности проверяется при фактической отправке, а не гарантируется подготовкой</p>
         <button type="button" class="small secondary" data-copy-target="help-edit-example">Копировать</button>
         <pre id="help-edit-example"><code>{
   "model": "&lt;OMNI_EDIT_MODEL_ID_FROM_LIST_MODELS&gt;",
+  "method": "edit",
   "prompt": "&lt;USER_PROMPT&gt;",
   "videoPaths": ["/absolute/path/source.mp4"],
-  "referencePaths": ["/absolute/path/style.png", "/absolute/path/subject.jpg"],
-  "confirmCreditSpend": true,
-  "requestId": "&lt;NEW_UUID&gt;"
+  "referencePaths": ["/absolute/path/style.png", "/absolute/path/subject.jpg"]
 }</code></pre>
-        <p><strong>Начальный и конечный кадры.</strong> Для <code>mode: "frames"</code> начальный кадр обязателен. Конечный нужен при <code>minImages: 2</code>; в остальных случаях передавайте его только при поддержке модели</p>
+        <p><strong>Начальный и конечный кадры через настройки.</strong> Для <code>method: "frames"</code> начальный кадр обязателен. Конечный нужен при <code>minImages: 2</code>; в остальных случаях передавайте его только при поддержке модели. У кадров отдельные роли: <code>referencePaths</code> не заменяет их, а конечный кадр без начального отклоняется</p>
         <button type="button" class="small secondary" data-copy-target="help-frames-example">Копировать</button>
         <pre id="help-frames-example"><code>{
-  "model": "&lt;FRAMES_MODEL_ID_FROM_LIST_MODELS&gt;",
+  "settings": {
+    "kind": "video",
+    "method": "frames",
+    "family": "&lt;EXACT_FAMILY_FROM_LIST_MODELS&gt;",
+    "durationSeconds": 8,
+    "aspectRatio": "16:9",
+    "resolution": "standard"
+  },
   "prompt": "&lt;USER_PROMPT&gt;",
   "startFramePath": "/absolute/path/start.png",
-  "endFramePath": "/absolute/path/end.png",
-  "confirmCreditSpend": true,
-  "requestId": "&lt;NEW_UUID&gt;"
+  "endFramePath": "/absolute/path/end.png"
 }</code></pre>
         <p><strong>Продолжение видео.</strong> Для <code>sourceVideoId</code> возьмите проверенный <code>media[index].mediaGenerationId</code> из <code>flow_studio_get_job</code>. Если этого ID нет, запросите его у пользователя; не подставляйте <code>jobId</code></p>
         <button type="button" class="small secondary" data-copy-target="help-extend-example">Копировать</button>
         <pre id="help-extend-example"><code>{
   "model": "&lt;EXTEND_MODEL_ID_FROM_LIST_MODELS&gt;",
+  "method": "extend",
   "prompt": "&lt;USER_PROMPT&gt;",
-  "sourceVideoId": "&lt;VERIFIED_MEDIA_GENERATION_ID&gt;",
-  "confirmCreditSpend": true,
-  "requestId": "&lt;NEW_UUID&gt;"
+  "sourceVideoId": "&lt;VERIFIED_MEDIA_GENERATION_ID&gt;"
 }</code></pre>
-        <p>Для генерации только по тексту оставьте <code>model</code>, <code>prompt</code>, <code>confirmCreditSpend</code> и <code>requestId</code>. Группа референсов (<code>referencePaths</code> и, для Omni Edit, <code>videoPaths</code>), поля кадров и <code>sourceVideoId</code> взаимно исключают друг друга. Не добавляйте отдельные поля длительности, формата или разрешения: их задает выбранная модель</p>
+        <p>Группа референсов (<code>referencePaths</code> и, для Omni Edit, <code>videoPaths</code>), поля кадров и <code>sourceVideoId</code> взаимно исключают друг друга. Исходники другого метода отклоняются. Перед расходом кредитов уточните роли кадров, если они не заданы пользователем</p>
+        <h2>От подготовки к запуску</h2>
+        <p>Для запрошенной пользователем генерации возьмите <code>generateArguments</code> из успешной подготовки и добавьте только новый UUID и разрешение на списание. В примере <code>plan</code> — результат подготовки. Сохраните полный объект до вызова <code>generate</code></p>
+        <button type="button" class="small secondary" data-copy-target="help-generate-example">Копировать</button>
+        <pre id="help-generate-example"><code>const args = {
+  ...plan.generateArguments,
+  requestId: crypto.randomUUID(),
+  confirmCreditSpend: true,
+};</code></pre>
         <h2>Ожидание, повтор и отмена</h2>
         <p><code>generate</code> возвращает задачу сразу. Истечение <code>wait_job</code> или ошибка связи не доказывают провал генерации. Сначала проверьте <code>get_job</code> и <code>list_jobs</code></p>
         <p>Если ответ на запуск потерялся, повторите вызов только с тем же <code>requestId</code> и неизменными аргументами и файлами. Пока задача есть в истории, мост вернет ее вместо новой генерации. Дедупликация сохраняется между запусками в пределах последних 100 задач. Если старая задача уже не хранится, сначала выясните ее исход</p>

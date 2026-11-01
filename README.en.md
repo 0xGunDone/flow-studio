@@ -24,7 +24,7 @@
 - Dedicated start and end frame slots with Finder drag and drop or file selection; a separate ingredient list with previews, arrow controls, and individual removal.
 - Multiple Google accounts with separate managed Chrome profiles and explicit reauthentication.
 - Local previews, export, Finder integration, and the latest 100 jobs in persistent history.
-- A local MCP server exposing 13 tools for models, jobs, media, and accounts.
+- A local MCP server exposing 14 tools for models, jobs, media, and accounts.
 - Bundled Flow2API source, built into a local Docker image on first launch.
 
 The interface and history run locally. Generation runs on Google's services and may spend your Google Flow credits. Prompts, input images/videos, and session data are sent to the service. A model appearing in the catalog does not guarantee access under your plan.

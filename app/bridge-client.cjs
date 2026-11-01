@@ -8,8 +8,8 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { setTimeout: delay } = require('node:timers/promises');
 
-const METHODS = new Set(['status', 'models', 'generate', 'job', 'wait', 'history', 'save', 'open_folder', 'accounts', 'login_start', 'login_complete', 'login_cancel', 'cancel']);
-const RETRYABLE_METHODS = new Set(['status', 'models', 'job', 'wait', 'history', 'accounts', 'generate']);
+const METHODS = new Set(['status', 'models', 'prepare', 'generate', 'job', 'wait', 'history', 'save', 'open_folder', 'accounts', 'login_start', 'login_complete', 'login_cancel', 'cancel']);
+const RETRYABLE_METHODS = new Set(['status', 'models', 'prepare', 'job', 'wait', 'history', 'accounts', 'generate']);
 const defaultBridgePath = path.join(os.homedir(), 'Library', 'Application Support', 'Flow Studio', 'agent-bridge.json');
 const appPaths = ['/Applications/Flow Studio.app',path.join(os.homedir(), 'Applications', 'Flow Studio.app')];
 
@@ -139,7 +139,7 @@ class BridgeClient {
     }
     const body = JSON.stringify({ method, params });
     if (Buffer.byteLength(body, 'utf8') > 512 * 1024) throw new BridgeError('REQUEST_TOO_LARGE', 'Bridge request exceeds 512 KiB; pass local paths, not image data.');
-    const timeoutMs = method === 'wait' ? 65000 : ['status', 'models', 'generate', 'accounts', 'login_start', 'login_complete'].includes(method) ? 120000 : 60000;
+    const timeoutMs = method === 'wait' ? 65000 : ['status', 'models', 'prepare', 'generate', 'accounts', 'login_start', 'login_complete'].includes(method) ? 120000 : 60000;
     for (let attempt = 0; attempt < 2; attempt++) {
       if (signal?.aborted) throw new BridgeError('REQUEST_CANCELLED', 'Bridge request cancelled.');
       const bridge = await this.connect();

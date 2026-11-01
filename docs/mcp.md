@@ -4,7 +4,7 @@
 
 MCP-сервер работает через `stdio` и управляет установленным Flow Studio. Он использует те же аккаунты, модели и историю, что и интерфейс. Не запускайте отдельный Flow2API для агента.
 
-Мост может запустить установленное приложение при вызове инструмента. Движок работает, пока открыто Flow Studio: закрытие окна кнопкой × или выход через `⌘Q` останавливает его, сворачивание окна — нет. Сам MCP-сервер не держит движок работающим после выхода из приложения. Следующий вызов инструмента может снова открыть Flow Studio.
+Мост может запустить установленное приложение при вызове инструмента. Движок работает, пока открыто Flow Studio: закрытие окна кнопкой × или выход через `⌘Q` останавливает его, сворачивание окна — нет. Сам MCP-сервер не держит движок работающим после выхода из приложения. Следующий вызов инструмента может снова открыть Flow Studio. Если пользователь закрыл приложение, чтобы остановить работу, агент прекращает опрос.
 
 ## Подключение
 
@@ -31,7 +31,7 @@ MCP-сервер работает через `stdio` и управляет ус�
    ```
 
 4. Если клиент не находит `node`, укажите абсолютный путь к нему из `command -v node`. GUI-приложения могут использовать другой `PATH`, чем терминал.
-5. Перезапустите подключение MCP в клиенте. Проверьте доступность через `flow_studio_status` и `flow_studio_list_models`.
+5. Перезапустите подключение MCP в клиенте. Проверьте доступность через `flow_studio_status` и `flow_studio_list_models`. Текущий сеанс может хранить старую схему инструментов: переподключите MCP-клиент для обновления или используйте тот же мост через CLI ниже. Для CLI не нужен полный перезапуск Codex.
 
 Для Codex CLI тот же сервер можно зарегистрировать командой:
 
@@ -45,12 +45,13 @@ codex mcp add flow-studio -- node /absolute/path/flow-studio/app/mcp-server.cjs
 
 Не добавляйте API-ключ, Google cookies или секрет моста в конфигурацию MCP. Мост получает локальные данные подключения самостоятельно. Если автозапуск приложения не сработал, откройте Flow Studio вручную.
 
-## Инструменты
+## 14 инструментов
 
 | Инструмент | Назначение |
 | --- | --- |
-| `flow_studio_status` | Готовность приложения, аккаунты, число моделей и задач |
-| `flow_studio_list_models` | Текущий каталог и ограничения; фильтры `kind`, `mode`, `query` |
+| `flow_studio_status` | Готовность, `features`, аккаунты, число моделей и задач |
+| `flow_studio_list_models` | Каталог; фильтры `kind`, `method`, `family`, `durationSeconds`, `aspectRatio`, `resolution`, прежние `mode` и `query` |
+| `flow_studio_prepare_generation` | Выбор точной модели и проверка локальных исходников без загрузки и расхода кредитов |
 | `flow_studio_generate` | Запуск одной генерации; сразу возвращает `jobId` |
 | `flow_studio_get_job` | Состояние задачи и сведения о файлах |
 | `flow_studio_wait_job` | Ожидание до 30 секунд; ответ содержит `job` и `done` |
@@ -65,78 +66,118 @@ codex mcp add flow-studio -- node /absolute/path/flow-studio/app/mcp-server.cjs
 
 ## Порядок генерации
 
-1. Прочитайте `flow_studio_status` и `flow_studio_list_models`. Используйте точный `id` из текущего каталога и проверьте ограничения исходных файлов.
-2. Получите запрос пользователя на конкретную генерацию. Установка аккаунта, чтение каталога и диагностика сами по себе не разрешают расход кредитов.
-3. Создайте новый UUID в `requestId`, сохраните его вместе с аргументами и вызовите `flow_studio_generate` с `confirmCreditSpend: true`.
+1. Прочитайте `flow_studio_status`: текущий мост сообщает `apiVersion: 2` и возможности `generation-settings`, `prepare-generation`, `explicit-methods` в `features`. Если сеанс хранит старую схему, переподключите MCP или используйте CLI. Затем отфильтруйте `flow_studio_list_models` по запросу пользователя; используйте точные `id`, `family` и ограничения каталога.
+2. Вызовите `flow_studio_prepare_generation` с текстом, исходниками и ровно одним селектором: `model` или `settings`. Подготовка проверяет локальные форматы, размеры и роли, но не загружает файлы, не создает генерацию или задачу и ничего не сохраняет. Поля `requestId` и `confirmCreditSpend` ей не нужны.
+3. Прочитайте результат проверки и сохраните возвращенные `generateArguments` без изменений. Они содержат точный ID модели, явный метод, исходный текст и пути. Для запрошенной пользователем генерации добавьте новый UUID в `requestId` и `confirmCreditSpend: true`, сохраните полный запрос и вызовите `flow_studio_generate`.
 4. Сохраните полученный `jobId`. Вызывайте `flow_studio_wait_job` с `timeoutSeconds: 30`, пока `done` не станет `true`, либо проверяйте `flow_studio_get_job`.
 5. Для успешной задачи вызовите `flow_studio_save_result`. Родительская папка `outputPath` должна существовать. Поле `index` выбирает результат с нуля; по умолчанию используется первый. Существующий файл не перезаписывается без `overwrite: true`.
 6. Верните пользователю сохраненный файл. Открывайте Finder только по запросу пользователя.
 
-В каталоге `mode: "references"` относится к видеомоделям по образцам, `mode: "edit"` — к Omni Edit. Модели изображений могут принимать референсы, оставаясь в `mode: "text"`. Проверяйте `minImages`, `maxImages`, `maxVideos`, `maxReferences`, `supportsVideoReferences`, `supportsStartFrame`, `supportsEndFrame` и `requiredTier`. Параметры формата кадра, разрешения и длительности задает ID модели — отдельных полей для них у `generate` нет.
+Успешная подготовка возвращает `valid`, сведения о точной модели, `method`, нормализованные `settings`, счетчики `inputs`, `generateArguments` и `checks`. В проверках `localFiles` имеет значение `passed`, `videoDuration` — `checked_at_submission` при наличии исходного видео и `not_applicable` без него, `accountAccess` и `credits` — `not_checked`. Проверяются абсолютные пути, форматы, наличие обычных файлов, размеры и роли; декодирование медиа и проверка длительности не выполняются. Доступ аккаунта, баланс и принятие запроса Google подготовка не подтверждает.
+
+Запрос пользователя на конкретную генерацию разрешает соответствующий расход кредитов; повторно спрашивать о том же запуске не нужно. Настройка аккаунта, чтение каталога, подготовка и диагностика сами по себе такого разрешения не дают. Не запускайте платную генерацию для проверки подключения.
+
+### Точный ID или отдельные настройки
+
+`prepare_generation` и `generate` принимают ровно одно из полей `model` и `settings`. Для точного `model` можно добавить внешний `method`. Вместе с `settings` внешний `method` запрещен: он должен находиться внутри объекта.
+
+```json
+{
+  "settings": {
+    "kind": "video",
+    "method": "frames",
+    "family": "<EXACT_FAMILY_FROM_LIST_MODELS>",
+    "durationSeconds": 8,
+    "aspectRatio": "16:9",
+    "resolution": "standard"
+  },
+  "prompt": "<USER_PROMPT>",
+  "startFramePath": "/absolute/path/start.png",
+  "endFramePath": "/absolute/path/end.png"
+}
+```
+
+Это аргументы подготовки. `settings` принимает только поля из примера: `kind` — `image` или `video`; `method` — `image`, `text`, `ingredients`, `frames`, `edit` или `extend`. Для изображений нужен метод `image`, для видео — остальные методы. `family` и `aspectRatio` берутся из каталога. Если `resolution` опущен, используется `standard`. `durationSeconds` обязателен для видео, кроме `edit`; для изображений и `edit` он запрещен. При редактировании длительность берется из исходного видео.
+
+Неоднозначное или недоступное сочетание возвращает ошибку без подбора замены. При выборе через `settings` только прежние псевдонимы `veo-3.1-lite`, `veo-3.1-fast`, `veo-3.1-quality` и `omni-1.1-flash` объединяются с явными вариантами `-8s-landscape`, если они есть в каталоге. Запрос через точный `model` сохраняет выбранный ID, включая прежний псевдоним. Неизвестные ID не заменяются похожими.
+
+Каталог дополнительно возвращает `family`, `methods`, `durationSource`, `resolution` и ограничения `inputsByMethod`. Для редактирования `durationSource: "input_video"`, для остальных моделей — `model`. Прежнее поле `mode` не изменилось: `references` относится к видео по образцам, `edit` — к Omni Edit, а модели изображений сохраняют `mode: "text"` при методе `image`. Обычный Omni поддерживает `text` и `ingredients`. Без явного внешнего метода точный ID Omni выбирает ингредиенты при наличии референсов, иначе текст. Явный `ingredients` требует хотя бы один референс.
+
+Проверяйте `inputsByMethod`, `minImages`, `maxImages`, `maxVideos`, `maxReferences`, `supportsVideoReferences`, `supportsStartFrame`, `supportsEndFrame` и `requiredTier`. Наличие модели в каталоге не подтверждает доступ аккаунта. Не меняйте модель, настройки или исходники после ошибки без решения пользователя.
 
 Варианты Veo на 4 и 6 секунд требуют Google AI Ultra; на Pro они недоступны. Варианты «По кадрам» на 8 секунд есть у Lite, Fast и Quality. Наличие модели в каталоге не гарантирует доступ аккаунта. [Официальные возможности моделей Google](https://support.google.com/flow/answer/16352836), [кадры и образцы](https://support.google.com/flow/answer/16353334).
 
 ### Текст и референсы
 
-Пример аргументов. Замените шаблоны данными пользователя и текущего каталога; файлы должны существовать локально:
+Пример аргументов `flow_studio_prepare_generation` для видео по ингредиентам. Замените шаблоны данными пользователя и текущего каталога; файлы должны существовать локально:
 
 ```json
 {
   "model": "<MODEL_ID_FROM_LIST_MODELS>",
+  "method": "ingredients",
   "prompt": "<USER_PROMPT>",
-  "referencePaths": ["/absolute/path/reference.png"],
-  "confirmCreditSpend": true,
-  "requestId": "<NEW_UUID>"
+  "referencePaths": ["/absolute/path/reference.png"]
 }
 ```
 
-Для запроса только по тексту уберите `referencePaths`. Лимиты изображений: до пяти для генерации изображений, до трех для Veo по образцам и до семи для обычного Omni, с учетом более строгого лимита модели. Входные форматы: PNG, JPEG, WebP, GIF, до 20 МБ каждый. URL и base64 вместо локальных путей не принимаются.
+Для видео только по тексту выберите `method: "text"` и уберите `referencePaths`; этот метод не принимает исходники. Для изображения используйте `method: "image"`, референсы необязательны. Лимиты изображений: до пяти для генерации изображений, до трех для Veo по образцам и до семи для обычного Omni, с учетом более строгого лимита модели. Входные форматы: PNG, JPEG, WebP, GIF, до 20 МБ каждый. URL и base64 вместо локальных путей не принимаются.
 
 ### Редактирование исходного видео в Omni
 
 ```json
 {
   "model": "<OMNI_EDIT_MODEL_ID_FROM_LIST_MODELS>",
+  "method": "edit",
   "prompt": "<USER_PROMPT>",
   "videoPaths": ["/absolute/path/source.mp4"],
-  "referencePaths": ["/absolute/path/style.png", "/absolute/path/subject.jpg"],
-  "confirmCreditSpend": true,
-  "requestId": "<NEW_UUID>"
+  "referencePaths": ["/absolute/path/style.png", "/absolute/path/subject.jpg"]
 }
 ```
 
 Omni Edit требует один путь в `videoPaths` и принимает до пяти необязательных изображений в `referencePaths`. Порядок изображений сохраняется. Для исходного видео поддерживаются MP4, MOV и M4V до 10 секунд и 100 МБ. Приложение загружает сам видеофайл; извлечение кадров не используется. Обычный Omni и Veo поле `videoPaths` не принимают.
 
-Проверка длительности выполняется через `ffprobe` в контейнере. FFmpeg на Mac для этого не нужен.
+Проверка лимита 10 секунд выполняется при фактической отправке через `ffprobe` в контейнере, а не гарантируется подготовкой. FFmpeg на Mac для этого не нужен.
 
 ### Начальный и конечный кадры
 
 ```json
 {
   "model": "<FRAMES_MODEL_ID_FROM_LIST_MODELS>",
+  "method": "frames",
   "prompt": "<USER_PROMPT>",
   "startFramePath": "/absolute/path/start.png",
-  "endFramePath": "/absolute/path/end.png",
-  "confirmCreditSpend": true,
-  "requestId": "<NEW_UUID>"
+  "endFramePath": "/absolute/path/end.png"
 }
 ```
 
-Начальный кадр обязателен для `mode: "frames"`. Конечный передается только при поддержке модели, а при `minImages: 2` он обязателен. Не заменяйте референсы начальными и конечными кадрами без указания пользователя.
+Начальный кадр обязателен для `method: "frames"`. Конечный передается только при поддержке модели, а при `minImages: 2` он обязателен. У кадров отдельные роли: `referencePaths` не заменяет их, а конечный кадр без начального не принимается. Если роли не ясны, уточните их до расхода кредитов.
 
 ### Продолжение видео
 
 ```json
 {
   "model": "<EXTEND_MODEL_ID_FROM_LIST_MODELS>",
+  "method": "extend",
   "prompt": "<USER_PROMPT>",
-  "sourceVideoId": "<VERIFIED_MEDIA_GENERATION_ID>",
-  "confirmCreditSpend": true,
-  "requestId": "<NEW_UUID>"
+  "sourceVideoId": "<VERIFIED_MEDIA_GENERATION_ID>"
 }
 ```
 
-Возьмите `sourceVideoId` из проверенного `media[index].mediaGenerationId` существующей задачи или получите ID исходного видео от пользователя. `jobId` — локальная задача Flow Studio, он не подходит. Группа референсов (`referencePaths` и, для Omni Edit, `videoPaths`), поля кадров и `sourceVideoId` взаимно исключают друг друга.
+Возьмите `sourceVideoId` из проверенного `media[index].mediaGenerationId` существующей задачи или получите ID исходного видео от пользователя. `jobId` — локальная задача Flow Studio, он не подходит. Группа референсов (`referencePaths` и, для Omni Edit, `videoPaths`), поля кадров и `sourceVideoId` взаимно исключают друг друга. Исходники другого метода отклоняются.
+
+Во всех примерах выше вызывается подготовка без UUID и разрешения на списание. Для согласованного запуска используйте возвращенный план:
+
+```js
+const args = {
+  ...plan.generateArguments,
+  requestId: crypto.randomUUID(),
+  confirmCreditSpend: true,
+};
+```
+
+Сохраните `args` до вызова `generate`: повтор должен использовать тот же объект, UUID и неизменные файлы. Не возвращайтесь к `settings` после подготовки — `generateArguments` уже фиксирует точный ID и метод.
+
+Перетаскивание файлов в интерфейсе не является API MCP. Агент передает абсолютные пути в соответствующих полях; к ним применяются те же нативные проверки формата и размера, что к выбору файлов и перетаскиванию. Объекты браузерного File API не принимаются.
 
 ## Повторы, ошибки и отмена
 
@@ -156,9 +197,10 @@ Omni Edit требует один путь в `videoPaths` и принимает
 node app/mcp-server.cjs --list-tools
 node app/mcp-server.cjs --call status '{}'
 node app/mcp-server.cjs --call models '{"kind":"image"}'
+node app/mcp-server.cjs --call models '{"kind":"video","method":"frames","durationSeconds":8,"aspectRatio":"16:9"}'
 node app/mcp-server.cjs --call history '{"limit":10}'
 ```
 
-CLI использует внутренние имена методов, например `models`, `job`, `wait`, `save`; MCP — имена `flow_studio_*` из таблицы. Подробнее — в [`skills/flow-studio/references/cli.md`](../skills/flow-studio/references/cli.md).
+CLI использует внутренние имена методов, например `models`, `prepare`, `job`, `wait`, `save`; MCP — имена `flow_studio_*` из таблицы. Подробнее — в [`skills/flow-studio/references/cli.md`](../skills/flow-studio/references/cli.md).
 
 Готовая [инструкция для агента](../skills/flow-studio/SKILL.md) описывает выбор моделей, ожидание и сохранение. Ее установка зависит от вашего клиента и не заменяет подключение MCP-сервера.
