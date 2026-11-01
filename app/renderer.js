@@ -28,6 +28,21 @@ function referenceKind(reference) {
   return reference.kind || (/^data:video\//i.test(reference.dataUrl || '') ? 'video' : 'image');
 }
 
+const VIDEO_METHODS = { text: 'Текст → видео', frames: 'Frames · Кадры', ingredients: 'Ingredients · Ингредиенты', edit: 'Редактирование видео', extend: 'Продолжение видео' };
+function modelSettings(model) {
+  const info = modelInfo(model), id = info.id;
+  const family = /^veo[-_]3[._]1[-_](lite|fast|quality)/.exec(id)?.[1];
+  const name = family ? `Veo 3.1 ${family[0].toUpperCase() + family.slice(1)}` : info.omni ? 'Omni 1.1 Flash' : /flash-lite-image/.test(id) ? 'Nano Banana 2 Lite' : /flash-image/.test(id) ? 'Nano Banana 2.1' : /pro-image/.test(id) ? 'Nano Banana Pro' : (model?.description || id).split(' · ')[0];
+  const methods = info.kind === 'image' ? ['image'] : info.edit ? ['edit'] : info.extend ? ['extend'] : info.i2v ? ['frames'] : info.r2v ? ['ingredients'] : info.omni ? ['text', 'ingredients'] : ['text'];
+  return { model, info, family: name, methods, duration: info.edit ? 'source' : info.kind === 'video' ? info.seconds || '8' : '', aspect: info.aspect || '16:9', resolution: info.resolution || 'standard' };
+}
+function frameReferences(frames, info, required = false) {
+  const [start, end] = frames;
+  if (!start && (end || required)) throw new Error('Добавьте начальный кадр');
+  if (end && info.maxImages < 2) throw new Error('Эта модель не поддерживает конечный кадр');
+  return [start, end].filter(Boolean);
+}
+
 function referenceError(info, references, required = false) {
   const images = references.filter(reference => referenceKind(reference) === 'image');
   const videos = references.filter(reference => referenceKind(reference) === 'video');
@@ -68,8 +83,8 @@ function readDraft(storage) {
   try {
     const draft = JSON.parse(storage?.getItem('flowStudio.draft') || '{}');
     const text = (key, max) => typeof draft?.[key] === 'string' ? draft[key].slice(0, max) : '';
-    return { mode: draft?.mode === 'video' ? 'video' : 'image', model: text('model', 512), prompt: text('prompt', 16000), sourceVideoId: text('sourceVideoId', 2048) };
-  } catch { return { mode: 'image', model: '', prompt: '', sourceVideoId: '' }; }
+    return { mode: draft?.mode === 'video' ? 'video' : 'image', model: text('model', 512), videoMethod: Object.hasOwn(VIDEO_METHODS, draft?.videoMethod) ? draft.videoMethod : '', prompt: text('prompt', 16000), sourceVideoId: text('sourceVideoId', 2048) };
+  } catch { return { mode: 'image', model: '', videoMethod: '', prompt: '', sourceVideoId: '' }; }
 }
 
 function requiresLogin(job) {
@@ -87,13 +102,13 @@ function errorMessage(error) {
     .replace(/^Error invoking remote method ['"]studio:[A-Za-z]+['"]:\s*(?:Error:\s*)?/, '');
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, requestFor, mediaUrl, readDraft, requiresLogin, recoveryAccountId, errorMessage };
+if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, recoveryAccountId, errorMessage };
 if (typeof document !== 'undefined') initialize();
 
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
+  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
@@ -104,6 +119,7 @@ function initialize() {
   try { draftStorage = window.localStorage; } catch { /* Drafts remain usable when browser storage is unavailable. */ }
   const draft = readDraft(draftStorage);
   state.mode = draft.mode;
+  state.videoMethod = draft.videoMethod || 'text';
   $('prompt').value = draft.prompt;
   $('source-video-id').value = draft.sourceVideoId;
   for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
@@ -111,7 +127,7 @@ function initialize() {
 
   function saveDraft() {
     draft.model = $('model').value || draft.model;
-    try { draftStorage?.setItem('flowStudio.draft', JSON.stringify({ mode: state.mode, model: draft.model, prompt: $('prompt').value, sourceVideoId: $('source-video-id').value })); } catch { /* A full or disabled store must not block generation. */ }
+    try { draftStorage?.setItem('flowStudio.draft', JSON.stringify({ mode: state.mode, model: draft.model, videoMethod: state.videoMethod, prompt: $('prompt').value, sourceVideoId: $('source-video-id').value })); } catch { /* A full or disabled store must not block generation. */ }
   }
 
   function element(tag, className, text) {
@@ -134,6 +150,16 @@ function initialize() {
   }
   function activeJob() { return state.jobs.find(job => job.status === 'running'); }
   function selectedModel() { return state.models.find(model => model.id === $('model').value); }
+  function currentReferences(required = false) {
+    const info = modelInfo(selectedModel());
+    if (state.mode === 'video' && state.videoMethod === 'frames') return frameReferences(state.frames, info, required);
+    if (state.mode === 'video' && ['text','extend'].includes(state.videoMethod)) return [];
+    return state.references;
+  }
+  function inputError(required = false) {
+    try { return referenceError(modelInfo(selectedModel()), currentReferences(required), required); }
+    catch (error) { return error.message; }
+  }
   function date(value) {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? '' : dates.format(parsed);
@@ -190,17 +216,61 @@ function initialize() {
       if (preferred) $('model').value = preferred.id;
     }
     $('model').disabled = !models.length;
+    const settings = selectedModel() && modelSettings(selectedModel());
+    if (state.mode === 'video' && settings && !settings.methods.includes(state.videoMethod)) state.videoMethod = settings.methods[0];
+    renderSettings();
     updateModel();
+  }
+  function fillSelect(id, values, selected, label = value => value) {
+    const node = $(id); node.replaceChildren();
+    for (const value of [...new Set(values)]) { const option = element('option', '', label(value)); option.value = value; node.append(option); }
+    node.value = values.includes(selected) ? selected : values[0] || '';
+    node.disabled = !values.length;
+    return node.value;
+  }
+  function renderSettings() {
+    const catalog = state.models.filter(model => modelInfo(model).kind === state.mode).map(modelSettings);
+    const selected = selectedModel() && modelSettings(selectedModel());
+    $('video-method-field').hidden = state.mode !== 'video';
+    fillSelect('video-method', Object.keys(VIDEO_METHODS).filter(method => catalog.some(entry => entry.methods.includes(method))), state.videoMethod, value => VIDEO_METHODS[value]);
+    if (state.mode === 'video') state.videoMethod = $('video-method').value;
+    const method = state.mode === 'image' ? 'image' : state.videoMethod;
+    const entries = catalog.filter(entry => entry.methods.includes(method));
+    fillSelect('model-family', entries.map(entry => entry.family), selected?.family);
+    const family = entries.filter(entry => entry.family === $('model-family').value);
+    fillSelect('duration', [...new Set(family.map(entry => entry.duration))].sort((a,b) => Number(a)-Number(b)), selected?.duration, value => value === 'source' ? 'По исходному видео' : `${value} с${family.some(entry => entry.duration === value && entry.info.requiredTier) ? ' · Ultra' : ''}`);
+    $('duration').disabled = $('duration').children.length < 2;
+    $('duration-field').hidden = state.mode !== 'video';
+    fillSelect('aspect-ratio', family.filter(entry => entry.duration === $('duration').value).map(entry => entry.aspect), selected?.aspect);
+    fillSelect('resolution', family.filter(entry => entry.duration === $('duration').value && entry.aspect === $('aspect-ratio').value).map(entry => entry.resolution), selected?.resolution, value => value === 'standard' ? 'Стандартное' : value);
+    $('resolution-field').hidden = $('resolution').children.length < 2;
+  }
+  function selectSettings(changed) {
+    const old = selectedModel() && modelSettings(selectedModel());
+    if (changed === 'video-method') state.videoMethod = $('video-method').value;
+    const method = state.mode === 'image' ? 'image' : state.videoMethod;
+    let entries = state.models.map(modelSettings).filter(entry => entry.info.kind === state.mode && entry.methods.includes(method));
+    const wants = { family: $('model-family').value, duration: $('duration').value, aspect: $('aspect-ratio').value, resolution: $('resolution').value };
+    const keys = { 'model-family': 'family', duration: 'duration', 'aspect-ratio': 'aspect', resolution: 'resolution' };
+    if (keys[changed]) entries = entries.filter(entry => entry[keys[changed]] === wants[keys[changed]]);
+    for (const key of ['family','duration','aspect','resolution']) {
+      if (key === keys[changed]) continue;
+      const matching = entries.filter(entry => entry[key] === (wants[key] || old?.[key]));
+      if (matching.length) entries = matching;
+    }
+    const chosen = entries.find(entry => entry.model.id === old?.model.id) || entries[0];
+    $('model').value = chosen?.model.id || '';
+    renderSettings(); updateModel(); saveDraft();
   }
   function updateModel() {
     const info = modelInfo(selectedModel());
     $('source-field').hidden = !info.extend;
     $('source-video-id').required = info.extend;
     $('pick-images-label').textContent = info.supportsVideoReferences ? 'Добавить фото или видео' : 'Добавить изображения';
-    $('model-description').textContent = !selectedModel() ? '' : info.edit ? 'Редактирует исходное видео по вашему запросу и образцам' : info.extend ? 'Продолжает исходное видео по вашему запросу' : info.i2v ? 'Первое изображение — начальный кадр, второе — конечный' : info.r2v ? 'Использует изображения как образцы для видео' : info.omni ? 'По тексту или по тексту с изображениями' : info.kind === 'image' ? 'По тексту или с исходными изображениями' : 'Видео по текстовому описанию';
+    $('model-description').textContent = !selectedModel() ? '' : info.edit ? 'Редактирует исходное видео по вашему запросу и ингредиентам' : info.extend ? 'Продолжает исходное видео по вашему запросу' : state.videoMethod === 'frames' && state.mode === 'video' ? 'Задайте начальный кадр и при необходимости конечный' : state.videoMethod === 'ingredients' && state.mode === 'video' ? 'Использует ингредиенты для содержания и стиля ролика' : info.kind === 'image' ? 'По тексту или с исходными изображениями' : 'Видео по текстовому описанию';
     $('references-hint').textContent = info.edit ? '1 исходное видео MP4, MOV или M4V до 10 с и до 5 изображений. Порядок образцов сохраняется' : info.i2v ? 'Порядок изображений задает начальный и конечный кадры' : info.minImages ? `От ${info.minImages} до ${info.maxImages} изображений` : info.maxImages ? `До ${info.maxImages} изображений, если нужны` : 'Эта модель не использует исходные изображения';
     renderReferences();
-    setError('form-error', referenceError(info, state.references));
+    setError('form-error', inputError());
     updateGenerate();
   }
   function renderReferences() {
@@ -208,10 +278,10 @@ function initialize() {
     $('references').replaceChildren();
     const videos = state.references.filter(reference => referenceKind(reference) === 'video').length;
     const images = state.references.length - videos;
-    $('references-field').hidden = !selectedModel() || (!info.maxReferences && !state.references.length);
-    $('references-label').textContent = info.supportsVideoReferences || videos ? 'Исходные фото и видео' : 'Исходные изображения';
+    $('references-field').hidden = !selectedModel() || state.mode === 'video' && ['text','frames','extend'].includes(state.videoMethod) || (!info.maxReferences && !state.references.length);
+    $('references-label').textContent = state.mode === 'video' ? 'Ингредиенты' : 'Исходные изображения';
     $('references-count').textContent = info.maxVideos || videos ? `${images} / ${info.maxImages} фото · ${videos} / ${info.maxVideos} видео` : `${images} / ${info.maxImages}`;
-    function changed() { renderReferences(); setError('form-error', referenceError(info, state.references)); }
+    function changed() { renderReferences(); setError('form-error', inputError()); }
     state.references.forEach((reference, index) => {
       const item = element('figure', 'reference');
       item.setAttribute('role', 'listitem');
@@ -238,6 +308,40 @@ function initialize() {
     });
     $('pick-images').disabled = state.importPending || state.references.length >= info.maxReferences;
     $('references-field').setAttribute('aria-busy', String(state.importPending));
+    renderFrames();
+  }
+  function renderFrames() {
+    const info = modelInfo(selectedModel());
+    $('frames-field').hidden = state.mode !== 'video' || state.videoMethod !== 'frames';
+    for (const [index, id, title] of [[0,'start-frame','Начальный кадр'],[1,'end-frame','Конечный кадр']]) {
+      const node = $(id); node.replaceChildren();
+      const supported = index === 0 || info.maxImages > 1;
+      node.setAttribute('aria-label', title); node.setAttribute('aria-busy', String(state.importPending));
+      node.append(element('span', 'frame-label', title));
+      const file = state.frames[index];
+      if (file) {
+        const preview = element('img'); preview.src = mediaUrl(file.dataUrl); preview.alt = file.name;
+        node.append(preview, element('span','reference-name',file.name));
+      }
+      const pick = button(file ? 'Заменить' : '+ Добавить', 'secondary frame-pick', () => importFrame(index, () => api.pickImages({ allowVideos: false })));
+      pick.setAttribute('aria-label', `${file ? 'Заменить' : 'Добавить'} ${title.toLowerCase()}`);
+      pick.disabled = !supported || state.importPending; node.append(pick);
+      if (file) { const remove = button('Удалить', 'frame-remove', () => { state.frames[index] = null; renderFrames(); setError('form-error', inputError()); }); remove.setAttribute('aria-label', `Удалить ${title.toLowerCase()}`); node.append(remove); }
+      else node.append(element('span','hint',!supported ? 'Недоступен для этой модели' : index && info.minImages < 2 ? 'Необязательно' : 'Обязательный кадр'));
+    }
+  }
+  async function importFrame(index, read) {
+    if (state.importPending) return;
+    const info = modelInfo(selectedModel());
+    if (state.videoMethod !== 'frames' || index > 0 && info.maxImages < 2) { setError('form-error','Этот кадр недоступен для выбранной модели'); return; }
+    state.importPending = true; renderFrames(); updateGenerate();
+    try {
+      const files = await read();
+      if (!files.length) return;
+      if (files.length !== 1 || referenceKind(files[0]) !== 'image') throw new Error('Для одного кадра выберите одно изображение');
+      state.frames[index] = files[0]; setError('form-error',inputError());
+    } catch (error) { setError('form-error',errorMessage(error)); }
+    finally { state.importPending = false; renderFrames(); updateGenerate(); }
   }
   async function importReferences(read) {
     if (state.importPending) return;
@@ -274,8 +378,10 @@ function initialize() {
     }
     $('prompt').value = job.prompt;
     state.references = [];
+    state.frames = [null, null];
     $('source-video-id').value = '';
-    updateModel();
+    const settings = model && modelSettings(model); if (state.mode === 'video' && settings && !settings.methods.includes(state.videoMethod)) state.videoMethod = settings.methods[0];
+    renderSettings(); updateModel();
     updatePromptCount();
     saveDraft();
     page('create');
@@ -512,7 +618,7 @@ function initialize() {
     if (state.submitting || state.importPending || activeJob() || !state.ready) return;
     setError('form-error', '');
     let request;
-    try { request = requestFor(selectedModel(), $('prompt').value, state.references, $('source-video-id').value); }
+    try { request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value); }
     catch (error) { setError('form-error', errorMessage(error)); return; }
     state.submitting = true;
     updateGenerate();
@@ -549,7 +655,8 @@ function initialize() {
   for (const input of document.querySelectorAll('input[name="mode"]')) input.addEventListener('change', () => { state.mode = input.value; renderModels(); saveDraft(); });
   $('open-accounts').addEventListener('click', () => page('accounts'));
   $('dismiss-notice').addEventListener('click', () => { $('notice').hidden = true; });
-  $('model').addEventListener('change', () => { updateModel(); saveDraft(); });
+  $('model').addEventListener('change', () => { const settings = selectedModel() && modelSettings(selectedModel()); if (state.mode === 'video' && settings && !settings.methods.includes(state.videoMethod)) state.videoMethod = settings.methods[0]; renderSettings(); updateModel(); saveDraft(); });
+  for (const id of ['video-method','model-family','duration','aspect-ratio','resolution']) $(id).addEventListener('change', () => selectSettings(id));
   $('prompt').addEventListener('input', () => { updatePromptCount(); saveDraft(); });
   $('source-video-id').addEventListener('input', saveDraft);
   $('prompt').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); if (!$('generate').disabled) $('generation-form').requestSubmit(); } });
@@ -581,6 +688,16 @@ function initialize() {
   });
   for (const name of ['dragover', 'drop']) window.addEventListener(name, event => { if (isFileDrag(event)) event.preventDefault(); if (name === 'drop') clearDrag(); });
   window.addEventListener('dragend', clearDrag);
+  for (const [index, id] of [[0,'start-frame'],[1,'end-frame']]) {
+    $(id).addEventListener('dragover', event => { if (!isFileDrag(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; $(id).classList.toggle('drag-over',true); });
+    $(id).addEventListener('dragleave', () => $(id).classList.toggle('drag-over',false));
+    $(id).addEventListener('drop', async event => {
+      event.preventDefault(); $(id).classList.toggle('drag-over',false);
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (!files.length) { setError('form-error','Перетащите локальное изображение для кадра'); return; }
+      await importFrame(index, () => api.dropMedia(files,{allowVideos:false}));
+    });
+  }
   $('add-account').addEventListener('click', () => beginLogin());
   $('complete-login').addEventListener('click', async () => {
     if (state.loginPending || state.login?.state !== 'waiting' || state.login.canComplete !== true) return;

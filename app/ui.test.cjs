@@ -24,11 +24,11 @@ test('auth recovery recognizes arbitrary RPC 401 and never selects an unrelated 
 });
 
 test('draft reader allows only harmless fields and tolerates unavailable or corrupt storage', () => {
-  const empty = { mode: 'image', model: '', prompt: '', sourceVideoId: '' };
+  const empty = { mode: 'image', model: '', videoMethod: '', prompt: '', sourceVideoId: '' };
   assert.deepEqual(readDraft(), empty);
   assert.deepEqual(readDraft({ getItem() { throw new Error('Disabled'); } }), empty);
   assert.deepEqual(readDraft({ getItem: () => '{' }), empty);
-  assert.deepEqual(readDraft({ getItem: () => JSON.stringify({ mode: 'video', model: 'm', prompt: 'draft', sourceVideoId: 'source', images: ['data:image/png;base64,secret'], credentials: 'secret' }) }), { mode: 'video', model: 'm', prompt: 'draft', sourceVideoId: 'source' });
+  assert.deepEqual(readDraft({ getItem: () => JSON.stringify({ mode: 'video', model: 'm', videoMethod: 'ingredients', prompt: 'draft', sourceVideoId: 'source', images: ['data:image/png;base64,secret'], credentials: 'secret' }) }), { mode: 'video', model: 'm', videoMethod: 'ingredients', prompt: 'draft', sourceVideoId: 'source' });
 });
 
 test('current catalog models expose format, duration, and correct input requirements', () => {
@@ -161,7 +161,13 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     { id: 'veo-3.1-fast-extend-8s-landscape', description: 'Veo 3.1 - Fast Extend · landscape' },
     { id: 'omni-1.1-flash-edit-landscape', description: 'Omni 1.1 Flash Edit' },
     { id: 'veo-3.1-fast-r2v-8s-landscape', description: 'Veo 3.1 - Fast R2V · 8s · landscape' },
-    { id: 'omni-1.1-flash-10s-landscape', description: 'Omni 1.1 Flash · 10s · landscape' }
+    { id: 'omni-1.1-flash-10s-landscape', description: 'Omni 1.1 Flash · 10s · landscape' },
+    { id: 'veo-3.1-fast-i2v-8s-landscape' },
+    { id: 'veo-3.1-fast-i2v-8s-portrait' },
+    { id: 'veo-3.1-fast-4s-landscape' },
+    { id: 'veo-3.1-fast-8s-landscape' },
+    { id: 'omni-1.1-flash-4s-landscape' },
+    { id: 'omni-1.1-flash-4s-portrait' }
   ], accounts: [{ id: 9, email: 'user@example.com', credits: 250, isActive: true, videoEnabled: true }], history: [], login: null };
   let finishBootstrap, finishRefresh, accountRefreshes = 0;
   const bootstrap = new Promise(resolve => { finishBootstrap = resolve; });
@@ -258,7 +264,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.match(byId('form-error').textContent, /ID исходного видео/);
   byId('source-video-id').value = 'source-id';
   await byId('source-video-id').dispatch('input');
-  assert.deepEqual(JSON.parse(stored.get('flowStudio.draft')), { mode: 'video', model: snapshot.models[2].id, prompt: 'Test scene', sourceVideoId: 'source-id' });
+  assert.deepEqual(JSON.parse(stored.get('flowStudio.draft')), { mode: 'video', model: snapshot.models[2].id, videoMethod: 'extend', prompt: 'Test scene', sourceVideoId: 'source-id' });
   await byId('generation-form').dispatch('submit');
   assert.equal(generated[1].sourceVideoId, 'source-id');
   assert.equal(generated[1].images.length, 0, 'Hidden image references cannot leak into extend request');
@@ -391,7 +397,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   await referenceButton('Удалить source.mov').dispatch('click');
   assert.equal(byId('form-error').hidden, true);
   assert.equal(byId('references-count').textContent, '2 / 7');
-  assert.equal(byId('references-label').textContent, 'Исходные изображения');
+  assert.equal(byId('references-label').textContent, 'Ингредиенты');
 
   // File drops use the same reference state, validation, ordering and previews as the picker.
   while (referenceNodes().some(node => node.className === 'reference-remove')) await referenceNodes().find(node => node.className === 'reference-remove').dispatch('click');
@@ -436,4 +442,47 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   for (const listener of windowEvents.drop) listener({ dataTransfer: transfer, preventDefault() { outsidePrevented = true; } });
   assert.equal(outsidePrevented, true, 'Files dropped outside attachments cannot navigate away from the app');
   assert.equal(generated.length, 3);
+
+  // Website-like independent controls resolve the exact catalog model and preserve frame roles.
+  byId('video-method').value = 'frames'; await byId('video-method').dispatch('change');
+  assert.equal(byId('frames-field').hidden, false); assert.equal(byId('references-field').hidden, true);
+  assert.equal(byId('model-family').value, 'Veo 3.1 Fast');
+  byId('duration').value = '8'; await byId('duration').dispatch('change');
+  byId('aspect-ratio').value = '9:16'; await byId('aspect-ratio').dispatch('change');
+  assert.equal(byId('model').value, 'veo-3.1-fast-i2v-8s-portrait');
+  const slotNodes = id => descendants(byId(id));
+  const startFile = { kind: 'image', name: 'start.png', dataUrl: 'data:image/png;base64,c3RhcnQ=' };
+  const endFile = { kind: 'image', name: 'end.png', dataUrl: 'data:image/png;base64,ZW5k' };
+  dropped = [endFile]; await byId('end-frame').dispatch('drop', { dataTransfer: { types: ['Files'], files: [{ name: 'end.png' }] } });
+  await byId('generation-form').dispatch('submit');
+  assert.equal(generated.length, 3); assert.match(byId('form-error').textContent, /начальный кадр/);
+  assert(slotNodes('end-frame').some(node => node.tagName === 'IMG' && node.alt === 'end.png'));
+  picked = [startFile]; await slotNodes('start-frame').find(node => node.className.includes('frame-pick')).dispatch('click');
+  await byId('generation-form').dispatch('submit');
+  assert.equal(generated.length, 4);
+  assert.equal(generated[3].model, 'veo-3.1-fast-i2v-8s-portrait');
+  assert.deepEqual(Array.from(generated[3].images), [startFile.dataUrl, endFile.dataUrl], 'Frame roles determine order, even when end was added first');
+  eventHandler({ type: 'job', job: { id: 'job-4', model: generated[3].model, kind: 'video', status: 'failed', error: 'TEST_DONE', media: [] } });
+  byId('video-method').value = 'ingredients'; await byId('video-method').dispatch('change');
+  assert.equal(byId('frames-field').hidden, true); assert.equal(byId('references-field').hidden, false);
+  assert.equal(byId('references-count').textContent, '2 / 3 фото · 1 / 0 видео', 'Ingredients stay separate from frame slots');
+  byId('model-family').value = 'Omni 1.1 Flash'; await byId('model-family').dispatch('change');
+  byId('duration').value = '4'; await byId('duration').dispatch('change');
+  byId('aspect-ratio').value = '9:16'; await byId('aspect-ratio').dispatch('change');
+  assert.equal(byId('model').value, 'omni-1.1-flash-4s-portrait');
+  assert.equal(byId('model-family').children.length, 2, 'Only distinct families are shown for ingredients');
+  assert.equal(JSON.parse(stored.get('flowStudio.draft')).videoMethod, 'ingredients');
+  byId('video-method').value = 'frames'; await byId('video-method').dispatch('change');
+  assert(slotNodes('start-frame').some(node => node.tagName === 'IMG' && node.alt === 'start.png'));
+  assert(slotNodes('end-frame').some(node => node.tagName === 'IMG' && node.alt === 'end.png'));
+  dropped = [startFile, endFile]; await byId('start-frame').dispatch('drop', { dataTransfer: transfer });
+  assert.match(byId('form-error').textContent, /одно изображение/);
+  byId('video-method').value = 'edit'; await byId('video-method').dispatch('change');
+  assert.equal(byId('references-count').textContent, '2 / 5 фото · 1 / 1 видео');
+  byId('video-method').value = 'extend'; await byId('video-method').dispatch('change');
+  byId('source-video-id').value = 'source-existing';
+  assert.equal(byId('references-field').hidden, true);
+  await byId('generation-form').dispatch('submit');
+  assert.equal(generated.length, 5); assert.equal(generated[4].sourceVideoId,'source-existing');
+  assert.equal(generated[4].images.length,0); assert.equal(generated[4].references,undefined,'Hidden edit video never blocks or leaks into extension');
 });

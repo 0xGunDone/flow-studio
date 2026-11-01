@@ -19,9 +19,9 @@
 ## Included
 
 - Text-to-image, editing and image references, subject to each model's limits.
-- Text-to-video, reference-guided video, start/end frames, and video extension on supported models.
+- Separate video methods for text, Frames, Ingredients, editing, and extension, with independent model, duration, aspect ratio, and available resolution controls.
 - Up to 7 image references for Omni; a separate Omni Edit model accepts a source video and up to 5 images.
-- Drag and drop from Finder or select multiple files, preview images/videos, reorder references with arrow controls, and remove individual files.
+- Dedicated start and end frame slots with Finder drag and drop or file selection; a separate ingredient list with previews, arrow controls, and individual removal.
 - Multiple Google accounts with separate managed Chrome profiles and explicit reauthentication.
 - Local previews, export, Finder integration, and the latest 100 jobs in persistent history.
 - A local MCP server exposing 13 tools for models, jobs, media, and accounts.
@@ -29,7 +29,9 @@
 
 The interface and history run locally. Generation runs on Google's services and may spend your Google Flow credits. Prompts, input images/videos, and session data are sent to the service. A model appearing in the catalog does not guarantee access under your plan.
 
-Omni Edit accepts MP4, MOV, or M4V up to 10 seconds and 100 MB. Google's current editing mode accepts one source video, so multiple videos in one request are not supported. The app uploads the video itself without extracting frames.
+Omni Edit accepts MP4, MOV, or M4V up to 10 seconds and 100 MB. Its duration comes from the source video. Google's current editing mode accepts one source video, so multiple videos in one request are not supported. The app uploads the video itself without extracting frames.
+
+Settings offer combinations present in the current catalog. Frames use the dedicated **Начальный кадр** (start frame) slot and optional **Конечный кадр** (end frame) slot; drop an image or use the button in each slot. Ingredients guide the content or style. Switching methods preserves frame files and ingredient files separately; a request uses the selected method's inputs.
 
 The current Veo catalog requires Google AI Ultra for 4- and 6-second variants; Pro users should choose an available 8-second variant. Eight-second frame models are available for Lite, Fast, and Quality. Check the current catalog and Google's [model feature table](https://support.google.com/flow/answer/16352836) and [frames and references guide](https://support.google.com/flow/answer/16353334) as availability changes.
 
@@ -42,7 +44,7 @@ Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker
 3. Move `Flow Studio.app` to `Applications` and open it. If macOS blocks this unsigned build, review it in **System Settings → Privacy & Security** and use the normal macOS approval flow only if you trust the download.
 4. Wait for the first Docker build. This downloads dependencies and needs internet access and free disk space.
 5. Open **Аккаунты → Войти в Google**. Sign in inside the Chrome window, open Flow, return to the app, and choose **Я вошёл**.
-6. Open **Создать**, choose a model, enter a prompt, and generate. Export results with **Сохранить как…**.
+6. Open **Создать**, choose the output type and video method if needed, then select a model and its available settings. Enter a prompt, add the required inputs, and generate. Export results with **Сохранить как…**.
 
 The interface and detailed guides are currently in Russian. The app creates local server credentials automatically. The optional Chrome extension is not required for the normal sign-in flow.
 

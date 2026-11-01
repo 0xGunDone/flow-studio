@@ -27,9 +27,17 @@
       <div class="workspace">
         <form id="generation-form" class="composer">
           <fieldset class="mode-switch"><legend class="sr-only">Тип генерации</legend><label><input type="radio" name="mode" value="image" checked><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8" cy="9" r="1"/><path d="m4 17 5-5 4 4 3-3 5 5"/></svg>Изображение</span></label><label><input type="radio" name="mode" value="video"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="3"/><path d="m16 9 5-3v12l-5-3"/></svg>Видео</span></label></fieldset>
-          <div class="field"><label for="model">Модель</label><select id="model" aria-describedby="model-description" disabled><option value="">Загружаем модели…</option></select><p id="model-description" class="hint"></p></div>
+          <select id="model" hidden aria-hidden="true" tabindex="-1" disabled><option value="">Загружаем модели…</option></select>
+          <div class="field" id="video-method-field" hidden><label for="video-method">Режим видео</label><select id="video-method" disabled></select></div>
+          <div class="field"><label for="model-family">Модель</label><select id="model-family" aria-describedby="model-description" disabled></select><p id="model-description" class="hint"></p></div>
+          <div class="generation-settings">
+            <div class="field" id="duration-field" hidden><label for="duration">Длительность</label><select id="duration" disabled></select></div>
+            <div class="field"><label for="aspect-ratio">Формат</label><select id="aspect-ratio" disabled></select></div>
+            <div class="field" id="resolution-field" hidden><label for="resolution">Разрешение</label><select id="resolution" disabled></select></div>
+          </div>
           <div class="field prompt-field"><div class="field-heading"><label for="prompt">Ваш запрос</label><span id="prompt-count" class="muted">0</span></div><textarea id="prompt" rows="7" maxlength="16000" placeholder="Например: тихая улица Токио после дождя, отражения неона, съемка на пленку" required></textarea></div>
           <div class="field media-drop-zone" id="references-field" role="group" aria-labelledby="references-label"><div class="field-heading"><label id="references-label">Исходные изображения</label><span class="muted" id="references-count" aria-live="polite">0</span></div><div id="references" class="references" role="list" aria-labelledby="references-label"></div><button type="button" class="reference-button" id="pick-images"><span aria-hidden="true">＋</span><span id="pick-images-label">Добавить изображения</span></button><p class="hint" id="media-drop-hint">Перетащите файлы сюда или нажмите кнопку</p><p class="hint" id="references-hint">Для образца или редактирования, если нужны</p></div>
+          <fieldset class="field frame-inputs" id="frames-field" hidden><legend>Start / End frame · Начальный и конечный кадры</legend><div class="frame-slots"><div id="start-frame" class="frame-slot" role="group" aria-label="Начальный кадр"></div><div id="end-frame" class="frame-slot" role="group" aria-label="Конечный кадр"></div></div><p class="hint">Перетащите изображение в нужный кадр или нажмите «Добавить». Конечный кадр необязателен, если модель не требует оба</p></fieldset>
           <div class="field" id="source-field" hidden><label for="source-video-id">ID исходного видео</label><input id="source-video-id" type="text" placeholder="ID видео из Flow" autocomplete="off" spellcheck="false"><p class="hint">Для продолжения уже созданного видео</p></div>
           <div id="form-error" class="inline-error" role="alert" hidden></div>
           <div class="generate-footer"><button type="submit" class="primary generate" id="generate" disabled><span id="generate-label">Создать изображение</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button><p class="hint" id="generate-hint">Запускаем Flow</p></div>
@@ -62,7 +70,7 @@
           <li>Дождитесь статуса «Flow подключен» внизу боковой панели. Первый запуск локального движка может занять несколько минут</li>
           <li>Откройте «Аккаунты» и нажмите «Войти в Google». Завершите вход в открывшемся Chrome, откройте Flow и вернитесь в приложение</li>
           <li>Нажмите «Я вошёл» и дождитесь подтверждения подключения</li>
-          <li>В разделе «Создать» выберите «Изображение» или «Видео», затем модель. Опишите желаемый результат и добавьте исходные файлы, если они нужны модели</li>
+          <li>В разделе «Создать» выберите «Изображение» или «Видео». Для видео выберите режим, затем модель, длительность и формат. Разрешение появляется, когда есть несколько вариантов. Опишите результат и добавьте нужные исходники</li>
           <li>Нажмите «Создать изображение» или «Создать видео». Сочетание ⌘ Enter запускает генерацию из поля запроса</li>
           <li>Дождитесь результата справа, нажмите «Сохранить как…» и выберите файл. После сохранения появится кнопка «Открыть папку»</li>
         </ol>
@@ -71,8 +79,8 @@
 
       <details id="help-inputs" class="help-section">
         <summary>Изображения, видео и исходные файлы</summary>
-        <h2>Выбор модели</h2>
-        <p>Название модели показывает доступные формат кадра, длительность и разрешение. Для другого сочетания выберите соответствующую модель: отдельных настроек этих параметров нет</p>
+        <h2>Режим, модель и настройки</h2>
+        <p>Для видео сначала выберите «Режим видео»: «Текст → видео», «Frames · Кадры», «Ingredients · Ингредиенты», редактирование или продолжение. Модель, длительность, формат и доступное разрешение выбираются отдельно. Списки показывают сочетания из текущего каталога; доступ к ним зависит от аккаунта</p>
         <div class="help-table-wrap">
           <table>
             <caption>Как использовать исходные материалы</caption>
@@ -80,23 +88,24 @@
             <tbody>
               <tr><th scope="row">Изображение по тексту</th><td>Только запрос. Исходные изображения необязательны</td></tr>
               <tr><th scope="row">Изображение по образцам или редактирование</th><td>До 5 исходных изображений с учетом лимита выбранной модели</td></tr>
-              <tr><th scope="row">Видео по тексту</th><td>Запрос и модель для текстового видео</td></tr>
-              <tr><th scope="row">Veo «По образцам»</th><td>До 3 изображений для содержания или стиля. Они не задают начальный и конечный кадры</td></tr>
-              <tr><th scope="row">Omni по образцам</th><td>До 7 изображений</td></tr>
-              <tr><th scope="row">Omni «Редактирование»</th><td>Одно исходное видео и до 5 изображений для содержания или стиля</td></tr>
-              <tr><th scope="row">Видео «По кадрам»</th><td>Первое изображение — начальный кадр. Второе — конечный, если модель его поддерживает. Некоторые модели требуют оба кадра, другие принимают только один</td></tr>
+              <tr><th scope="row">«Текст → видео»</th><td>Только запрос</td></tr>
+              <tr><th scope="row">Veo «Ingredients · Ингредиенты»</th><td>От 1 до 3 изображений для содержания или стиля. Они не задают начальный и конечный кадры</td></tr>
+              <tr><th scope="row">Omni «Ingredients · Ингредиенты»</th><td>До 7 изображений</td></tr>
+              <tr><th scope="row">Omni «Редактирование»</th><td>Одно исходное видео и до 5 изображений для содержания или стиля. Длительность определяется исходным видео</td></tr>
+              <tr><th scope="row">«Frames · Кадры»</th><td>Изображение в отдельной области начального кадра и при необходимости в области конечного кадра</td></tr>
               <tr><th scope="row">«Продолжение» видео</th><td>ID исходного видео из Flow. Локальный файл видео и ID задачи Flow Studio не подходят</td></tr>
             </tbody>
           </table>
         </div>
-        <p>Варианты Veo на 4 и 6 секунд требуют Google AI Ultra и недоступны на Pro. Для Pro выбирайте доступную модель на 8 секунд. Варианты «По кадрам» на 8 секунд есть у Lite, Fast и Quality. Доступ зависит от аккаунта; сверьтесь с <a href="https://support.google.com/flow/answer/16352836">официальной таблицей моделей Google</a> и <a href="https://support.google.com/flow/answer/16353334">руководством по кадрам и образцам</a></p>
-        <h2>Порядок файлов и кадров</h2>
+        <p>В текущем каталоге Veo Frames есть у Lite, Fast и Quality на 4, 6 и 8 секунд; Veo Ingredients — у Lite и Fast на 8 секунд. Omni предлагает текст и ингредиенты на 4, 6, 8 и 10 секунд. Варианты Veo на 4 и 6 секунд требуют Google AI Ultra и недоступны на Pro. Для Pro выбирайте доступную модель на 8 секунд. Сверьтесь с <a href="https://support.google.com/flow/answer/16352836">официальной таблицей моделей Google</a> и <a href="https://support.google.com/flow/answer/16353334">руководством по кадрам и образцам</a></p>
+        <h2>Начальный и конечный кадры</h2>
         <ol>
-          <li>Выберите модель «По кадрам»</li>
-          <li>Через «Добавить изображения» сначала добавьте начальный кадр, затем конечный, если он нужен. Оба находятся в общем списке «Исходные изображения»</li>
-          <li>Проверьте подписи «Начальный кадр» и «Конечный кадр» под миниатюрами. Стрелки ← и → меняют порядок, × удаляет файл</li>
+          <li>В «Режим видео» выберите «Frames · Кадры», затем модель и доступные настройки</li>
+          <li>Перетащите изображение из Finder в «Начальный кадр» либо нажмите «Добавить» в этой области</li>
+          <li>При необходимости заполните соседнюю область «Конечный кадр» тем же способом. Без начального кадра генерация не запустится</li>
+          <li>Проверьте изображения в каждой области. «Заменить» и «Удалить» действуют только на выбранный кадр; роль кадра не зависит от порядка добавления файлов</li>
         </ol>
-        <p>Перетащите один или несколько файлов из Finder в область исходных файлов либо выберите их кнопкой. Область подсвечивается при перетаскивании; повторно добавленные файлы не дублируются. Под каждым видны название и тип, видео можно воспроизвести до запуска. Смена модели сохраняет исходники. Если модель не принимает выбранное видео, вернитесь к Omni Edit или удалите его перед отправкой</p>
+        <p>Для ингредиентов и исходных изображений перетащите файлы в общий список либо выберите их кнопкой. Область подсвечивается при перетаскивании; повторно добавленные файлы не дублируются. Под каждым видны название и тип, видео можно воспроизвести до запуска. Стрелки ← и → меняют порядок ингредиентов, × удаляет файл. При смене режима кадры и ингредиенты сохраняются раздельно; в запрос попадают исходники выбранного режима</p>
         <p>Поддерживаются PNG, JPEG, WebP и GIF, не более 20 МБ на файл. Для Omni Edit нажмите «Добавить фото или видео»: допустимы MP4, MOV и M4V до 10 секунд и 100 МБ. Загружается сам видеофайл, без извлечения кадров. Подсказка и счетчики показывают лимиты выбранной модели</p>
       </details>
 
