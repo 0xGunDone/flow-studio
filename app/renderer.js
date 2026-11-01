@@ -93,7 +93,7 @@ if (typeof document !== 'undefined') initialize();
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true };
+  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true, refreshPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
@@ -412,6 +412,7 @@ function initialize() {
   function renderLogin() {
     const login = state.login;
     const busy = state.loginPending || ['opening', 'waiting', 'syncing'].includes(login?.state);
+    $('refresh-accounts').disabled = !state.ready || state.startupPending || state.refreshPending;
     $('add-account').disabled = busy || state.checkingAccountId !== null || !state.ready;
     document.querySelectorAll('.reconnect').forEach(item => { item.disabled = busy || state.checkingAccountId !== null || !state.ready; });
     document.querySelectorAll('.check-account').forEach(item => { item.disabled = busy || state.checkingAccountId !== null || !state.ready; });
@@ -562,11 +563,13 @@ function initialize() {
     finally { state.loginPending = false; renderLogin(); }
   });
   $('refresh-accounts').addEventListener('click', async () => {
-    $('refresh-accounts').disabled = true;
+    if (!state.ready || state.startupPending || state.refreshPending) return;
+    state.refreshPending = true;
+    renderLogin();
     setError('accounts-error', '');
     try { state.accounts = await api.refreshAccounts(); renderAccounts(); }
     catch (error) { setError('accounts-error', errorMessage(error)); }
-    finally { $('refresh-accounts').disabled = false; }
+    finally { state.refreshPending = false; renderLogin(); }
   });
   $('cancel-login').addEventListener('click', async () => {
     $('cancel-login').disabled = true;

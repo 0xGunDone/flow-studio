@@ -114,7 +114,7 @@ app.whenReady().then(async()=>{
  agentBridge=await startAgentBridge({dataDir,dispatch:createAgentActions({runtime,accountManager,getLoginState:()=>loginState,shell})});
  if(shutdownTask||quitting){await agentBridge.close();return;}
  app.on('activate',()=>{if(!window)createWindow();else{window.show();window.focus();}});
- runtime.start().then(()=>{if(!runtime.closing)accountManager.startAutoSync();}).catch(e=>send({type:'error',message:e.message}));
+ runtime.start().then(()=>{if(runtime.ready&&!runtime.closing)accountManager.startAutoSync();}).catch(e=>send({type:'error',message:e.message}));
 });
 app.on('window-all-closed',()=>app.quit());
 app.on('before-quit',event=>{

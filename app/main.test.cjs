@@ -2,9 +2,9 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {EventEmitter}=require('node:events');
-async function launch(){
- const events=[],windows=[],app=new EventEmitter();let stopped=false,finishStop,stopError,choice=0;
- const runtime={jobs:[],initializeHistory:async()=>{},start:async()=>{},close:()=>{events.push('stop');return stopError?Promise.reject(stopError):new Promise(resolve=>{finishStop=resolve;});}};
+async function launch({ready=true,closing=false}={}){
+ const events=[],windows=[],app=new EventEmitter();let stopped=false,finishStop,stopError,choice=0,autoSyncs=0;
+ const runtime={jobs:[],ready,closing,initializeHistory:async()=>{},start:async()=>{},close:()=>{events.push('stop');return stopError?Promise.reject(stopError):new Promise(resolve=>{finishStop=resolve;});}};
  app.setName=()=>{};app.requestSingleInstanceLock=()=>true;app.getPath=()=>'/unused';app.getVersion=()=>'1.1.0';
  app.whenReady=()=>Promise.resolve();
  app.quit=()=>{let prevented=false;app.emit('before-quit',{preventDefault(){prevented=true;}});if(!prevented)stopped=true;};
@@ -12,13 +12,18 @@ async function launch(){
   constructor(){super();windows.push(this);this.webContents=new EventEmitter();Object.assign(this.webContents,{send(){},setWindowOpenHandler(){},session:{setPermissionRequestHandler(){}}});}
   loadFile(){}show(){events.push('show');}focus(){}isDestroyed(){return false;}
  }
- const manager={shutdown:()=>events.push('accounts'),startAutoSync(){}};
+ const manager={shutdown:()=>events.push('accounts'),startAutoSync(){autoSyncs++;}};
  const electron={app,BrowserWindow:Window,ipcMain:{handle(){}},protocol:{registerSchemesAsPrivileged(){},handle(){}},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showMessageBoxSync:()=>choice,showErrorBox:()=>events.push('error')},shell:{},net:{},clipboard:{}};
  const replacements={electron,'node:fs/promises':{mkdir:async()=>{}},'./runtime.cjs':{Runtime:class{constructor(){return runtime;}}},'./bootstrap.cjs':{prepareEngine:async()=>({})},'./exports.cjs':{},'./agent-bridge.cjs':{createAgentActions(){},startAgentBridge:async()=>({close:async()=>events.push('bridge')})},'./accounts.cjs':{createAccountManager:()=>manager},'./recovery.cjs':{createRecoveryManager:()=>({shutdown(){}})}};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'main.cjs'),'utf8'),{require:name=>replacements[name]??require(name),__dirname});
  await new Promise(setImmediate);
- return {app,runtime,events,window:windows[0],get stopped(){return stopped;},finish:()=>finishStop(),setChoice:value=>{choice=value;},failStop:error=>{stopError=error;}};
+ return {app,runtime,events,window:windows[0],get stopped(){return stopped;},get autoSyncs(){return autoSyncs;},finish:()=>finishStop(),setChoice:value=>{choice=value;},failStop:error=>{stopError=error;}};
 }
+test('automatic Google account sync starts only after successful startup',async()=>{
+ const failed=await launch({ready:false});assert.equal(failed.autoSyncs,0);
+ const ready=await launch();assert.equal(ready.autoSyncs,1);
+ const closing=await launch({closing:true});assert.equal(closing.autoSyncs,0);
+});
 test('window close quits only after backend shutdown; repeated quit does not duplicate cleanup',async()=>{
  const h=await launch();let prevented=false;
  h.window.emit('close',{preventDefault(){prevented=true;}});

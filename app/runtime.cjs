@@ -19,10 +19,19 @@ function errorMessage(body,fallback) {
   if(typeof body==='string')return body;
   return body?.error?.message||body?.detail||body?.message||fallback;
 }
-async function readCredentials(databasePath,composePath) {
+async function readCredentials(databasePath,composePath,command=exec,signal) {
   const script = "import sqlite3,json,sys; c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True); r=c.execute('SELECT username,password,api_key FROM admin_config WHERE id=1').fetchone(); print(json.dumps(dict(zip(('username','password','apiKey'),r)))); c.close()";
-  const {stdout} = await exec('docker',['compose','-f',composePath,'exec','-T','flow2api','python','-c',script,'/app/data/flow.db'],{env:COMMAND_ENV,timeout:15000,maxBuffer:65536});
-  return JSON.parse(stdout);
+  try{
+    const {stdout}=await command('docker',['compose','-f',composePath,'exec','-T','flow2api','python','-c',script,'/app/data/flow.db'],{env:COMMAND_ENV,timeout:15000,maxBuffer:65536,signal});
+    const credentials=JSON.parse(stdout);
+    if(!credentials||['username','password','apiKey'].some(key=>typeof credentials[key]!=='string'||!credentials[key]))throw new Error('Invalid credentials');
+    return credentials;
+  }catch(error){
+    if(error.name==='AbortError')throw error;
+    const stopped=/service ["']?flow2api["']? is not running/i.test(String(error.stderr||error.message||''));
+    const failure=new Error(stopped?'Локальный движок Flow не запущен. Дождитесь подключения или нажмите «Повторить».':'Не удалось прочитать настройки локального движка Flow. Проверьте Docker и нажмите «Повторить».');
+    failure.code=stopped?'ENGINE_NOT_RUNNING':'ENGINE_CREDENTIALS_UNAVAILABLE';throw failure;
+  }
 }
 function splitSSE(buffer,onData) {
   const events=buffer.split(/\r?\n\r?\n/);
@@ -126,26 +135,30 @@ class Runtime {
   }
   async health(){try{const r=await fetch(BASE+'/health',{signal:AbortSignal.timeout(2000)});const d=await r.json();return r.ok&&d.backend_running;}catch{return false;}}
   async login(){
-    this.credentials=await readCredentials(this.databasePath,this.composePath);
+    this.credentials=await readCredentials(this.databasePath,this.composePath,this.command.bind(this),this.startController.signal);
     const r=await fetch(BASE+'/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:this.credentials.username,password:this.credentials.password}),signal:AbortSignal.any([this.startController.signal,AbortSignal.timeout(10000)])});
     if(!r.ok)throw new Error('Не удалось войти в локальный Flow2API. Проверьте его настройки и нажмите «Повторить».');
     const d=await r.json();this.sessionCookie=d.token;
     if(!this.sessionCookie)throw new Error('Flow2API не вернул сессию.');
   }
-  async request(endpoint,{method='GET',body,retry=true,signal}={}){
+  async request(endpoint,{method='GET',body,retry=true,signal,startup=false}={}){
     if(this.closing)throw new Error('Приложение закрывается.');
+    if(!startup){await this.start();if(!this.ready)throw new Error(this.message);}
     if(!this.sessionCookie)await this.login();
     let r=await fetch(BASE+endpoint,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+this.sessionCookie},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.any([this.startController.signal,AbortSignal.timeout(60000),...(signal?[signal]:[])])});
     let d;try{d=await r.json();}catch{throw new Error('Локальный сервер вернул неверный ответ.');}
-    if(r.status===401&&retry&&!String(d?.detail||'').includes('Google Flow')){await this.login();return this.request(endpoint,{method,body,retry:false,signal});}
+    if(r.status===401&&retry&&!String(d?.detail||'').includes('Google Flow')){await this.login();return this.request(endpoint,{method,body,retry:false,signal,startup});}
     if(!r.ok)throw new Error(String(errorMessage(d,'Ошибка сервера: '+r.status)));
     return d;
   }
   async start(){
     if(this.closing)throw new Error('Приложение закрывается.');
-    if(this.ready&&await this.health())return this.snapshot();
     if(this.startTask)return this.startTask;
-    this.startTask=this._start().finally(()=>{this.startTask=null;});
+    this.startTask=(async()=>{
+      if(this.ready&&await this.health()){this.startController.signal.throwIfAborted();return this.snapshot();}
+      this.startController.signal.throwIfAborted();
+      return this._start();
+    })().finally(()=>{this.startTask=null;});
     return this.startTask;
   }
   command(command,args,options){return exec(command,args,{env:COMMAND_ENV,...options});}
@@ -181,7 +194,7 @@ class Runtime {
       const r=await fetch(BASE+'/v1/models',{headers:{Authorization:'Bearer '+this.credentials.apiKey},signal:AbortSignal.any([this.startController.signal,AbortSignal.timeout(10000)])});
       if(!r.ok)throw new Error('Не удалось загрузить модели.');
       this.models=(await r.json()).data.map(m=>({id:m.id,description:m.description||m.id}));
-      await this.refreshAccounts();
+      await this.refreshAccounts({startup:true});
       this.status('Готово',true);
     }catch(e){if(!this.closing)this.status(e.message?.includes('Command failed')?'Не удалось запустить локальный движок. Проверьте, что Colima и Docker установлены, и нажмите «Повторить».':e.message,false);}
     return this.snapshot();
@@ -189,8 +202,8 @@ class Runtime {
   snapshot(){return {ready:this.ready,message:this.message,models:this.models,accounts:this.accounts,history:this.publicJobs()};}
   publicJobs(){return this.jobs.map(j=>this.publicJob(j));}
   publicJob(job){return {...job,media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};}
-  async refreshAccounts(){
-    const rows=await this.request('/api/tokens');
+  async refreshAccounts(options){
+    const rows=await this.request('/api/tokens',options);
     this.accounts=rows.map(publicAccount);this.onEvent({type:'accounts',accounts:this.accounts});return this.accounts;
   }
   async checkAccount(accountId,{signal}={}){
@@ -267,7 +280,7 @@ class Runtime {
       await this.start();
       if(!this.ready)throw new Error(this.message);
       for(const file of videos)staged.push(await stageVideo(file,path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs')));
-      this.credentials=await readCredentials(this.databasePath,this.composePath);
+      this.credentials=await readCredentials(this.databasePath,this.composePath,this.command.bind(this),controller.signal);
       const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true,...(staged.length?{video_references:staged.map(x=>x.reference)}:{})},this.credentials.apiKey,controller.signal);
       const media=await consumeGeneration(response,text=>{job.progress=text;this.emitJob(job);},account=>{job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);});
       job.media=media;
@@ -278,7 +291,7 @@ class Runtime {
     }catch(e){job.status='failed';job.error=this.closing?'Приложение закрыто. Задача Google могла продолжиться; проверьте Flow перед повтором.':job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
     finally{
       for(const file of staged)await fs.unlink(file.target).catch(()=>{});
-      clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});if(!this.closing)await this.refreshAccounts().catch(()=>{});
+      clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});if(!this.closing&&this.ready)await this.refreshAccounts().catch(()=>{});
     }
   }
   async cacheMedia(jobId,index,media,signal){

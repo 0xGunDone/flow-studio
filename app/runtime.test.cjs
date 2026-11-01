@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {consumeGeneration,extractMedia,allowedMediaUrl,publicAccount,Runtime}=require('./runtime.cjs');
+const {consumeGeneration,extractMedia,allowedMediaUrl,publicAccount,readCredentials,Runtime}=require('./runtime.cjs');
 function sse(parts){
  return new Response(new ReadableStream({start(controller){for(const part of parts)controller.enqueue(new TextEncoder().encode(part));controller.close();}}));
 }
@@ -177,4 +177,57 @@ test('close waits for history load before persisting',async t=>{
  await new Promise(resolve=>setImmediate(resolve));assert.equal(closed,false);
  releaseRead();await loading;await closing;
  assert.deepEqual(JSON.parse(await originalReadFile(historyPath,'utf8')),expected);
+});
+
+test('account refresh waits for cold engine startup and shares the pending startup',async t=>{
+ const r=new Runtime({}),calls=[];let releaseStart;
+ const gate=new Promise(resolve=>{releaseStart=resolve;});
+ r._start=async()=>{calls.push('start');await gate;r.ready=true;r.sessionCookie='synthetic-session';};
+ r.login=async()=>{throw Error('Credentials must not be read before startup');};
+ t.mock.method(globalThis,'fetch',async()=>{calls.push('accounts');return Response.json([{id:7,email:'test@example.invalid',is_active:true}]);});
+ const first=r.refreshAccounts(),second=r.refreshAccounts();
+ await new Promise(setImmediate);assert.deepEqual(calls,['start']);
+ releaseStart();
+ assert.equal((await first)[0].id,7);assert.equal((await second)[0].id,7);
+ assert.deepEqual(calls,['start','accounts','accounts']);
+});
+
+test('failed startup blocks account requests before reading credentials or fetching',async t=>{
+ const r=new Runtime({});r._start=async()=>{r.message='Не удалось запустить движок';};
+ r.login=async()=>{throw Error('Must not read credentials');};
+ const fetch=t.mock.method(globalThis,'fetch',async()=>{throw Error('Must not fetch');});
+ await assert.rejects(r.refreshAccounts(),/Не удалось запустить движок/);
+ assert.equal(fetch.mock.callCount(),0);
+});
+
+test('credential failures show a local-engine message without SQL, paths or secrets',async()=>{
+ const raw=new Error('Command failed: docker compose -f /private/compose.yaml exec python SELECT username,password,api_key');
+ raw.stderr='service "flow2api" is not running';raw.stdout='synthetic-secret';
+ let error;
+ try{await readCredentials('/private/flow.db','/private/compose.yaml',async()=>{throw raw;});}catch(value){error=value;}
+ assert.equal(error.code,'ENGINE_NOT_RUNNING');assert.match(error.message,/движок.*не запущен/);
+ assert.doesNotMatch(error.message,/SELECT|api_key|password|private|synthetic-secret|Command failed/);
+ await assert.rejects(readCredentials('/private/flow.db','/private/compose.yaml',async()=>({stdout:'invalid json'})),value=>value.code==='ENGINE_CREDENTIALS_UNAVAILABLE'&&!/invalid json|private/.test(value.message));
+});
+
+test('concurrent starts share health probe and restart a stopped engine once',async()=>{
+ const r=new Runtime({});r.ready=true;let releaseHealth,checks=0,starts=0;
+ r.health=async()=>{checks++;await new Promise(resolve=>{releaseHealth=resolve;});return false;};
+ r._start=async()=>{starts++;r.ready=true;return r.snapshot();};
+ const first=r.start(),second=r.start();
+ await new Promise(setImmediate);assert.equal(checks,1);
+ releaseHealth();await Promise.all([first,second]);assert.equal(starts,1);
+});
+
+test('startup loads accounts without waiting on itself, including a local login retry',async t=>{
+ const r=new Runtime({});let loads=0,accountReads=0;
+ r.ensureEngine=async()=>{};
+ r.command=async()=>{loads++;return {stdout:JSON.stringify({username:'synthetic',password:'test-only',apiKey:'test-only'})};};
+ t.mock.method(globalThis,'fetch',async url=>{
+  if(String(url).endsWith('/api/admin/login'))return Response.json({token:'test-only'});
+  if(String(url).endsWith('/v1/models'))return Response.json({data:[{id:'test-model'}]});
+  if(String(url).endsWith('/api/tokens'))return ++accountReads===1?Response.json({detail:'local expired'},{status:401}):Response.json([{id:7,email:'test@example.invalid',is_active:true}]);
+  throw Error('Unexpected request');
+ });
+ const result=await r.start();assert.equal(result.ready,true);assert.equal(result.accounts[0].id,7);assert.equal(loads,2);assert.equal(accountReads,2);
 });

@@ -161,13 +161,16 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     { id: 'veo-3.1-fast-r2v-8s-landscape', description: 'Veo 3.1 - Fast R2V · 8s · landscape' },
     { id: 'omni-1.1-flash-10s-landscape', description: 'Omni 1.1 Flash · 10s · landscape' }
   ], accounts: [{ id: 9, email: 'user@example.com', credits: 250, isActive: true, videoEnabled: true }], history: [], login: null };
+  let finishBootstrap, finishRefresh, accountRefreshes = 0;
+  const bootstrap = new Promise(resolve => { finishBootstrap = resolve; });
+  let refresh = Promise.resolve(snapshot.accounts);
   const bridge = {
-    onEvent: callback => { eventHandler = callback; return () => {}; }, bootstrap: async () => snapshot,
+    onEvent: callback => { eventHandler = callback; return () => {}; }, bootstrap: async () => bootstrap,
     pickImages: async options => { pickerOptions.push(options); return picked; }, addAccount: async () => { loginCall++; return { state: 'waiting', canComplete: true, message: 'Войдите в Google' }; },
     reconnectAccount: async accountId => { reconnected.push(accountId); return { state: 'waiting', method: 'chrome', accountId, canComplete: true, completeLabel: 'Проверить подключение', message: 'Откройте Flow в вашем Chrome и войдите в user@example.com' }; },
     checkAccount: async accountId => { checked.push(accountId); return { ok: true, accountId, checkedAt: new Date().toISOString() }; },
     completeLogin: async () => { completionCall++; assert.equal(byId('complete-login').disabled, true); return { state: 'syncing', message: 'Проверяем вход' }; },
-    cancelLogin: async () => ({ cancelled: true }), refreshAccounts: async () => snapshot.accounts,
+    cancelLogin: async () => ({ cancelled: true }), refreshAccounts: async () => { accountRefreshes++; return refresh; },
     copyHelpText: async text => { copied.push(text); return {copied:true}; },
     saveMedia: async () => { saved++; return saveResult; }, revealFile: async file => { revealed.push(file); },
     generate: async request => { generated.push(request); const id = `job-${generated.length}`; eventHandler({ type: 'job', job: { id, model: request.model, kind: 'image', prompt: request.prompt, createdAt: new Date().toISOString(), status: 'running', progress: 'В работе', media: [] } }); return { jobId: id }; }
@@ -175,11 +178,35 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   const stored = new Map([['flowStudio.draft', JSON.stringify({ mode: 'video', model: snapshot.models[2].id, prompt: 'Saved draft', sourceVideoId: 'saved-source' })]]);
   const localStorage = { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) };
   vm.runInNewContext(fs.readFileSync(require.resolve('./renderer.js'), 'utf8'), { document, window: { flowStudio: bridge, localStorage, addEventListener() {} }, Intl, Date, setInterval: () => 1, clearInterval() {}, console });
+  assert.equal(byId('refresh-accounts').disabled, true, 'Account refresh waits for startup');
+  await byId('refresh-accounts').dispatch('click');
+  assert.equal(accountRefreshes, 0, 'Early refresh must not reach the backend');
+  eventHandler({ type: 'status', ready: true, message: 'Готово' });
+  assert.equal(byId('refresh-accounts').disabled, true, 'Ready event cannot bypass pending bootstrap');
+  await byId('refresh-accounts').dispatch('click');
+  assert.equal(accountRefreshes, 0);
+  finishBootstrap(snapshot);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(generated.length, 0, 'Opening app must never spend credits');
   assert.equal(byId('generate').disabled, false, byId('startup-message').textContent);
   assert.equal(byId('add-account').disabled, false, 'Ready status enables login after initial render');
+  assert.equal(byId('refresh-accounts').disabled, false);
   assert.equal(byId('startup-banner').hidden, true);
+  refresh = new Promise(resolve => { finishRefresh = resolve; });
+  const refreshing = byId('refresh-accounts').dispatch('click');
+  assert.equal(byId('refresh-accounts').disabled, true);
+  eventHandler({ type: 'accounts', accounts: snapshot.accounts });
+  assert.equal(byId('refresh-accounts').disabled, true, 'Account events keep pending refresh disabled');
+  await byId('refresh-accounts').dispatch('click');
+  assert.equal(accountRefreshes, 1, 'Concurrent refresh clicks share the pending request');
+  eventHandler({ type: 'status', ready: false, message: 'Подключаем локальный движок…' });
+  finishRefresh(snapshot.accounts);
+  await refreshing;
+  assert.equal(byId('refresh-accounts').disabled, true, 'Completed refresh must not enable an offline engine');
+  await byId('refresh-accounts').dispatch('click');
+  assert.equal(accountRefreshes, 1);
+  eventHandler({ type: 'status', ready: true, message: 'Готово' });
+  assert.equal(byId('refresh-accounts').disabled, false);
   const helpNav = nodes.find(node => node.dataset.page === 'help');
   await helpNav.dispatch('click');
   assert.equal(byId('page-help').hidden, false);
