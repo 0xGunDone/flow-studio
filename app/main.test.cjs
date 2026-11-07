@@ -15,7 +15,7 @@ async function launch({ready=true,closing=false,pickedFiles=[],accountRuntime={}
  }
  Object.assign(runtime,accountRuntime);
  const manager={...managedOverrides,shutdown:()=>events.push('accounts'),startAutoSync(){autoSyncs++;}};
- const electron={app,BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},protocol:{registerSchemesAsPrivileged(){},handle:(name,fn)=>protocols.set(name,fn)},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showOpenDialog:async()=>({canceled:false,filePaths:pickedFiles}),showMessageBoxSync:()=>choice,showMessageBox:async(_window,options)=>{events.push({dialog:options});return {response:choice};},showErrorBox:()=>events.push('error')},shell:{},net:{fetch:(url,options)=>{fetches.push({url,options});return 'preview';}},clipboard:{}};
+ const electron={app,BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},protocol:{registerSchemesAsPrivileged(){},handle:(name,fn)=>protocols.set(name,fn)},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showOpenDialog:async()=>({canceled:false,filePaths:pickedFiles}),showMessageBoxSync:()=>choice,showMessageBox:async(_window,options)=>{events.push({dialog:options});return {response:choice};},showErrorBox:()=>events.push('error')},shell:{openExternal:async url=>events.push(['external',url])},net:{fetch:(url,options)=>{fetches.push({url,options});return 'preview';}},clipboard:{}};
  const replacements={electron,'node:fs/promises':{mkdir:async()=>{}},'./runtime.cjs':{Runtime:class{constructor(){return runtime;}}},'./bootstrap.cjs':{prepareEngine:async()=>({})},'./exports.cjs':{},'./agent-bridge.cjs':{createAgentActions(){},startAgentBridge:async()=>({close:async()=>events.push('bridge')})},'./accounts.cjs':{createAccountManager:()=>manager},'./recovery.cjs':{createRecoveryManager:()=>({shutdown(){}})}};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'main.cjs'),'utf8'),{require:name=>replacements[name]??require(name),__dirname,URL,Response});
  await new Promise(setImmediate);
@@ -99,4 +99,12 @@ test('quitting waits for an accepted account removal to persist before stopping 
  finish();await removal;await new Promise(setImmediate);
  assert(h.events.indexOf('unlink-persisted')<h.events.indexOf('stop'));
  h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+});
+
+
+test('manual Flow handoff opens only fixed official URL from trusted renderer',async()=>{
+ const h=await launch(),event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ assert.equal((await h.handlers.get('studio:openFlow')(event,'https://attacker.invalid')).opened,true);
+ assert(h.events.some(e=>Array.isArray(e)&&e[0]==='external'&&e[1]==='https://flow.google.com/'));
+ assert.throws(()=>h.handlers.get('studio:openFlow')({sender:{},senderFrame:event.senderFrame}),/Недопустимый источник/);
 });

@@ -26,3 +26,9 @@ test('account controls forward only exact id and boolean to trusted IPC',async()
  await h.api.setAccountActive(7,false);await h.api.deleteAccount(7);await h.api.checkEnabledAccounts();
  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:setAccountActive',7,false],['studio:deleteAccount',7],['studio:checkEnabledAccounts']]);
 });
+
+
+test('Flow handoff forwards no arbitrary URL or account data',async()=>{
+ const h=loadPreload(()=>{});await h.api.openFlow('https://attacker.invalid');
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:openFlow']]);
+});

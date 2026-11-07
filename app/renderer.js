@@ -102,6 +102,10 @@ function requiresLogin(job) {
   return job?.needsLogin === true || /\b(?:code|status(?:Code)?|HTTP)["']?\s*(?:[=:]\s*)?401\b|\bUNAUTHENTICATED\b/i.test([job?.error, job?.progress].join('\n'));
 }
 
+function needsUploadVerification(job) {
+  return /(?:^|:\s*)Failed to obtain reCAPTCHA token for image upload(?:$|[.\n])/i.test(String(job?.error || job?.progress || ''));
+}
+
 function recoveryAccountId(job, accounts) {
   if (job?.accountId !== undefined && job.accountId !== null) return accounts.find(account => String(account.id) === String(job.accountId))?.id ?? null;
   const active = accounts.filter(account => account.isActive);
@@ -113,7 +117,7 @@ function errorMessage(error) {
     .replace(/^Error invoking remote method ['"]studio:[A-Za-z]+['"]:\s*(?:Error:\s*)?/, '');
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, preferredModel, PREFERRED_VIDEO_FAMILY, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, recoveryAccountId, errorMessage };
+if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, preferredModel, PREFERRED_VIDEO_FAMILY, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, needsUploadVerification, recoveryAccountId, errorMessage };
 if (typeof document !== 'undefined') initialize();
 
 function initialize() {
@@ -440,6 +444,9 @@ function initialize() {
         const details = element('details', 'error-details');
         details.append(element('summary', '', 'Технические детали'), element('pre', '', job.error || job.progress || 'Требуется повторный вход в Google'));
         panel.append(details);
+      } else if (needsUploadVerification(job)) {
+        panel.append(element('h3', '', 'Не удалось загрузить исходник'), element('p', 'inline-error', 'Локальный движок не получил подтверждение reCAPTCHA для загрузки одного из изображений. Этот файл не отправлен, генерация результата не запущена.'), button('Открыть Flow в браузере', 'primary', async () => { try { await api.openFlow(); } catch(error) { notify(errorMessage(error),true); } }), element('p', 'hint recovery-note', 'В браузере выберите тот же Google-аккаунт и попробуйте прикрепить файл без запуска генерации. Если Google покажет проверку, выполните её вручную. Это действие не отправляет запрос повторно.'), button('Редактировать запрос', 'secondary', () => reuse(job)));
+        const details=element('details','error-details');details.append(element('summary','','Технические детали'),element('pre','',job.error||job.progress));panel.append(details);
       } else panel.append(element('h3', '', 'Генерация не завершилась'), element('p', 'inline-error', job.error || job.progress || 'Попробуйте повторить запрос'), button('Редактировать запрос', 'secondary', () => reuse(job)));
       result.append(panel);
     } else if (job.media?.length) {

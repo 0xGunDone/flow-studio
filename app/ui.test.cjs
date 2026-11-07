@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { modelInfo, requestFor, mediaUrl, readDraft, requiresLogin, recoveryAccountId, errorMessage } = require('./renderer.js');
+const { modelInfo, requestFor, mediaUrl, readDraft, requiresLogin, needsUploadVerification, recoveryAccountId, errorMessage } = require('./renderer.js');
 
 test('account errors hide Electron wrapper but retain actual reason and RPC code', () => {
   assert.equal(errorMessage(new Error("Error invoking remote method 'studio:checkAccount': Error: Google Flow не подтвердил вход (rpc=nzlxg, code=401)")), 'Google Flow не подтвердил вход (rpc=nzlxg, code=401)');
@@ -21,6 +21,13 @@ test('auth recovery recognizes arbitrary RPC 401 and never selects an unrelated 
   assert.equal(recoveryAccountId({}, accounts.slice(0, 1)), 9);
   assert.equal(recoveryAccountId({ accountId: 99 }, accounts.slice(0, 1)), null);
   assert.equal(recoveryAccountId({}, [{ id: 9, isActive: false }]), null);
+});
+
+test('upload verification is a local pre-upload failure, not a session or content rejection',()=>{
+  const error='Не удалось выполнить генерацию: Failed to obtain reCAPTCHA token for image upload';
+  assert.equal(needsUploadVerification({error}),true);
+  assert.equal(requiresLogin({error}),false);
+  for(const error of ['rpc=maseQ, code=401','PUBLIC_ERROR_MINOR','reCAPTCHA evaluation failed','Failed to obtain reCAPTCHA token for video generation'])assert.equal(needsUploadVerification({error}),false);
 });
 
 test('draft reader allows only harmless fields and tolerates unavailable or corrupt storage', () => {
@@ -316,9 +323,21 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   const referenceCount = byId('references').children.length;
   assert.equal(referenceCount, 1);
   eventHandler({ type: 'accounts', accounts: [...snapshot.accounts, { id: 10, email: 'other@example.com', isActive: true }] });
+  const uploadError='Не удалось выполнить генерацию: Failed to obtain reCAPTCHA token for image upload';
+  let openedFlow=0;bridge.openFlow=async()=>{openedFlow++;return {opened:true};};
+  const beforeUploadError=generated.length;
+  eventHandler({type:'job',job:{id:'upload-failed',model:snapshot.models[1].id,kind:'video',status:'failed',error:uploadError,media:[]}});
+  // Selecting known failed upload reveals the manual handoff without spending.
+  const historyButtons=byId('history').children;
+  await historyButtons[0].dispatch('click');
+  assert.ok(resultButton('Открыть Flow в браузере'));
+  assert(descendants(byId('result')).some(node=>node.tagName==='PRE'&&node.textContent===uploadError));
+  await resultButton('Открыть Flow в браузере').dispatch('click');
+  assert.equal(openedFlow,1);assert.equal(generated.length,beforeUploadError);
   const rawError = 'FLOW_RPC_ERROR: rpc=MZZa6b code=401';
   const authJob = { id: 'job-2', model: snapshot.models[2].id, kind: 'video', prompt: 'Old failed prompt', accountId: 9, status: 'failed', error: rawError, media: [] };
   eventHandler({ type: 'job', job: authJob });
+  await byId('history').children[1].dispatch('click');
   assert.ok(descendants(byId('result')).some(node => node.tagName === 'PRE' && node.textContent === rawError), 'Raw error remains in technical details');
   await resultButton('Войти в Google заново').dispatch('click');
   assert.deepEqual(reconnected, [9], 'Recovery uses job account even with multiple active accounts');

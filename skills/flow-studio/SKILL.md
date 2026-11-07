@@ -65,6 +65,8 @@ If a generate response is lost, inspect history, then retry only with the **same
 
 On failure, preserve returned error/message and technical code. Distinguish confirmed failed jobs from unknown transport outcomes; do not infer moderation from an empty response. Offer a next step without starting another paid request. Never use paid generation as a diagnostic.
 
+`Failed to obtain reCAPTCHA token for image upload` is a local pre-upload failure: the failed image was not uploaded and this attempt did not reach generation submission; earlier input uploads may have completed. It does not prove quota exhaustion, model rejection, or expired login. Do not retry generation as a diagnostic or change account/model/inputs. Ask whether the same file attaches in the ordinary Flow browser UI without generating; any Google verification is completed by the user. The app's “Open Flow in browser” button is a manual handoff, not an automated CAPTCHA recovery or proof that app upload works.
+
 `PUBLIC_ERROR_MINOR` is an explicit Google rejection with no documented exact public definition. It alone does not identify the input or prove anyone's age. Do not confuse it with `PUBLIC_ERROR_USER_MINOR`, `401`, or quota errors. Read the same task's Flow web UI message if available. Do not retry identical rejected inputs, rotate accounts, change references, or rewrite the prompt automatically. Google does not support editing uploaded videos of identifiable minors; misclassified adult content belongs in its feedback/support flow.
 
 `flow_studio_cancel_job` stops the app request; Google may still complete or charge it. Quitting also stops local waiting. Check Flow for an accepted job's outcome before retrying; do not automatically resubmit failed or cancelled jobs.

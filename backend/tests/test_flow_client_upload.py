@@ -65,6 +65,17 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
         for slot in (10, 11):
             self.assertRegex(argument[slot], r"^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$")
 
+    async def test_missing_upload_verification_never_sends_image(self):
+        client = FlowClient(proxy_manager=None)
+        client._get_recaptcha_token = AsyncMock(return_value=(None, None))
+        client._current_rpc = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, "^Failed to obtain reCAPTCHA token for image upload$"):
+            await client.upload_image(
+                at="synthetic", image_bytes=JPEG_BYTES,
+                project_id=PROJECT_ID, token_id=7,
+            )
+        client._current_rpc.assert_not_awaited()
+
     async def test_upload_requires_project_id(self):
         client = FlowClient(proxy_manager=None)
 

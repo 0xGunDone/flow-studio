@@ -1964,7 +1964,10 @@ class GenerationHandler:
                 debug_logger.log_warning(
                     f"[GENERATION] 生成未成功，不扣次数: {error_msg}"
                 )
-                if token and not is_flow_content_policy_error(error_msg):
+                if token and not (
+                    is_flow_content_policy_error(error_msg)
+                    or error_msg == "Failed to obtain reCAPTCHA token for image upload"
+                ):
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)

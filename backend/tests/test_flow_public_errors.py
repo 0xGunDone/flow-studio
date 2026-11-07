@@ -9,6 +9,7 @@ from src.core.models import Token
 from src.services.flow_client import FlowClient
 from src.services.flow_frontend import FlowFrontendMixin
 from src.services.generation_handler import GenerationHandler
+from src.services.token_manager import TokenManager
 
 
 PROJECT = "22222222-2222-2222-2222-222222222222"
@@ -157,7 +158,7 @@ class PublicErrorPollingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
-    async def test_token_penalty_skips_only_known_content_rejections(self):
+    async def test_token_penalty_preserves_account_errors_and_skips_local_upload_failure(self):
         for raises in (False, True):
             for code, count_result, count_exception in (
                 (MINOR, False, False),
@@ -167,6 +168,9 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                 ("PUBLIC_ERROR_UNKNOWN_FUTURE", True, True),
                 ("PUBLIC_ERROR_UNUSUAL_ACTIVITY", True, False),
                 ("HTTP 429: too many requests", True, True),
+                ("Failed to obtain reCAPTCHA token for image upload", False, False),
+                ("Flow frontend RPC rejected: rpc=maseQ, code=401", True, True),
+                ("Unexpected upload failure", True, True),
             ):
                 with self.subTest(raises=raises, code=code):
                     token = Token(
@@ -177,11 +181,19 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                     handler.load_balancer = types.SimpleNamespace(
                         select_token=AsyncMock(return_value=token), release_pending=AsyncMock(),
                     )
-                    handler.token_manager = types.SimpleNamespace(
-                        ensure_valid_token=AsyncMock(return_value=token),
-                        ensure_project_exists=AsyncMock(return_value=PROJECT),
-                        record_error=AsyncMock(), record_usage=AsyncMock(), record_success=AsyncMock(),
+                    manager = TokenManager.__new__(TokenManager)
+                    manager.db = types.SimpleNamespace(
+                        increment_token_stats=AsyncMock(),
+                        get_token_stats=AsyncMock(return_value=types.SimpleNamespace(consecutive_error_count=1)),
+                        get_admin_config=AsyncMock(return_value=types.SimpleNamespace(error_ban_threshold=1)),
                     )
+                    manager.ensure_valid_token = AsyncMock(return_value=token)
+                    manager.ensure_project_exists = AsyncMock(return_value=PROJECT)
+                    manager.record_error = AsyncMock(wraps=manager.record_error)
+                    manager.record_usage = AsyncMock()
+                    manager.record_success = AsyncMock()
+                    manager.disable_token = AsyncMock()
+                    handler.token_manager = manager
                     handler.flow_client = types.SimpleNamespace(prefill_remote_browser_pool=AsyncMock())
                     handler._update_request_log_progress = AsyncMock()
                     handler._log_request = AsyncMock()
@@ -200,8 +212,12 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(code, output[0]["error"]["message"])
                     if (count_exception if raises else count_result):
                         handler.token_manager.record_error.assert_awaited_once_with(7)
+                        manager.db.increment_token_stats.assert_awaited_once_with(7, "error")
+                        manager.disable_token.assert_awaited_once_with(7)
                     else:
                         handler.token_manager.record_error.assert_not_awaited()
+                        manager.db.increment_token_stats.assert_not_awaited()
+                        manager.disable_token.assert_not_awaited()
                     handler.token_manager.record_usage.assert_not_awaited()
                     handler.token_manager.record_success.assert_not_awaited()
                     handler.load_balancer.release_pending.assert_awaited_once()

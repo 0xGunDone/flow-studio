@@ -67,6 +67,7 @@ app.whenReady().then(async()=>{
   return fn(...args);
  });
  handle('bootstrap',async()=>({...await runtime.start(),login:loginState}));
+ handle('openFlow',async()=>{await shell.openExternal('https://flow.google.com/');return {opened:true};});
  handle('retryStartup',async()=>({...await runtime.start(),login:loginState}));
  const accountAction=fn=>{
   if(accountTask||shutdownTask||runtime.closing)throw new Error('Дождитесь завершения действия с аккаунтами.');

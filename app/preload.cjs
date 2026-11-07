@@ -2,6 +2,7 @@
 const {contextBridge,ipcRenderer,webUtils}=require('electron');
 contextBridge.exposeInMainWorld('flowStudio',{
   bootstrap:()=>ipcRenderer.invoke('studio:bootstrap'),
+  openFlow:()=>ipcRenderer.invoke('studio:openFlow'),
   retryStartup:()=>ipcRenderer.invoke('studio:retryStartup'),
   generate:input=>ipcRenderer.invoke('studio:generate',input),
   pickImages:options=>ipcRenderer.invoke('studio:pickImages',options),
