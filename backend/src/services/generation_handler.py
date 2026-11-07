@@ -1255,6 +1255,66 @@ def _apply_current_flow_model_catalog():
                 f"Omni 1.1 Flash · {seconds}s · {orientation}",
             )
 
+    # FlowService.GetModels, 2026-11-07: Omni 1.2 is macaron_cookie, not abra.
+    # Frames longer than 10s support a start frame only; text/ingredients reach 15s.
+    for suffix, upstream_suffix in (("", ""), ("-360p", "_360p")):
+        resolution = {"resolution": "360p"} if suffix else {}
+        for orientation, ratio in (("landscape", landscape), ("portrait", portrait)):
+            for seconds in range(3, 16):
+                register(
+                    f"omni-1.2-flash-{seconds}s-{orientation}{suffix}",
+                    {
+                        "type": "video",
+                        "video_type": "omni",
+                        "model_key": f"macaron_cookie_t2v_{seconds}s{upstream_suffix}",
+                        "reference_model_key": f"macaron_cookie_r2v_{seconds}s{upstream_suffix}",
+                        "reference_duration": seconds,
+                        "aspect_ratio": ratio,
+                        "supports_images": True,
+                        "min_images": 0,
+                        "max_images": 7,
+                        "use_v2_model_config": True,
+                        "allow_tier_upgrade": False,
+                        **resolution,
+                    },
+                    f"Omni 1.2 Flash · {seconds}s · {orientation}{suffix}",
+                )
+                frame_config = i2v(
+                    f"macaron_cookie_i2v{'_fl' if seconds <= 10 else ''}_{seconds}s{upstream_suffix}",
+                    ratio,
+                    max_images=2 if seconds <= 10 else 1,
+                )
+                if seconds <= 10:
+                    frame_config["start_model_key"] = f"macaron_cookie_i2v_{seconds}s{upstream_suffix}"
+                register(
+                    f"omni-1.2-flash-i2v-{seconds}s-{orientation}{suffix}",
+                    {**frame_config, **resolution},
+                    f"Omni 1.2 Flash · Frames · {seconds}s · {orientation}{suffix}",
+                )
+            register(
+                f"omni-1.2-flash-edit-{orientation}{suffix}",
+                {
+                    "type": "video",
+                    "video_type": "omni_edit",
+                    "model_key": f"macaron_cookie_edit{upstream_suffix}",
+                    "aspect_ratio": ratio,
+                    "supports_images": True,
+                    "min_images": 0,
+                    "max_images": 5,
+                    "max_videos": 1,
+                    "max_input_duration": 15,
+                    "use_v2_model_config": True,
+                    "allow_tier_upgrade": False,
+                    **resolution,
+                },
+                f"Omni 1.2 Flash · Video Edit · {orientation}{suffix}",
+            )
+    register(
+        "omni-1.2-flash",
+        MODEL_CONFIG["omni-1.2-flash-8s-landscape"],
+        "Omni 1.2 Flash · 8s · landscape",
+    )
+
     # Current image-to-video and reference-video variants.
     for seconds, lite_key, fast_key, quality_key in (
         (
@@ -1665,13 +1725,17 @@ class GenerationHandler:
                 yield self._create_error_response("Видео-референс поддерживает только Omni Edit: один ролик и до пяти изображений.", status_code=400)
                 return
             try:
-                loaded_videos = [await read_video_reference(video_references[0])]
+                loaded_videos = [await read_video_reference(
+                    video_references[0],
+                    max_duration_seconds=model_config.get("max_input_duration", 10),
+                )]
             except (ValueError, OSError, asyncio.TimeoutError) as error:
                 message = str(error) if isinstance(error, ValueError) else "Не удалось прочитать локальный видео-референс. Выберите файл заново."
                 yield self._create_error_response(message, status_code=400)
                 return
         elif model_config.get("video_type") == "omni_edit":
-            yield self._create_error_response("Для Omni Edit добавьте одно исходное видео до 10 секунд.", status_code=400)
+            limit = model_config.get("max_input_duration", 10)
+            yield self._create_error_response(f"Для Omni Edit добавьте одно исходное видео до {limit} секунд.", status_code=400)
             return
         generation_type = model_config["type"]
         video_type_for_op = model_config.get("video_type", "")
@@ -2571,6 +2635,7 @@ class GenerationHandler:
             min_images = model_config.get("min_images", 0)
             max_images = model_config.get("max_images", 0)
             use_v2_model_config = bool(model_config.get("use_v2_model_config", False))
+            resolution_options = {"resolution": model_config["resolution"]} if model_config.get("resolution") else {}
 
             # 根据账号tier自动调整模型 key
             user_tier = normalized_tier
@@ -2769,6 +2834,7 @@ class GenerationHandler:
                     reference_media_ids=[item["mediaId"] for item in reference_images],
                     token_id=token.id, token_video_concurrency=token.video_concurrency,
                     google_cookies=getattr(token, "google_cookies", None),
+                    **resolution_options,
                 )
             elif video_type == "i2v" and start_media_id:
                 if end_media_id:
@@ -2786,6 +2852,7 @@ class GenerationHandler:
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
                         google_cookies=getattr(token, "google_cookies", None),
+                        **resolution_options,
                     )
                 else:
                     # 只有首帧 - 需要去掉 model_key 中的 _fl
@@ -2809,6 +2876,7 @@ class GenerationHandler:
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
                         google_cookies=getattr(token, "google_cookies", None),
+                        **resolution_options,
                     )
 
             # R2V: 多图生成
@@ -2824,6 +2892,7 @@ class GenerationHandler:
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
                     google_cookies=getattr(token, "google_cookies", None),
+                    **resolution_options,
                 )
 
             # Omni: 有图走 Reference Images 直连链路，无图走纯文本链路
@@ -2841,6 +2910,7 @@ class GenerationHandler:
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
                     google_cookies=getattr(token, "google_cookies", None),
+                    **resolution_options,
                 )
 
             # Extend: 视频续写
@@ -2883,6 +2953,7 @@ class GenerationHandler:
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
                     google_cookies=getattr(token, "google_cookies", None),
+                    **resolution_options,
                 )
             if video_trace is not None:
                 video_trace["submit_generation_ms"] = int(

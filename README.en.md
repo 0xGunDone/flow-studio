@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.1.0">Download for macOS</a> ·
+  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.2.0">Download for macOS</a> ·
   <a href="https://github.com/0xGunDone/flow-studio/releases">All releases</a> ·
   <a href="docs/mcp.md">MCP guide</a> ·
   <a href="README.md">Русский</a>
@@ -29,9 +29,13 @@
 
 The interface and history run locally. Generation runs on Google's services and may spend your Google Flow credits. Prompts, input images/videos, and session data are sent to the service. A model appearing in the catalog does not guarantee access under your plan.
 
-Omni Edit accepts MP4, MOV, or M4V up to 10 seconds and 100 MB. Its duration comes from the source video. Google's current editing mode accepts one source video, so multiple videos in one request are not supported. The app uploads the video itself without extracting frames.
+Omni Edit accepts MP4, MOV, or M4V up to 100 MiB: a source can last up to 15 seconds for Omni 1.2 or 10 seconds for Omni 1.1. Output duration follows the source video. Add one video and up to five images; the app uploads the video itself without extracting frames.
 
 Settings offer combinations present in the current catalog. Frames use the dedicated **Начальный кадр** (start frame) slot and optional **Конечный кадр** (end frame) slot; drop an image or use the button in each slot. Ingredients guide the content or style. Switching methods preserves frame files and ingredient files separately; a request uses the selected method's inputs.
+
+For a new video without a chosen model, **Omni 1.2 Flash** is preferred when compatible with the current catalog. Saved or explicit choices, history, and prepared requests keep their model. If compatible Omni 1.2 is absent, choose a model explicitly; there is no automatic fallback to Omni 1.1.
+
+Omni 1.2 offers text, ingredients, and frames from 3 through 15 seconds, 16:9 and 9:16, and 720p (`standard`) or 360p. Frames require a start frame; an end frame is optional from 3 through 10 seconds, while 11–15 seconds accept only a start frame. Durations from 11 through 15 seconds require Google AI Pro or Ultra.
 
 The current Veo catalog requires Google AI Ultra for 4- and 6-second variants; Pro users should choose an available 8-second variant. Eight-second frame models are available for Lite, Fast, and Quality. Check the current catalog and Google's [model feature table](https://support.google.com/flow/answer/16352836) and [frames and references guide](https://support.google.com/flow/answer/16353334) as availability changes.
 
@@ -40,7 +44,7 @@ The current Veo catalog requires Google AI Ultra for 4- and 6-second variants; P
 Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker CLI and Docker Compose**. The desktop app does not require host Node.js, Python, or FFmpeg: video validation uses `ffprobe` inside the container. MCP requires Node.js 22 or later.
 
 1. Install Chrome and start your Docker environment.
-2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.1.0): `arm64` for Apple Silicon or `x64` for Intel.
+2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.2.0): `arm64` for Apple Silicon or `x64` for Intel.
 3. Move `Flow Studio.app` to `Applications` and open it. If macOS blocks this unsigned build, review it in **System Settings → Privacy & Security** and use the normal macOS approval flow only if you trust the download.
 4. Wait for the first Docker build. This downloads dependencies and needs internet access and free disk space.
 5. Open **Аккаунты → Войти в Google**. Sign in inside the Chrome window, open Flow, return to the app, and choose **Я вошёл**.

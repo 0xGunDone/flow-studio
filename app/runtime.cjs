@@ -177,7 +177,7 @@ class Runtime {
     }
     signal.throwIfAborted();this.engineManaged=true;
     this.status('Подготавливаем генератор. Первый запуск скачивает зависимости и может занять 10–20 минут…',false);
-    await this.command('docker',['compose','-f',this.composePath,'up','-d','--build','flow2api'],{timeout:1800000,maxBuffer:16*1024*1024,signal});
+    await this.command('docker',['compose','-f',this.composePath,'up','-d','flow2api'],{timeout:1800000,maxBuffer:16*1024*1024,signal});
     for(let i=0;i<60;i++){
       signal.throwIfAborted();
       if(await this.health())return;
@@ -253,7 +253,7 @@ class Runtime {
     if(!Array.isArray(refs)||refs.length>7||refs.some(r=>!r||!['image','video'].includes(r.kind)))throw new Error('Некорректные референсы.');
     const images=refs.filter(r=>r.kind==='image').map(r=>r.dataUrl),videos=refs.filter(r=>r.kind==='video').map(r=>r.path);
     if(images.length>info.maxImages||images.some(s=>typeof s!=='string'||s.length>28*1024*1024||!/^data:image\/(?:png|jpeg|webp|gif);base64,/.test(s)))throw new Error('Слишком много изображений или неверный формат. Изображение: до 20 МБ.');
-    if(videos.length>(info.maxVideos||0)||videos.some(p=>typeof p!=='string'||!path.isAbsolute(p)||! /\.(mp4|mov|m4v)$/i.test(p))||info.edit&&videos.length!==1)throw new Error('Для редактирования Omni нужно одно видео MP4/MOV/M4V до 10 секунд и до 100 МБ.');
+    if(videos.length>(info.maxVideos||0)||videos.some(p=>typeof p!=='string'||!path.isAbsolute(p)||! /\.(mp4|mov|m4v)$/i.test(p))||info.edit&&videos.length!==1)throw new Error(`Для редактирования Omni нужно одно видео MP4/MOV/M4V до ${info.maxInputDuration} секунд и до 100 МБ.`);
     const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||''})).digest('hex');
     if(input.requestId){
       const existing=this.jobs.find(j=>j.requestId===input.requestId);

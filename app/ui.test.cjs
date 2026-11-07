@@ -478,8 +478,10 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   dropped = [startFile, endFile]; await byId('start-frame').dispatch('drop', { dataTransfer: transfer });
   assert.match(byId('form-error').textContent, /одно изображение/);
   byId('video-method').value = 'edit'; await byId('video-method').dispatch('change');
+  byId('model-family').value = 'Omni 1.1 Flash'; await byId('model-family').dispatch('change');
   assert.equal(byId('references-count').textContent, '2 / 5 фото · 1 / 1 видео');
   byId('video-method').value = 'extend'; await byId('video-method').dispatch('change');
+  byId('model-family').value = 'Veo 3.1 Fast'; await byId('model-family').dispatch('change');
   byId('source-video-id').value = 'source-existing';
   assert.equal(byId('references-field').hidden, true);
   await byId('generation-form').dispatch('submit');

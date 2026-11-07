@@ -29,7 +29,11 @@ Both `prepare_generation` and `generate` require `prompt` and **exactly one** se
 
 List filters use the same settings fields plus legacy `mode` and `query`. Read `methods` and `inputsByMethod` for method-specific limits. Legacy `mode` remains compatible: image models keep `mode: "text"`; Veo ingredients keep `mode: "references"`. Ordinary Omni supports `text` and `ingredients`; with an exact model and omitted outer `method`, references infer ingredients, otherwise text. Explicit ingredients requires at least one reference.
 
-Settings resolution collapses only these known duplicate aliases when their explicit `-8s-landscape` ID exists: `veo-3.1-lite`, `veo-3.1-fast`, `veo-3.1-quality`, and `omni-1.1-flash`. An exact `model` request preserves the chosen catalog ID, including a legacy alias. Unknown IDs fail; names are not matched by similarity.
+For a new video without an explicit model choice, prefer `Omni 1.2 Flash` only when the live catalog contains a compatible ID. Read `preferred` metadata; if no compatible preferred model is available, report that state without falling back to 1.1. Preserve saved selections, drafts, history, prepared `generateArguments` and identical request replays.
+
+Omni 1.2 Flash supports `text`, `ingredients` and `frames` from 3 through 15 seconds, `16:9` and `9:16`, and `standard` (720p) or `360p`. Frames at 3–10 seconds require a start frame and allow an end frame; at 11–15 seconds they accept only a start frame. Durations above 10 seconds require Pro or Ultra. Read the chosen model's `inputsByMethod`, `requiredTier` and `fileLimits`; account access remains unchecked by preparation. Omni 1.2 extension, audio ingredients and motion inputs are not exposed by this app.
+
+Settings resolution collapses only these known duplicate aliases when their corresponding same-version `-8s-landscape` ID exists: `veo-3.1-lite`, `veo-3.1-fast`, `veo-3.1-quality`, `omni-1.1-flash`, and `omni-1.2-flash`. An exact `model` request preserves the chosen catalog ID, including a legacy alias. This never migrates 1.1 to 1.2. Unknown IDs fail; names are not matched by similarity and absent IDs must not be invented.
 
 ## Prepare without spending
 
@@ -65,6 +69,6 @@ Preparation preserves the supplied prompt in those arguments. Submission current
 
 Do not combine methods. Never use `referencePaths` as frame slots or send an end frame alone. If the user has not assigned frame roles, resolve them before spending. Preserve ingredient order and frame roles.
 
-Images must be PNG, JPEG, WebP, or GIF, at most 20 MB each. Edit videos must be MP4, MOV, or M4V, at most 100 MB and 10 seconds. The 10-second limit is checked during actual submission through container `ffprobe`, not guaranteed by preparation. MCP accepts absolute path fields and uses the same native format/size checks as app file selection and drag-and-drop; it does not accept drag-and-drop events, browser File objects, URLs, or base64.
+Images must be PNG, JPEG, WebP, or GIF, at most 20 MB each. Edit videos must be MP4, MOV, or M4V, at most 100 MiB. `fileLimits.video.maxDurationSeconds` is model-specific: 15 seconds for Omni 1.2 Edit, 10 for Omni 1.1 Edit. Submission checks duration through container `ffprobe`; preparation does not. MCP accepts absolute path fields and uses the same native format/size checks as app file selection and drag-and-drop; it does not accept drag-and-drop events, browser File objects, URLs, or base64.
 
 For extend, obtain `sourceVideoId` from existing job `media[index].mediaGenerationId` or a user-provided verified ID. Never use local `jobId` or a local video file.

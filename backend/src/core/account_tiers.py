@@ -47,6 +47,10 @@ def get_required_paygate_tier_for_model(model_name: Optional[str]) -> str:
     if normalized.startswith("veo") and re.search(r"(?:-|_)(?:4|6)s(?:-|_|$)", normalized):
         return PAYGATE_TIER_TWO
 
+    # Omni 1.2 usages above 10s are available to Pro/Ultra in current GetModels.
+    if normalized.startswith(("omni-1.2-flash", "macaron_cookie_")) and re.search(r"(?:-|_)(?:1[1-5])s(?:-|_|$)", normalized):
+        return PAYGATE_TIER_ONE
+
     if (
         normalized.endswith("-4k")
         or normalized.endswith("_4k")

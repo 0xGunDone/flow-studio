@@ -11,30 +11,41 @@ function modelInfo(model) {
   const edit = omni && /(?:-|_)edit(?:-|_)/.test(id);
   const aspect = /portrait/.test(id) ? '9:16' : /square/.test(id) ? '1:1' : /four-three/.test(id) ? '4:3' : /three-four/.test(id) ? '3:4' : /landscape/.test(id) || kind === 'video' ? '16:9' : '';
   const seconds = id.match(/(?:-|_)(\d+)s(?:-|_|$)/)?.[1] || description.match(/\b(\d+)s\b/)?.[1];
-  const resolution = id.match(/(?:-|_)(2k|4k|1080p)(?:-|_|$)/i)?.[1].toUpperCase();
+  const resolutionMatch = id.match(/(?:-|_)(2k|4k|360p|720p|1080p)(?:-|_|$)/i)?.[1];
+  const resolution = resolutionMatch && (/^(360|720)p$/i.test(resolutionMatch) ? resolutionMatch.toLowerCase() : resolutionMatch.toUpperCase());
   let name = description.split(' · ')[0].replace(' - ', ' ').replace(/\s+(?:I2V|R2V|Extend|Edit)$/, '');
   if (/generation\s*-/.test(name)) name = id;
   const operation = edit ? 'Редактирование' : extend ? 'Продолжение' : i2v ? 'По кадрам' : r2v ? 'По образцам' : '';
-  const maxImages = kind === 'image' ? 5 : omni ? edit ? 5 : 7 : r2v ? 3 : i2v ? (/interpolation/.test(id) ? 2 : /(?:_|-)i2v(?:_|-)lite(?:_|-)/.test(id) ? 1 : 2) : 0;
+  const omni12 = /^omni-1\.2-flash(?:-|$)/.test(id);
+  const maxImages = kind === 'image' ? 5 : i2v ? (omni12 && Number(seconds) > 10 ? 1 : /(?:_|-)i2v(?:_|-)lite(?:_|-)/.test(id) ? 1 : 2) : omni ? edit ? 5 : 7 : r2v ? 3 : 0;
+  const maxInputDuration = edit ? omni12 ? 15 : 10 : 0;
   const minImages = r2v || i2v ? (/interpolation/.test(id) ? 2 : 1) : 0;
   const maxVideos = edit ? 1 : 0;
   const maxReferences = maxImages + maxVideos;
-  const requiredTier = /^veo/.test(id) && ['4','6'].includes(seconds) ? 'Ultra' : '';
+  const requiredTier = /^veo/.test(id) && ['4','6'].includes(seconds) ? 'Ultra' : omni12 && Number(seconds) > 10 ? 'Pro' : '';
   const label = [name, operation, seconds ? `${seconds}\u00a0с` : '', aspect, resolution, requiredTier].filter(Boolean).join(' · ');
-  return { id, kind, extend, i2v, r2v, omni, edit, maxImages, minImages, maxVideos, minVideos: edit ? 1 : 0, maxReferences, supportsVideoReferences: maxVideos > 0, requiredTier, label, aspect, seconds, resolution };
+  return { id, kind, extend, i2v, r2v, omni, edit, maxImages, minImages, maxVideos, minVideos: edit ? 1 : 0, maxReferences, supportsVideoReferences: maxVideos > 0, maxInputDuration, requiredTier, label, aspect, seconds, resolution };
 }
 
 function referenceKind(reference) {
   return reference.kind || (/^data:video\//i.test(reference.dataUrl || '') ? 'video' : 'image');
 }
 
+const PREFERRED_VIDEO_FAMILY = 'Omni 1.2 Flash';
 const VIDEO_METHODS = { text: 'Текст → видео', frames: 'Frames · Кадры', ingredients: 'Ingredients · Ингредиенты', edit: 'Редактирование видео', extend: 'Продолжение видео' };
 function modelSettings(model) {
   const info = modelInfo(model), id = info.id;
   const family = /^veo[-_]3[._]1[-_](lite|fast|quality)/.exec(id)?.[1];
-  const name = family ? `Veo 3.1 ${family[0].toUpperCase() + family.slice(1)}` : info.omni ? 'Omni 1.1 Flash' : /flash-lite-image/.test(id) ? 'Nano Banana 2 Lite' : /flash-image/.test(id) ? 'Nano Banana 2.1' : /pro-image/.test(id) ? 'Nano Banana Pro' : (model?.description || id).split(' · ')[0];
+  const omniVersion = /^omni[-_](\d+[._]\d+)[-_]flash/.exec(id)?.[1].replace('_', '.');
+  const name = family ? `Veo 3.1 ${family[0].toUpperCase() + family.slice(1)}` : omniVersion ? `Omni ${omniVersion} Flash` : /flash-lite-image/.test(id) ? 'Nano Banana 2 Lite' : /flash-image/.test(id) ? 'Nano Banana 2.1' : /pro-image/.test(id) ? 'Nano Banana Pro' : (model?.description || id).split(' · ')[0];
   const methods = info.kind === 'image' ? ['image'] : info.edit ? ['edit'] : info.extend ? ['extend'] : info.i2v ? ['frames'] : info.r2v ? ['ingredients'] : info.omni ? ['text', 'ingredients'] : ['text'];
   return { model, info, family: name, methods, duration: info.edit ? 'source' : info.kind === 'video' ? info.seconds || '8' : '', aspect: info.aspect || '16:9', resolution: info.resolution || 'standard' };
+}
+function preferredModel(models, kind, method = kind === 'video' ? 'text' : 'image') {
+  const entries = models.map(modelSettings).filter(entry => entry.info.kind === kind && entry.methods.includes(method));
+  if (kind === 'image') return entries.find(entry => entry.info.id === 'gemini-3.1-flash-image-landscape')?.model || entries[0]?.model || null;
+  const preferred = entries.filter(entry => entry.family === PREFERRED_VIDEO_FAMILY);
+  return preferred.find(entry => entry.info.id === 'omni-1.2-flash-8s-landscape')?.model || preferred[0]?.model || null;
 }
 function frameReferences(frames, info, required = false) {
   const [start, end] = frames;
@@ -102,7 +113,7 @@ function errorMessage(error) {
     .replace(/^Error invoking remote method ['"]studio:[A-Za-z]+['"]:\s*(?:Error:\s*)?/, '');
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, recoveryAccountId, errorMessage };
+if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, preferredModel, PREFERRED_VIDEO_FAMILY, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, recoveryAccountId, errorMessage };
 if (typeof document !== 'undefined') initialize();
 
 function initialize() {
@@ -196,8 +207,9 @@ function initialize() {
     $('generate-label').textContent = running ? 'Генерация идет…' : state.mode === 'video' ? 'Создать видео' : 'Создать изображение';
     $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.importPending ? 'Добавляем вложения…' : !available ? 'Подключите активный аккаунт в разделе «Аккаунты»' : '⌘ Enter — создать';
   }
-  function renderModels() {
-    const previous = $('model').value || draft.model;
+  function renderModels(requestedModel) {
+    if (requestedModel !== undefined) draft.model = requestedModel;
+    const previous = requestedModel ?? ($('model').value || draft.model);
     const models = state.models.filter(model => modelInfo(model).kind === state.mode);
     $('model').replaceChildren();
     if (!models.length) {
@@ -212,8 +224,13 @@ function initialize() {
     }
     if (models.some(model => model.id === previous)) $('model').value = previous;
     else {
-      const preferred = models.find(model => model.id === (state.mode === 'image' ? 'gemini-3.1-flash-image-landscape' : 'veo-3.1-fast-8s-landscape'));
+      const missingSavedModel = previous && modelInfo({ id: previous }).kind === state.mode;
+      const preferred = !missingSavedModel && preferredModel(models, state.mode, state.mode === 'video' ? state.videoMethod : 'image');
       if (preferred) $('model').value = preferred.id;
+      else {
+        const option = element('option', '', `${missingSavedModel ? previous : PREFERRED_VIDEO_FAMILY} недоступна для этого метода — выберите модель явно`);
+        option.value = ''; $('model').append(option); $('model').value = '';
+      }
     }
     $('model').disabled = !models.length;
     const settings = selectedModel() && modelSettings(selectedModel());
@@ -237,8 +254,12 @@ function initialize() {
     const method = state.mode === 'image' ? 'image' : state.videoMethod;
     const entries = catalog.filter(entry => entry.methods.includes(method));
     fillSelect('model-family', entries.map(entry => entry.family), selected?.family);
+    if (!selected && state.mode === 'video') {
+      const option = element('option', '', 'Модель недоступна — выберите модель явно');
+      option.value = ''; $('model-family').append(option); $('model-family').value = '';
+    }
     const family = entries.filter(entry => entry.family === $('model-family').value);
-    fillSelect('duration', [...new Set(family.map(entry => entry.duration))].sort((a,b) => Number(a)-Number(b)), selected?.duration, value => value === 'source' ? 'По исходному видео' : `${value} с${family.some(entry => entry.duration === value && entry.info.requiredTier) ? ' · Ultra' : ''}`);
+    fillSelect('duration', [...new Set(family.map(entry => entry.duration))].sort((a,b) => Number(a)-Number(b)), selected?.duration, value => { const tier = family.find(entry => entry.duration === value && entry.info.requiredTier)?.info.requiredTier; return value === 'source' ? 'По исходному видео' : `${value} с${tier ? ' · ' + tier : ''}`; });
     $('duration').disabled = $('duration').children.length < 2;
     $('duration-field').hidden = state.mode !== 'video';
     fillSelect('aspect-ratio', family.filter(entry => entry.duration === $('duration').value).map(entry => entry.aspect), selected?.aspect);
@@ -250,12 +271,19 @@ function initialize() {
     if (changed === 'video-method') state.videoMethod = $('video-method').value;
     const method = state.mode === 'image' ? 'image' : state.videoMethod;
     let entries = state.models.map(modelSettings).filter(entry => entry.info.kind === state.mode && entry.methods.includes(method));
+    const saved = state.models.find(model => model.id === draft.model);
+    const prior = old || (saved && modelInfo(saved).kind === state.mode ? modelSettings(saved) : null);
+    if (changed === 'video-method') {
+      const preferred = prior || (draft.model && modelInfo({ id: draft.model }).kind === state.mode ? null : preferredModel(state.models, state.mode, method));
+      const family = prior?.family || (preferred && modelSettings(preferred).family);
+      entries = family ? entries.filter(entry => entry.family === family) : [];
+    }
     const wants = { family: $('model-family').value, duration: $('duration').value, aspect: $('aspect-ratio').value, resolution: $('resolution').value };
     const keys = { 'model-family': 'family', duration: 'duration', 'aspect-ratio': 'aspect', resolution: 'resolution' };
     if (keys[changed]) entries = entries.filter(entry => entry[keys[changed]] === wants[keys[changed]]);
     for (const key of ['family','duration','aspect','resolution']) {
       if (key === keys[changed]) continue;
-      const matching = entries.filter(entry => entry[key] === (wants[key] || old?.[key]));
+      const matching = entries.filter(entry => entry[key] === (wants[key] || prior?.[key]));
       if (matching.length) entries = matching;
     }
     const chosen = entries.find(entry => entry.model.id === old?.model.id) || entries[0];
@@ -268,7 +296,7 @@ function initialize() {
     $('source-video-id').required = info.extend;
     $('pick-images-label').textContent = info.supportsVideoReferences ? 'Добавить фото или видео' : 'Добавить изображения';
     $('model-description').textContent = !selectedModel() ? '' : info.edit ? 'Редактирует исходное видео по вашему запросу и ингредиентам' : info.extend ? 'Продолжает исходное видео по вашему запросу' : state.videoMethod === 'frames' && state.mode === 'video' ? 'Задайте начальный кадр и при необходимости конечный' : state.videoMethod === 'ingredients' && state.mode === 'video' ? 'Использует ингредиенты для содержания и стиля ролика' : info.kind === 'image' ? 'По тексту или с исходными изображениями' : 'Видео по текстовому описанию';
-    $('references-hint').textContent = info.edit ? '1 исходное видео MP4, MOV или M4V до 10 с и до 5 изображений. Порядок образцов сохраняется' : info.i2v ? 'Порядок изображений задает начальный и конечный кадры' : info.minImages ? `От ${info.minImages} до ${info.maxImages} изображений` : info.maxImages ? `До ${info.maxImages} изображений, если нужны` : 'Эта модель не использует исходные изображения';
+    $('references-hint').textContent = info.edit ? `1 исходное видео MP4, MOV или M4V до ${info.maxInputDuration} с и до 5 изображений. Порядок образцов сохраняется` : info.i2v ? 'Порядок изображений задает начальный и конечный кадры' : info.minImages ? `От ${info.minImages} до ${info.maxImages} изображений` : info.maxImages ? `До ${info.maxImages} изображений, если нужны` : 'Эта модель не использует исходные изображения';
     renderReferences();
     setError('form-error', inputError());
     updateGenerate();
@@ -370,12 +398,9 @@ function initialize() {
   }
   function reuse(job) {
     const model = state.models.find(item => item.id === job.model);
-    if (model) {
-      state.mode = modelInfo(model).kind;
-      for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
-      renderModels();
-      $('model').value = model.id;
-    }
+    state.mode = model ? modelInfo(model).kind : job.kind || modelInfo({ id: job.model }).kind;
+    for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
+    renderModels(job.model);
     $('prompt').value = job.prompt;
     state.references = [];
     state.frames = [null, null];
@@ -386,7 +411,7 @@ function initialize() {
     saveDraft();
     page('create');
     $('prompt').focus();
-    notify('Запрос перенесен в редактор. Добавьте исходные изображения или ID видео заново, если они нужны');
+    notify(model ? 'Запрос перенесен в редактор. Добавьте исходные изображения или ID видео заново, если они нужны' : `Модель ${job.model} недоступна. Текст перенесен; выберите другую модель явно`, !model);
   }
   function renderResult() {
     const job = state.jobs.find(item => item.id === state.selectedJobId);

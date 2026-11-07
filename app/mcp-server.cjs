@@ -69,7 +69,7 @@ function validateGeneration(value, context) {
   if (sources > 1) context.addIssue({ code: z.ZodIssueCode.custom, message: 'References, frame paths, and sourceVideoId are mutually exclusive.' });
   if (value.endFramePath && !value.startFramePath) context.addIssue({ code: z.ZodIssueCode.custom, path: ['startFramePath'], message: 'endFramePath requires startFramePath.' });
   const method = settings?.method || value.method;
-  const edit = method === 'edit' || /^omni-1\.1-flash-edit-(?:landscape|portrait)$/.test(value.model || '');
+  const edit = method === 'edit' || /^omni-1\.[12]-flash-edit-(?:landscape|portrait)(?:-360p)?$/.test(value.model || '');
   if (value.videoPaths && !edit) context.addIssue({ code: z.ZodIssueCode.custom, path: ['videoPaths'], message: 'Only an edit model accepts videoPaths.' });
   if (edit && !value.videoPaths) context.addIssue({ code: z.ZodIssueCode.custom, path: ['videoPaths'], message: 'Edit requires one source video.' });
   if (edit && value.referencePaths?.length > 5) context.addIssue({ code: z.ZodIssueCode.custom, path: ['referencePaths'], message: 'Omni Edit accepts up to 5 image references.' });
@@ -84,7 +84,7 @@ const prepareSchema = schemas.prepare.superRefine(validateGeneration);
 
 const definitions = [
   ['status', 'status', 'Read app status', 'Read readiness, account summaries, credits, running jobs, and history count. Starts installed Flow Studio if needed.', true, false, true, false],
-  ['list_models', 'models', 'List generation models', 'List current exact model ids and supported inputs. Catalog presence does not guarantee Google account access. Choose requested model; no silent fallback.', true, false, true, true],
+  ['list_models', 'models', 'List generation models', 'List current exact model ids and supported inputs. For a new video without an explicit choice, prefer compatible Omni 1.2 Flash (preferred:true). Omni 1.1 is not preferred. Catalog presence does not guarantee Google account access. Preserve explicit models; no silent fallback or invented IDs.', true, false, true, true],
   ['prepare_generation', 'prepare', 'Validate generation without spending credits', 'Resolve exact model or separate settings and validate local input files/roles. Does not upload inputs, generate media, create jobs or spend generation credits. Returns generateArguments with exact model and explicit method; add requestId and confirmCreditSpend only for an authorized generation. Does not prove account access, credits, video duration or Google acceptance.', true, false, true, false],
   ['generate', 'generate', 'Generate image or video', 'Spend credits on one user-requested generation, returning jobId immediately. Use either exact model (prefer generateArguments returned by prepare_generation) or separate settings; no model substitution. Set explicit method to distinguish text, ingredients and frame roles. Reuse requestId and exact inputs for retry. Wait then save. Never automatically resubmit failed/cancelled jobs. Edit requires one videoPaths source with optional image ingredients; frame roles use startFramePath/endFramePath; extend uses sourceVideoId.', false, true, true, true],
   ['get_job', 'job', 'Read generation job', 'Read job status and returned media localPath/url/savedPath. No authentication data is returned.', true, false, true, false],
@@ -111,7 +111,7 @@ async function dispatch(client, method, params, options) {
 
 function createServer(client = new BridgeClient()) {
   const server = new McpServer({ name: 'flow-studio', version: '1.2.0' }, {
-    instructions: 'Control Flow Studio through its local bridge. Read status and list_models. Use prepare_generation to check separate settings and frame/ingredient roles without upload or credit spend; it returns exact generateArguments. Generate only when authorized, with a stable requestId and confirmCreditSpend:true; then wait and save. Never silently change model, settings, prompt or inputs after failure. Engine runs only while the app is open; stop polling when the user closes it to stop work. Never reveal credentials.',
+    instructions: 'Control Flow Studio through its local bridge. For new video without an explicit model choice, prefer compatible Omni 1.2 Flash from the live catalog; Omni 1.1 is not preferred. Preserve explicit model IDs, saved selections and history. If compatible 1.2 is unavailable, report it without silent fallback; never invent IDs. Read status and list_models. Use prepare_generation to check separate settings and frame/ingredient roles without upload or credit spend; it returns exact generateArguments. Generate only when authorized, with a stable requestId and confirmCreditSpend:true; then wait and save. Never silently change model, settings, prompt or inputs after failure. Engine runs only while the app is open; stop polling when the user closes it to stop work. Never reveal credentials.',
     maxToolInputElements: 100,
   });
   for (const definition of definitions) {

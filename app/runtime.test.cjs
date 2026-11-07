@@ -123,7 +123,7 @@ test('engine startup reconciles its own healthy service and refuses a different 
  await r.ensureEngine();
  assert.deepEqual(calls.map(c=>c.args.slice(3)),[
   ['exec','-T','flow2api','python','-c','import sys; sys.exit(0)'],
-  ['up','-d','--build','flow2api'],
+  ['up','-d','flow2api'],
  ]);
  assert.equal(r.engineManaged,true);
  const other=new Runtime({composePath:'/own/compose.json'});

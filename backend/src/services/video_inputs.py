@@ -11,7 +11,7 @@ INPUT_DIR = Path(os.environ.get("FLOW_STUDIO_INPUT_DIR", "/app/tmp/flow-studio-i
 MIMES = {"mp4": "video/mp4", "mov": "video/quicktime", "m4v": "video/x-m4v"}
 
 
-async def read_video_reference(reference: dict) -> dict:
+async def read_video_reference(reference: dict, *, max_duration_seconds: int = 10) -> dict:
     identifier = str(reference.get("file_id") or "")
     if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(mp4|mov|m4v)", identifier):
         raise ValueError("Некорректный локальный видеофайл.")
@@ -44,8 +44,8 @@ async def read_video_reference(reference: dict) -> dict:
         metadata = json.loads(output)
         videos = [stream for stream in metadata.get("streams", []) if stream.get("codec_type") == "video"]
         duration = float(metadata.get("format", {}).get("duration") or (videos[0].get("duration") if videos else 0) or 0)
-        if not videos or not math.isfinite(duration) or not 0 < duration <= 10.02:
-            raise ValueError("Omni Edit принимает видео длительностью до 10 секунд. Обрежьте исходный файл.")
+        if not videos or not math.isfinite(duration) or not 0 < duration <= max_duration_seconds + 0.02:
+            raise ValueError(f"Omni Edit принимает видео длительностью до {max_duration_seconds} секунд. Обрежьте исходный файл.")
         with os.fdopen(os.dup(fd), "rb") as source:
             source.seek(0)
             data = source.read(100 * 1024 * 1024 + 1)
@@ -53,6 +53,6 @@ async def read_video_reference(reference: dict) -> dict:
             raise ValueError("Видеофайл изменился во время чтения.")
         return {"bytes": data, "mime_type": MIMES[extension],
                 "filename": str(reference.get("filename") or identifier)[:256],
-                "duration_seconds": duration, "end_frame": min(300, max(1, round(duration * 30)))}
+                "duration_seconds": duration, "end_frame": min(max_duration_seconds * 30, max(1, round(duration * 30)))}
     finally:
         os.close(fd)

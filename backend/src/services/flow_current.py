@@ -677,6 +677,7 @@ class CurrentFlowClientMixin:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
         google_cookies: Optional[str] = None,
+        resolution: Optional[str] = None,
     ) -> dict:
         return await self._current_generate_video(
             project_id=project_id,
@@ -684,6 +685,7 @@ class CurrentFlowClientMixin:
             model_key=model_key,
             aspect_ratio=aspect_ratio,
             mode="text",
+            resolution=resolution,
             token_id=token_id,
             token_video_concurrency=token_video_concurrency,
             google_cookies=google_cookies,
@@ -701,6 +703,7 @@ class CurrentFlowClientMixin:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
         google_cookies: Optional[str] = None,
+        resolution: Optional[str] = None,
     ) -> dict:
         media_ids = [
             str(item.get("mediaId") or item.get("name") or "").strip()
@@ -713,6 +716,7 @@ class CurrentFlowClientMixin:
             model_key=model_key,
             aspect_ratio=aspect_ratio,
             mode="references",
+            resolution=resolution,
             reference_media_ids=media_ids,
             token_id=token_id,
             token_video_concurrency=token_video_concurrency,
@@ -727,9 +731,14 @@ class CurrentFlowClientMixin:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
         google_cookies: Optional[str] = None,
+        resolution: Optional[str] = None,
     ) -> dict:
         references = reference_media_ids or []
-        if model_key not in {"abra_edit", "abra_edit_360p"}:
+        max_duration = {
+            "abra_edit": 10, "abra_edit_360p": 10,
+            "macaron_cookie_edit": 15, "macaron_cookie_edit_360p": 15,
+        }.get(model_key)
+        if max_duration is None:
             raise ValueError("Видеореференс поддерживает только модель Omni Edit.")
         if not self._is_uuid(source_video_id) or any(not self._is_uuid(value) for value in references):
             raise ValueError("Укажите корректные ID видеореференса и изображений.")
@@ -737,13 +746,14 @@ class CurrentFlowClientMixin:
             raise ValueError("Omni Edit принимает не больше пяти изображений.")
         if (
             type(start_frame) is not int or type(end_frame) is not int
-            or start_frame < 0 or end_frame <= start_frame or end_frame - start_frame > 300
+            or start_frame < 0 or end_frame <= start_frame or end_frame - start_frame > max_duration * 30
         ):
-            raise ValueError("Укажите сегмент видеореференса длиной до 10 секунд (30 кадров/с).")
+            raise ValueError(f"Укажите сегмент видеореференса длиной до {max_duration} секунд (30 кадров/с).")
         return await self._current_generate_video(
             project_id=project_id, prompt=prompt, model_key=model_key,
             aspect_ratio=aspect_ratio, mode="edit", video_media_id=source_video_id,
             start_frame=start_frame, end_frame=end_frame,
+            resolution=resolution,
             reference_media_ids=references, token_id=token_id,
             token_video_concurrency=token_video_concurrency, google_cookies=google_cookies,
         )
@@ -762,6 +772,7 @@ class CurrentFlowClientMixin:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
         google_cookies: Optional[str] = None,
+        resolution: Optional[str] = None,
     ) -> dict:
         return await self._current_generate_video(
             project_id=project_id,
@@ -769,6 +780,7 @@ class CurrentFlowClientMixin:
             model_key=model_key,
             aspect_ratio=aspect_ratio,
             mode="start_end",
+            resolution=resolution,
             start_media_id=start_media_id,
             end_media_id=end_media_id,
             token_id=token_id,
@@ -789,6 +801,7 @@ class CurrentFlowClientMixin:
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
         google_cookies: Optional[str] = None,
+        resolution: Optional[str] = None,
     ) -> dict:
         return await self._current_generate_video(
             project_id=project_id,
@@ -796,6 +809,7 @@ class CurrentFlowClientMixin:
             model_key=model_key,
             aspect_ratio=aspect_ratio,
             mode="start",
+            resolution=resolution,
             start_media_id=start_media_id,
             token_id=token_id,
             token_video_concurrency=token_video_concurrency,

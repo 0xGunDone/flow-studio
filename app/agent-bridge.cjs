@@ -3,11 +3,11 @@ const http=require('node:http');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const {randomBytes,timingSafeEqual}=require('node:crypto');
-const {modelSettings}=require('./renderer.js');
+const {modelSettings,PREFERRED_VIDEO_FAMILY}=require('./renderer.js');
 const {importMedia}=require('./input-files.cjs');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const methods=['image','text','ingredients','frames','edit','extend'];
-const aliases=new Set(['veo-3.1-lite','veo-3.1-fast','veo-3.1-quality','omni-1.1-flash']);
+const aliases=new Set(['veo-3.1-lite','veo-3.1-fast','veo-3.1-quality','omni-1.1-flash','omni-1.2-flash']);
 const fileLimits={image:{maxBytes:20*1024*1024,extensions:['png','jpg','jpeg','webp','gif']},video:{maxBytes:100*1024*1024,maxDurationSeconds:10,extensions:['mp4','mov','m4v']}};
 const failure=(message,code='INVALID_ARGUMENTS')=>Object.assign(new Error(message),{code});
 function capabilities(model){
@@ -18,7 +18,7 @@ function capabilities(model){
   const minVideos=method==='edit'?1:0,maxVideos=method==='edit'?info.maxVideos:0;
   inputsByMethod[method]={minImages,maxImages,minVideos,maxVideos,minReferences:minImages+minVideos,maxReferences:maxImages+maxVideos,supportsStartFrame:method==='frames',supportsEndFrame:method==='frames'&&maxImages>1,requiresSourceVideoId:method==='extend'};
  }
- return {id:model.id,description:info.label,kind:info.kind,mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits};
+ return {id:model.id,description:info.label,kind:info.kind,mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
 }
 function externalJob(job){
  const {requestHash,...result}=job;
