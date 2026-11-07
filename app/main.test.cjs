@@ -3,7 +3,7 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),os=require('node:os');
 const {pathToFileURL}=require('node:url');
 const {EventEmitter}=require('node:events');
-async function launch({ready=true,closing=false,pickedFiles=[]}={}){
+async function launch({ready=true,closing=false,pickedFiles=[],accountRuntime={},managedOverrides={}}={}){
  const events=[],windows=[],app=new EventEmitter(),handlers=new Map(),protocols=new Map(),fetches=[];let stopped=false,finishStop,stopError,choice=0,autoSyncs=0;
  const runtime={jobs:[],ready,closing,initializeHistory:async()=>{},start:async()=>{},close:()=>{events.push('stop');return stopError?Promise.reject(stopError):new Promise(resolve=>{finishStop=resolve;});}};
  app.setName=()=>{};app.requestSingleInstanceLock=()=>true;app.getPath=()=>'/unused';app.getVersion=()=>'1.1.0';
@@ -13,8 +13,9 @@ async function launch({ready=true,closing=false,pickedFiles=[]}={}){
   constructor(){super();windows.push(this);this.webContents=new EventEmitter();Object.assign(this.webContents,{send(){},setWindowOpenHandler(){},session:{setPermissionRequestHandler(){}}});}
   loadFile(){}show(){events.push('show');}focus(){}isDestroyed(){return false;}
  }
- const manager={shutdown:()=>events.push('accounts'),startAutoSync(){autoSyncs++;}};
- const electron={app,BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},protocol:{registerSchemesAsPrivileged(){},handle:(name,fn)=>protocols.set(name,fn)},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showOpenDialog:async()=>({canceled:false,filePaths:pickedFiles}),showMessageBoxSync:()=>choice,showErrorBox:()=>events.push('error')},shell:{},net:{fetch:(url,options)=>{fetches.push({url,options});return 'preview';}},clipboard:{}};
+ Object.assign(runtime,accountRuntime);
+ const manager={...managedOverrides,shutdown:()=>events.push('accounts'),startAutoSync(){autoSyncs++;}};
+ const electron={app,BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},protocol:{registerSchemesAsPrivileged(){},handle:(name,fn)=>protocols.set(name,fn)},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showOpenDialog:async()=>({canceled:false,filePaths:pickedFiles}),showMessageBoxSync:()=>choice,showMessageBox:async(_window,options)=>{events.push({dialog:options});return {response:choice};},showErrorBox:()=>events.push('error')},shell:{},net:{fetch:(url,options)=>{fetches.push({url,options});return 'preview';}},clipboard:{}};
  const replacements={electron,'node:fs/promises':{mkdir:async()=>{}},'./runtime.cjs':{Runtime:class{constructor(){return runtime;}}},'./bootstrap.cjs':{prepareEngine:async()=>({})},'./exports.cjs':{},'./agent-bridge.cjs':{createAgentActions(){},startAgentBridge:async()=>({close:async()=>events.push('bridge')})},'./accounts.cjs':{createAccountManager:()=>manager},'./recovery.cjs':{createRecoveryManager:()=>({shutdown(){}})}};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'main.cjs'),'utf8'),{require:name=>replacements[name]??require(name),__dirname,URL,Response});
  await new Promise(setImmediate);
@@ -62,4 +63,40 @@ test('picker and drop share import validation while registered videos keep nativ
  await assert.rejects(h.handlers.get('studio:pickImages')(event),/формат|MP4|видео/i);
  assert.throws(()=>h.handlers.get('studio:dropMedia')({sender:{},senderFrame:event.senderFrame},[image]),/Недопустимый источник/);
  assert.throws(()=>h.handlers.get('studio:dropMedia')({sender:event.sender,senderFrame:{url:'https://example.com'}},[image]),/Недопустимый источник/);
+});
+
+
+test('account removal requires native confirmation and unlinks managed profile only after acceptance',async()=>{
+ const actions=[];
+ const h=await launch({accountRuntime:{accounts:[{id:7,email:'owner@example.test'}],refreshAccounts:async()=>[{id:7,email:'owner@example.test'}],deleteAccount:async id=>{actions.push(['delete',id]);return {deleted:true,accounts:[]};}},managedOverrides:{removeAccount:async(id,fn)=>{actions.push(['unlink',id]);return fn();}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ const remove=()=>h.handlers.get('studio:deleteAccount')(event,7);
+ assert.equal((await remove()).deleted,false);assert.deepEqual(actions,[]);
+ const options=h.events.find(x=>x.dialog).dialog;
+ assert.equal(options.defaultId,0);assert.equal(options.cancelId,0);assert.match(options.message,/owner@example.test/);assert.match(options.detail,/история генераций останутся/);
+ h.setChoice(1);assert.equal((await remove()).deleted,true);assert.deepEqual(actions,[['unlink',7],['delete',7]]);
+ h.runtime.jobs=[{status:'running'}];await assert.rejects(remove(),/завершения генерации/);
+});
+
+test('bulk check goes through managed session sync and serial account action blocks concurrent mutation',async()=>{
+ const calls=[];let finish;
+ const h=await launch({accountRuntime:{checkEnabledAccounts:async({checkAccount})=>{await new Promise(resolve=>{finish=resolve;});await checkAccount(7);return {verified:1};},checkAccount:async id=>{calls.push(['check',id]);return {ok:true};}},managedOverrides:{syncAccountNow:async id=>calls.push(['sync',id])}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ const task=h.handlers.get('studio:checkEnabledAccounts')(event);await new Promise(setImmediate);
+ assert.throws(()=>h.handlers.get('studio:setAccountActive')(event,7,false),/Дождитесь/);
+ finish();assert.deepEqual(await task,{verified:1});assert.deepEqual(calls,[['sync',7],['check',7]]);
+});
+
+
+test('quitting waits for an accepted account removal to persist before stopping backend',async()=>{
+ let finish;
+ const h=await launch({accountRuntime:{accounts:[{id:7,email:'owner@example.test'}],refreshAccounts:async()=>[{id:7,email:'owner@example.test'}],deleteAccount:async()=>new Promise(resolve=>{finish=()=>resolve({deleted:true,accounts:[]});})},managedOverrides:{removeAccount:async(_id,fn)=>{const result=await fn();h.events.push('unlink-persisted');return result;}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ h.setChoice(1);const removal=h.handlers.get('studio:deleteAccount')(event,7);await new Promise(setImmediate);
+ h.app.quit();await new Promise(setImmediate);
+ assert.equal(h.events.includes('stop'),false,'Stopping the engine cannot interrupt accepted delete');
+ assert.equal(h.runtime.accountActionPending,true);
+ finish();await removal;await new Promise(setImmediate);
+ assert(h.events.indexOf('unlink-persisted')<h.events.indexOf('stop'));
+ h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
 });

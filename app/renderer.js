@@ -119,7 +119,7 @@ if (typeof document !== 'undefined') initialize();
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
+  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
@@ -203,9 +203,9 @@ function initialize() {
   function updateGenerate() {
     const running = Boolean(activeJob()) || state.submitting;
     const available = state.accounts.some(account => account.isActive);
-    $('generate').disabled = !state.ready || !selectedModel() || running || !available || state.importPending;
+    $('generate').disabled = !state.ready || !selectedModel() || running || !available || state.importPending || state.accountPending !== null || Boolean(state.batchCheck?.running);
     $('generate-label').textContent = running ? 'Генерация идет…' : state.mode === 'video' ? 'Создать видео' : 'Создать изображение';
-    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.importPending ? 'Добавляем вложения…' : !available ? 'Подключите активный аккаунт в разделе «Аккаунты»' : '⌘ Enter — создать';
+    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.batchCheck?.running ? 'Проверяем аккаунты…' : state.accountPending !== null ? 'Обновляем подключение…' : state.importPending ? 'Добавляем вложения…' : !available ? 'Подключите активный аккаунт в разделе «Аккаунты»' : '⌘ Enter — создать';
   }
   function renderModels(requestedModel) {
     if (requestedModel !== undefined) draft.model = requestedModel;
@@ -552,7 +552,13 @@ function initialize() {
       const balance = element('div', 'account-balance', account.credits !== null && account.credits !== undefined && Number.isFinite(Number(account.credits)) ? numbers.format(Number(account.credits)) : '—');
       balance.append(element('small', '', account.credits === null || account.credits === undefined ? 'Баланс неизвестен' : 'Кредиты'));
       const actions = element('div', 'account-actions');
-      actions.append(button('Войти заново', 'small secondary reconnect', () => beginLogin(account.id)), button('Проверить подключение', 'small secondary check-account', () => checkAccount(account.id)));
+      const toggle = element('label', 'account-switch');
+      const input = element('input', 'account-toggle'); input.type = 'checkbox'; input.checked = account.isActive;
+      input.setAttribute('role','switch'); input.setAttribute('aria-label',`Использовать ${account.email} для генерации`);
+      input.addEventListener('change',()=>changeAccount(account.id,()=>api.setAccountActive(account.id,input.checked)));
+      toggle.append(input,element('span','switch-track'),element('span','switch-label',account.isActive?'Включён':'Выключен'));
+      actions.append(toggle);
+      actions.append(button('Войти заново', 'small secondary reconnect', () => beginLogin(account.id)), button('Проверить подключение', 'small secondary check-account', () => checkAccount(account.id)),button('Удалить', 'small secondary delete-account', () => changeAccount(account.id,()=>api.deleteAccount(account.id),true)));
       row.append(element('div', 'avatar', (account.email || 'G').slice(0, 1)), identity, balance, actions);
       $('accounts-list').append(row);
     }
@@ -562,10 +568,18 @@ function initialize() {
   function renderLogin() {
     const login = state.login;
     const busy = state.loginPending || ['opening', 'waiting', 'syncing'].includes(login?.state);
-    $('refresh-accounts').disabled = !state.ready || state.startupPending || state.refreshPending;
-    $('add-account').disabled = busy || state.checkingAccountId !== null || !state.ready;
-    document.querySelectorAll('.reconnect').forEach(item => { item.disabled = busy || state.checkingAccountId !== null || !state.ready; });
-    document.querySelectorAll('.check-account').forEach(item => { item.disabled = busy || state.checkingAccountId !== null || !state.ready; });
+    const working = state.refreshPending || state.accountPending !== null || state.checkingAccountId !== null || Boolean(state.batchCheck?.running);
+    $('refresh-accounts').disabled = !state.ready || state.startupPending || state.refreshPending || working || busy;
+    $('check-enabled-accounts').disabled = !state.ready || state.startupPending || state.refreshPending || working || busy || Boolean(activeJob()) || !state.accounts.some(a=>a.isActive);
+    $('check-enabled-accounts').textContent = state.batchCheck?.running ? 'Проверяем аккаунты…' : 'Проверить все включённые';
+    const batch = state.batchCheck;
+    $('account-check-progress').hidden = !batch;
+    $('account-check-progress').textContent = batch ? batch.running ? `Проверено ${batch.checked} из ${batch.total}. Успешно: ${batch.verified}, ошибок: ${batch.failed}` : `Проверка завершена: ${batch.verified} успешно, ${batch.failed} с ошибками${batch.skipped ? ', пропущено: '+batch.skipped : ''}` : '';
+    for(const node of document.querySelectorAll('.account-toggle'))node.disabled = !state.ready || working || busy;
+    for(const node of document.querySelectorAll('.delete-account'))node.disabled = !state.ready || working || busy || Boolean(activeJob());
+    $('add-account').disabled = busy || working || !state.ready;
+    document.querySelectorAll('.reconnect').forEach(item => { item.disabled = busy || working || !state.ready; });
+    document.querySelectorAll('.check-account').forEach(item => { item.disabled = busy || working || !state.ready; });
     $('login-panel').hidden = !login || login.state === 'cancelled';
     $('cancel-login').hidden = !busy;
     $('complete-login').hidden = !(login?.state === 'waiting' && login.canComplete === true);
@@ -592,8 +606,29 @@ function initialize() {
     $('recovery-panel').focus();
     if (account) await beginLogin(account.id);
   }
+  async function changeAccount(accountId,action,deleting=false) {
+    if(state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null || state.loginPending || ['opening','waiting','syncing'].includes(state.login?.state) || !state.ready)return;
+    state.accountPending=accountId;setError('accounts-error','');renderAccounts();
+    try{
+      const result=await action();
+      if(result?.accounts){accountVersion++;state.accounts=result.accounts;}
+      if(deleting&&result?.deleted)state.accountChecks.delete(String(accountId));
+    }catch(error){setError('accounts-error',errorMessage(error));}
+    finally{state.accountPending=null;renderAccounts();}
+  }
+  async function checkEnabledAccounts() {
+    if(state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null || state.loginPending || ['opening','waiting','syncing'].includes(state.login?.state) || !state.ready || activeJob())return;
+    state.batchCheck={running:true,total:state.accounts.filter(a=>a.isActive).length,checked:0,verified:0,failed:0,skipped:0};
+    setError('accounts-error','');renderAccounts();
+    try{
+      const result=await api.checkEnabledAccounts();state.batchCheck=result;
+      for(const item of result.results||[])state.accountChecks.set(String(item.accountId),item);
+      if(result.failed)setError('accounts-error','Не все аккаунты подтвердили подключение. Причины указаны у каждого аккаунта.');
+    }catch(error){setError('accounts-error',errorMessage(error));}
+    finally{if(state.batchCheck)state.batchCheck.running=false;state.checkingAccountId=null;renderAccounts();}
+  }
   async function checkAccount(accountId) {
-    if (state.checkingAccountId !== null || state.loginPending || ['opening', 'waiting', 'syncing'].includes(state.login?.state) || !state.ready) return;
+    if (state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null || state.loginPending || ['opening', 'waiting', 'syncing'].includes(state.login?.state) || !state.ready) return;
     state.checkingAccountId = accountId;
     setError('accounts-error', '');
     renderAccounts();
@@ -607,7 +642,7 @@ function initialize() {
     } finally { state.checkingAccountId = null; renderAccounts(); }
   }
   async function beginLogin(accountId) {
-    if (state.loginPending || state.checkingAccountId !== null || ['opening', 'waiting', 'syncing'].includes(state.login?.state) || !state.ready) return;
+    if (state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.loginPending || state.checkingAccountId !== null || ['opening', 'waiting', 'syncing'].includes(state.login?.state) || !state.ready) return;
     setError('accounts-error', '');
     state.loginPending = true;
     state.loginAccountId = accountId ?? null;
@@ -640,7 +675,7 @@ function initialize() {
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.submitting || state.importPending || activeJob() || !state.ready) return;
+    if (state.submitting || state.importPending || state.accountPending !== null || state.batchCheck?.running || activeJob() || !state.ready) return;
     setError('form-error', '');
     let request;
     try { request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value); }
@@ -724,6 +759,7 @@ function initialize() {
     });
   }
   $('add-account').addEventListener('click', () => beginLogin());
+  $('check-enabled-accounts').addEventListener('click', checkEnabledAccounts);
   $('complete-login').addEventListener('click', async () => {
     if (state.loginPending || state.login?.state !== 'waiting' || state.login.canComplete !== true) return;
     state.loginPending = true;
@@ -737,7 +773,7 @@ function initialize() {
     finally { state.loginPending = false; renderLogin(); }
   });
   $('refresh-accounts').addEventListener('click', async () => {
-    if (!state.ready || state.startupPending || state.refreshPending) return;
+    if (!state.ready || state.startupPending || state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null) return;
     state.refreshPending = true;
     renderLogin();
     setError('accounts-error', '');
@@ -769,8 +805,14 @@ function initialize() {
       if (event.job.status === 'running' || !state.selectedJobId) state.selectedJobId = event.job.id;
       renderHistory();
       if (event.job.id === state.selectedJobId) renderResult();
-      updateGenerate();
+      updateGenerate();renderLogin();
     } else if (event.type === 'accounts') { accountVersion++; state.accounts = event.accounts || []; renderAccounts(); }
+    else if (event.type === 'account-checks') {
+      state.batchCheck=event;
+      state.checkingAccountId=event.running&&event.status==='checking'?event.accountId:null;
+      if(event.accountId!=null&&['verified','error'].includes(event.status))state.accountChecks.set(String(event.accountId),event);
+      renderAccounts();
+    }
     else if (event.type === 'login') { loginVersion++; acceptLogin(event.login); }
     else if (event.type === 'error') notify(event.message, true);
   });

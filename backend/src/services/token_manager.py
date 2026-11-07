@@ -363,18 +363,26 @@ class TokenManager:
                     f"[DELETE_TOKEN] 清理 personal 浏览器状态失败: {e}"
                 )
 
-    async def enable_token(self, token_id: int):
+    async def enable_token(self, token_id: int, *, automatic: bool = False) -> bool:
         """Enable a token and reset error count"""
         # Enable the token
         await self.db.update_token(
-            token_id, is_active=True, ban_reason=None, banned_at=None
+            token_id, is_active=True, ban_reason=None, banned_at=None,
+            preserve_manual_disabled=automatic,
         )
+        token = await self.db.get_token(token_id)
+        if not token or not token.is_active:
+            return False
         # Reset error count when enabling (only reset total error_count, keep today_error_count)
         await self.db.reset_error_count(token_id)
+        return True
 
-    async def disable_token(self, token_id: int):
+    async def disable_token(self, token_id: int, *, manual: bool = False):
         """Disable a token"""
-        await self.db.update_token(token_id, is_active=False)
+        updates = {"is_active": False}
+        if manual:
+            updates.update(ban_reason="manual_disabled", banned_at=None)
+        await self.db.update_token(token_id, **updates)
 
     # ========== Token添加 (支持Project创建) ==========
 
@@ -633,7 +641,7 @@ class TokenManager:
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         token = await self.db.get_token(token_id)
-        if credential_updated and token and not token.is_active:
+        if credential_updated and token and not token.is_active and token.ban_reason != "manual_disabled":
             debug_logger.log_info(
                 f"[UPDATE_TOKEN] Token {token_id} 已更新凭证，自动恢复为启用状态"
             )
@@ -663,7 +671,7 @@ class TokenManager:
         if update_fields:
             if credential_updated:
                 self._clear_at_validation_cache(token_id)
-            await self.db.update_token(token_id, **update_fields)
+            await self.db.update_token(token_id, preserve_manual_disabled=True, **update_fields)
 
     # ========== AT自动刷新逻辑 (核心) ==========
 
@@ -1212,6 +1220,7 @@ class TokenManager:
             is_active=False,
             ban_reason="429_rate_limit",
             banned_at=datetime.now(timezone.utc),
+            preserve_manual_disabled=True,
         )
 
     async def auto_unban_429_tokens(self):
@@ -1267,7 +1276,8 @@ class TokenManager:
                     f"已过 {time_since_ban.total_seconds() / 3600:.1f} 小时)"
                 )
                 await self.db.update_token(
-                    token.id, is_active=True, ban_reason=None, banned_at=None
+                    token.id, is_active=True, ban_reason=None, banned_at=None,
+                    preserve_manual_disabled=True,
                 )
                 # 重置错误计数
                 await self.db.reset_error_count(token.id)

@@ -1191,7 +1191,7 @@ async def enable_token(token_id: int, token: str = Depends(verify_admin_token)):
 @router.post("/api/tokens/{token_id}/disable")
 async def disable_token(token_id: int, token: str = Depends(verify_admin_token)):
     """Disable token"""
-    await token_manager.disable_token(token_id)
+    await token_manager.disable_token(token_id, manual=True)
     return {"success": True, "message": "Токен отключён"}
 
 
@@ -2757,8 +2757,12 @@ async def plugin_update_token(
             )
 
             # Check if auto-enable is enabled and token is disabled
-            if plugin_config.auto_enable_on_update and not existing_token.is_active:
-                await token_manager.enable_token(existing_token.id)
+            if (
+                plugin_config.auto_enable_on_update
+                and not existing_token.is_active
+                and existing_token.ban_reason != "manual_disabled"
+                and await token_manager.enable_token(existing_token.id, automatic=True)
+            ):
                 return {
                     "success": True,
                     "message": f"Токен аккаунта {email} обновлён и включён",

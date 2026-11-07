@@ -231,3 +231,62 @@ test('startup loads accounts without waiting on itself, including a local login 
  });
  const result=await r.start();assert.equal(result.ready,true);assert.equal(result.accounts[0].id,7);assert.equal(loads,2);assert.equal(accountReads,2);
 });
+
+
+test('account switch and delete use exact account and refresh confirmed state without touching history',async()=>{
+ const r=new Runtime({dataDir:'/unused'}),calls=[];
+ let rows=[{id:7,email:'owner@example.test',isActive:true}];
+ r.jobs=[{id:'history',status:'succeeded'}];
+ r.refreshAccounts=async()=>{r.accounts=rows;return rows;};
+ r.request=async(endpoint,options)=>{
+  calls.push([endpoint,options.method]);
+  if(options.method==='DELETE')rows=[];
+  else rows=[{...rows[0],isActive:endpoint.endsWith('/enable')}];
+  return {success:true};
+ };
+ assert.equal((await r.setAccountActive(7,false)).accounts[0].isActive,false);
+ assert.equal((await r.setAccountActive(7,true)).accounts[0].isActive,true);
+ assert.deepEqual(await r.deleteAccount(7),{deleted:true,accounts:[]});
+ assert.deepEqual(calls,[['/api/tokens/7/disable','POST'],['/api/tokens/7/enable','POST'],['/api/tokens/7','DELETE']]);
+ assert.deepEqual(r.jobs,[{id:'history',status:'succeeded'}]);
+ await assert.rejects(r.setAccountActive(7,true),/не найден/);
+ await assert.rejects(r.setAccountActive(7,'false'),/Неверные/);
+ r.jobs=[{status:'running'}];await assert.rejects(r.deleteAccount(7),/завершения генерации/);
+});
+
+test('bulk account check includes enabled only, runs serially, continues failures and skips disabled mid-check',async()=>{
+ const events=[],r=new Runtime({onEvent:e=>events.push(e)});
+ let rows=[{id:1,isActive:true},{id:2,isActive:false},{id:3,isActive:true},{id:4,isActive:true}];
+ r.refreshAccounts=async()=>rows;
+ const calls=[];let inflight=0,peak=0,finish;
+ const options={checkAccount:async id=>{
+  calls.push(id);peak=Math.max(peak,++inflight);
+  try{
+   if(id===1){await new Promise(resolve=>{finish=resolve;});rows=rows.map(x=>x.id===4?{...x,isActive:false}:x);throw new Error('rpc=nzlxg, code=401');}
+   return {ok:true,checkedAt:'checked'};
+  }finally{inflight--;}
+ }};
+ const task=r.checkEnabledAccounts(options);
+ assert.equal(r.checkEnabledAccounts(options),task);
+ await new Promise(setImmediate);assert.deepEqual(calls,[1]);finish();
+ const result=await task;
+ assert.deepEqual(calls,[1,3]);assert.equal(peak,1);
+ assert.equal(result.total,3);assert.equal(result.checked,3);assert.equal(result.verified,1);assert.equal(result.failed,1);assert.equal(result.skipped,1);
+ assert.equal(result.results[0].message,'rpc=nzlxg, code=401');
+ assert.equal(events.at(-1).running,false);assert.equal(r.accountCheckTask,null);
+ assert.deepEqual(events.filter(e=>e.status==='checking').map(e=>e.accountId),[1,3]);
+});
+
+
+test('late account refresh cannot restore old toggle state or a deleted row',async()=>{
+ const events=[],r=new Runtime({onEvent:e=>events.push(e)}),requests=[];
+ r.request=async()=>new Promise(resolve=>requests.push(resolve));
+ const first=r.refreshAccounts(),second=r.refreshAccounts();
+ requests[1]([{id:7,email:'owner@example.test',is_active:false}]);await second;
+ requests[0]([{id:7,email:'owner@example.test',is_active:true}]);await first;
+ assert.equal(r.accounts[0].isActive,false);assert.equal(events.length,1);
+ const stale=r.refreshAccounts();
+ r.accountAppliedVersion=++r.accountRefreshVersion;r.accounts=[];
+ requests[2]([{id:7,email:'owner@example.test',is_active:true}]);await stale;
+ assert.deepEqual(r.accounts,[]);assert.equal(events.length,1);
+});

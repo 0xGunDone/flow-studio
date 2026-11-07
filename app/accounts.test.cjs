@@ -28,7 +28,7 @@ test('cookie and target scope excludes unrelated origins and retains non-Secure 
   assert.equal(_test.validSocket('ws://example.com:9234/devtools/page/test', 9234, 'page'), false);
 });
 
-async function harness(t, { email = 'person@example.com', syncAccount, stored, waitForIdentity = false, hiddenUnsupported = false, backgroundTimeoutMs = 1000 } = {}) {
+async function harness(t, { email = 'person@example.com', syncAccount, stored, waitForIdentity = false, hiddenUnsupported = false, backgroundTimeoutMs = 1000, syncIntervalMs } = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'flow-accounts-test-'));
   const states = [], launches = [], synced = [], network = [], processEvents = [];
   let child;
@@ -59,7 +59,7 @@ async function harness(t, { email = 'person@example.com', syncAccount, stored, w
     onState: state => states.push(state),
     syncAccount: async payload => { synced.push(payload); return syncAccount ? syncAccount(payload) : { accountId: 7, email, credits: 10 }; },
   }, {
-    pollMs: 2, startupTimeoutMs: 1000, loginTimeoutMs: 1000, backgroundTimeoutMs, WebSocket: FakeSocket,
+    pollMs: 2, startupTimeoutMs: 1000, loginTimeoutMs: 1000, backgroundTimeoutMs, syncIntervalMs, WebSocket: FakeSocket,
     spawn: (executable, args) => {
       launches.push({ executable, args });
       processEvents.push('launch');
@@ -276,4 +276,105 @@ test('foreground login can follow an explicit sync it cancels', async t => {
   await h.until(() => h.states.some(state => state.state === 'waiting'));
   assert.equal(h.states.at(-1).state, 'waiting');
   assert.deepEqual(h.processEvents.slice(0, 4), ['launch', 'stop', 'exit', 'launch']);
+});
+
+test('removal drains auto sync, blocks other work, and unlinks without deleting or reusing Chrome data', async t => {
+  let finishSave, finishRemoval, deleting = false;
+  const h = await harness(t, { stored: boundProfile, syncIntervalMs: 10, syncAccount: payload => new Promise(resolve => {
+    finishSave = () => resolve({ accountId: payload.expectedAccountId, email: payload.email });
+  }) });
+  h.manager.startAutoSync();
+  await h.until(() => h.synced.length === 1);
+  const profileDir = path.join(h.dataDir, 'chrome-profiles', boundProfile.profiles[0].dir);
+  await fs.writeFile(path.join(profileDir, 'Cookies'), 'saved cookies');
+  await fs.writeFile(path.join(profileDir, 'History'), 'saved history');
+  const removal = h.manager.removeAccount(7, id => {
+    assert.equal(id, 7);
+    assert.deepEqual(h.processEvents, ['launch', 'stop', 'exit']);
+    deleting = true;
+    return new Promise(resolve => { finishRemoval = () => resolve({ removed: true }); });
+  });
+  assert.equal(deleting, false);
+  assert.throws(() => h.manager.addAccount(), { code: 'ACCOUNT_BUSY' });
+  assert.throws(() => h.manager.reconnectAccount(7), { code: 'ACCOUNT_BUSY' });
+  await assert.rejects(h.manager.syncAccountNow(7), { code: 'ACCOUNT_BUSY' });
+  await assert.rejects(h.manager.removeAccount(7, () => assert.fail('Concurrent removal')), { code: 'ACCOUNT_BUSY' });
+  finishSave();
+  await h.until(() => deleting);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.synced.length, 1);
+  assert.equal(h.launches.length, 1);
+  finishRemoval();
+  assert.deepEqual(await removal, { removed: true });
+  assert.equal(await h.manager.hasAccountProfile(7), false);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(h.dataDir, 'google-accounts.json'), 'utf8')), { version: 1, profiles: [] });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.synced.length, 1);
+  assert.equal(h.launches.length, 1);
+  h.manager.addAccount();
+  await h.until(() => h.states.some(state => state.state === 'waiting'));
+  assert.notEqual(h.launches[1].args.find(arg => arg.startsWith('--user-data-dir=')), `--user-data-dir=${profileDir}`);
+  assert.equal(await fs.readFile(path.join(profileDir, 'Cookies'), 'utf8'), 'saved cookies');
+  assert.equal(await fs.readFile(path.join(profileDir, 'History'), 'utf8'), 'saved history');
+});
+
+test('failed removal retains binding and allows automatic sync to resume', async t => {
+  const h = await harness(t, { stored: boundProfile, syncIntervalMs: 10 });
+  let failRemoval, deleting = false;
+  const removal = h.manager.removeAccount(7, () => {
+    deleting = true;
+    return new Promise((resolve, reject) => { failRemoval = () => reject(new Error('Delete failed')); });
+  });
+  await h.until(() => deleting);
+  h.manager.startAutoSync();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.launches.length, 0);
+  const failed = assert.rejects(removal, /Delete failed/);
+  failRemoval();
+  await failed;
+  assert.equal(await h.manager.hasAccountProfile(7), true);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(h.dataDir, 'google-accounts.json'), 'utf8')), boundProfile);
+  await h.until(() => h.synced.length > 0);
+  assert.equal(h.synced[0].expectedAccountId, 7);
+});
+
+test('removal refuses foreground login and pending manual sync before invoking backend', async t => {
+  const h = await harness(t, { stored: boundProfile });
+  const remove = () => assert.fail('Backend removal must not start');
+  await assert.rejects(h.manager.removeAccount(0, remove), TypeError);
+  await assert.rejects(h.manager.removeAccount(7), TypeError);
+  h.manager.reconnectAccount(7);
+  await h.until(() => h.states.some(state => state.state === 'waiting'));
+  await assert.rejects(h.manager.removeAccount(7, remove), { code: 'LOGIN_BUSY' });
+  assert.deepEqual(h.processEvents, ['launch']);
+  let finishSave;
+  const h2 = await harness(t, { stored: boundProfile, syncAccount: payload => new Promise(resolve => {
+    finishSave = () => resolve({ accountId: payload.expectedAccountId, email: payload.email });
+  }) });
+  const sync = h2.manager.syncAccountNow(7);
+  await h2.until(() => h2.synced.length === 1);
+  await assert.rejects(h2.manager.removeAccount(7, remove), { code: 'SYNC_BUSY' });
+  finishSave();
+  await sync;
+});
+
+test('shutdown cancels queued removal but persists removal already accepted by backend', async t => {
+  const h = await harness(t, { stored: boundProfile, syncAccount: () => new Promise(() => {}) });
+  h.manager.startAutoSync();
+  await h.until(() => h.synced.length === 1);
+  const queued = h.manager.removeAccount(7, () => assert.fail('Backend removal after shutdown'));
+  h.manager.shutdown();
+  await assert.rejects(queued, { code: 'SHUTDOWN' });
+  assert.equal(await h.manager.hasAccountProfile(7), true);
+  const h2 = await harness(t, { stored: boundProfile });
+  let finishRemoval, deleting = false;
+  const accepted = h2.manager.removeAccount(7, () => {
+    deleting = true;
+    return new Promise(resolve => { finishRemoval = resolve; });
+  });
+  await h2.until(() => deleting);
+  h2.manager.shutdown();
+  finishRemoval();
+  await accepted;
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(h2.dataDir, 'google-accounts.json'), 'utf8')), { version: 1, profiles: [] });
 });

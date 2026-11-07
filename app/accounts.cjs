@@ -160,6 +160,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   let autoTimer;
   let backgroundController;
   let backgroundWork;
+  let removingAccount = false;
   const pendingSyncs = new Map();
   const browsers = new Map();
 
@@ -465,6 +466,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   }
   function begin(expectedAccountId) {
     if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
     if (active) return active.state;
     if (expectedAccountId != null && (!Number.isSafeInteger(expectedAccountId) || expectedAccountId <= 0)) throw new TypeError('Invalid account ID.');
     backgroundController?.abort(cancelled());
@@ -475,13 +477,14 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
     return state;
   }
   async function autoSync() {
-    if (stopped || active || backgroundWork) return;
+    if (stopped || active || backgroundWork || removingAccount) return;
     backgroundController = new AbortController();
     backgroundWork = (async () => {
       await ready();
       // ponytail: one browser at a time; no concurrent foreground profile launches.
       for (const record of profiles.filter(profile => profile.accountId != null)) {
-        if (stopped || active || backgroundController.signal.aborted) break;
+        if (stopped || active || removingAccount || backgroundController.signal.aborted) break;
+        if (!profiles.includes(record)) continue;
         await run({ controller: backgroundController, background: true, record });
       }
     })().catch(() => {}).finally(() => { backgroundWork = null; backgroundController = null; });
@@ -490,6 +493,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   async function syncAccountNow(accountId) {
     if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new TypeError('Invalid account ID.');
     if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
     if (active) throw failure('LOGIN_BUSY', 'Сначала завершите или отмените текущий вход в Google, затем повторите проверку аккаунта.');
     if (pendingSyncs.has(accountId)) return pendingSyncs.get(accountId);
     const controller = new AbortController();
@@ -519,9 +523,29 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
     pendingSyncs.set(accountId, work);
     return work;
   }
+  async function removeAccount(accountId, removeCallback) {
+    if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new TypeError('Invalid account ID.');
+    if (typeof removeCallback !== 'function') throw new TypeError('removeCallback is required.');
+    if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
+    if (active) throw failure('LOGIN_BUSY', 'Сначала завершите или отмените текущий вход в Google, затем повторите удаление аккаунта.');
+    if (pendingSyncs.size) throw failure('SYNC_BUSY', 'Дождитесь завершения проверки аккаунта.');
+    removingAccount = true;
+    try {
+      await ready();
+      while (backgroundWork) await backgroundWork.catch(() => {});
+      if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+      const result = await removeCallback(accountId);
+      // Unlink the record, never the profile directory: a later login gets a fresh profile.
+      profiles = profiles.filter(profile => profile.accountId !== accountId);
+      await saveMappings();
+      return result;
+    } finally { removingAccount = false; }
+  }
   return {
     async hasAccountProfile(id) { await ready(); return profiles.some(profile => profile.accountId === id); },
     syncAccountNow,
+    removeAccount,
     addAccount: () => begin(),
     reconnectAccount: id => begin(id),
     completeLogin() {

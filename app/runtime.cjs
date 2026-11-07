@@ -118,7 +118,7 @@ async function consumeGeneration(response,onProgress,onAccount=()=>{}) {
 class Runtime {
   constructor({composePath,databasePath,dataDir,onEvent=()=>{}}){
     Object.assign(this,{composePath,databasePath,dataDir,onEvent});
-    this.ready=false;this.message='Запускаем Flow Studio…';this.models=[];this.accounts=[];this.jobs=[];
+    this.ready=false;this.message='Запускаем Flow Studio…';this.models=[];this.accounts=[];this.accountRefreshVersion=0;this.accountAppliedVersion=0;this.jobs=[];
     this.sessionCookie='';this.startTask=null;this.aborts=new Map();this.persistTask=Promise.resolve();
     this.closing=false;this.closeTask=null;this.engineManaged=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();
   }
@@ -203,7 +203,10 @@ class Runtime {
   publicJobs(){return this.jobs.map(j=>this.publicJob(j));}
   publicJob(job){return {...job,media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};}
   async refreshAccounts(options){
+    const version=++this.accountRefreshVersion;
     const rows=await this.request('/api/tokens',options);
+    if(version<this.accountAppliedVersion)return this.accounts;
+    this.accountAppliedVersion=version;
     this.accounts=rows.map(publicAccount);this.onEvent({type:'accounts',accounts:this.accounts});return this.accounts;
   }
   async checkAccount(accountId,{signal}={}){
@@ -215,6 +218,56 @@ class Runtime {
     const after=(await this.refreshAccounts()).find(a=>a.id===accountId);
     if(!after||after.email.toLowerCase()!==before.email.toLowerCase())throw new Error('Аккаунт изменился. Выберите аккаунт заново.');
     return {...result,checkedAt:new Date().toISOString(),message:'Подключение проверено'};
+  }
+  async setAccountActive(accountId,enabled){
+    if(!Number.isSafeInteger(accountId)||accountId<=0||typeof enabled!=='boolean')throw new Error('Неверные параметры аккаунта.');
+    if(!(await this.refreshAccounts()).some(a=>a.id===accountId))throw new Error('Аккаунт не найден.');
+    const result=await this.request('/api/tokens/'+accountId+(enabled?'/enable':'/disable'),{method:'POST'});
+    if(result.success!==true)throw new Error('Не удалось изменить состояние аккаунта.');
+    const accounts=await this.refreshAccounts();
+    if(accounts.find(a=>a.id===accountId)?.isActive!==enabled)throw new Error('Сервер не подтвердил состояние аккаунта.');
+    return {accounts};
+  }
+  async deleteAccount(accountId){
+    if(!Number.isSafeInteger(accountId)||accountId<=0)throw new Error('Аккаунт не найден.');
+    if(this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед удалением аккаунта.');
+    if(!(await this.refreshAccounts()).some(a=>a.id===accountId))throw new Error('Аккаунт не найден.');
+    const result=await this.request('/api/tokens/'+accountId,{method:'DELETE'});
+    if(result.success!==true)throw new Error('Не удалось удалить подключение.');
+    this.accountAppliedVersion=++this.accountRefreshVersion;
+    this.accounts=this.accounts.filter(a=>a.id!==accountId);
+    this.onEvent({type:'accounts',accounts:this.accounts});
+    return {deleted:true,accounts:this.accounts};
+  }
+  checkEnabledAccounts({checkAccount=id=>this.checkAccount(id)}={}){
+    if(this.accountCheckTask)return this.accountCheckTask;
+    this.accountCheckTask=(async()=>{
+      const ids=(await this.refreshAccounts()).filter(a=>a.isActive).map(a=>a.id);
+      const summary={running:true,total:ids.length,checked:0,verified:0,failed:0,skipped:0,results:[]};
+      const emit=extra=>this.onEvent({type:'account-checks',...summary,...extra});
+      emit({accountId:null});
+      try{
+        for(const id of ids){
+          this.startController.signal.throwIfAborted();
+          if(!(await this.refreshAccounts()).some(a=>a.id===id&&a.isActive)){
+            summary.skipped++;summary.checked++;emit({accountId:id,status:'skipped'});continue;
+          }
+          emit({accountId:id,status:'checking'});
+          let result;
+          try{
+            const checked=await checkAccount(id);
+            if(checked?.ok!==true)throw new Error(checked?.message||'Подключение не подтверждено');
+            result={accountId:id,status:'verified',checkedAt:checked.checkedAt||new Date().toISOString()};summary.verified++;
+          }catch(error){
+            this.startController.signal.throwIfAborted();
+            result={accountId:id,status:'error',message:error.message};summary.failed++;
+          }
+          summary.checked++;summary.results.push(result);emit(result);
+        }
+        return {...summary,running:false};
+      }finally{summary.running=false;emit({accountId:null});}
+    })().finally(()=>{this.accountCheckTask=null;});
+    return this.accountCheckTask;
   }
   async syncAccount({email,cookies,expectedAccountId,signal}){
     if(!this.ready)await this.start();
@@ -259,6 +312,7 @@ class Runtime {
       const existing=this.jobs.find(j=>j.requestId===input.requestId);
       if(existing){if(existing.requestHash!==requestHash)throw new Error('requestId уже использован с другими параметрами.');return {jobId:existing.id};}
     }
+    if(this.accountActionPending||this.accountCheckTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
     const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{})};
     this.jobs.unshift(job);this.emitJob(job);

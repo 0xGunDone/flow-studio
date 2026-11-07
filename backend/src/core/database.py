@@ -1321,8 +1321,10 @@ class Database:
             rows = await cursor.fetchall()
             return [Token(**dict(row)) for row in rows]
 
-    async def update_token(self, token_id: int, **kwargs):
-        """Update token fields"""
+    async def update_token(
+        self, token_id: int, *, preserve_manual_disabled: bool = False, **kwargs
+    ):
+        """Update fields, keeping manual account state during automatic updates."""
         async with self._connect(write=True) as db:
             if "email" in kwargs or "login_account" in kwargs:
                 await db.execute("BEGIN IMMEDIATE")
@@ -1336,7 +1338,12 @@ class Database:
             params = []
 
             for key, value in kwargs.items():
-                updates.append(f"{key} = ?")
+                if preserve_manual_disabled and key in {"is_active", "ban_reason", "banned_at"}:
+                    updates.append(
+                        f"{key} = CASE WHEN ban_reason = 'manual_disabled' THEN {key} ELSE ? END"
+                    )
+                else:
+                    updates.append(f"{key} = ?")
                 params.append(value)
 
             if updates:

@@ -8,7 +8,7 @@ const {importMedia}=require('./input-files.cjs');
 const {saveWithDialog,revealSaved}=require('./exports.cjs');
 const {startAgentBridge,createAgentActions}=require('./agent-bridge.cjs');
 protocol.registerSchemesAsPrivileged(['flow-media','flow-input'].map(scheme=>({scheme,privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}})));
-let window,runtime,accountManager,recoveryManager,managedAccounts,agentBridge,shutdownTask,loginState=null,quitting=false;
+let window,runtime,accountManager,recoveryManager,managedAccounts,agentBridge,shutdownTask,accountTask,loginState=null,quitting=false;
 app.setName('Flow Studio');
 if(!app.requestSingleInstanceLock()){app.quit();}
 else{
@@ -28,8 +28,9 @@ app.whenReady().then(async()=>{
  const {createRecoveryManager}=require('./recovery.cjs');
  recoveryManager=createRecoveryManager({chromeDataDir:path.join(app.getPath('appData'),'Google/Chrome'),chromePath,listAccounts:()=>runtime.refreshAccounts(),verifyAccount:(id,options)=>runtime.checkAccount(id,options),onState:onLoginState});
  accountManager={
-  addAccount(){recoveryManager.cancel();return managedAccounts.addAccount();},
+  addAccount(){if(accountTask||shutdownTask)throw new Error('Дождитесь завершения действия с аккаунтами.');recoveryManager.cancel();return managedAccounts.addAccount();},
   async reconnectAccount(id){
+   if(accountTask||shutdownTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
    managedAccounts.cancelLogin();
    if(await managedAccounts.hasAccountProfile(id)){recoveryManager.cancel();return managedAccounts.reconnectAccount(id);}
    return await recoveryManager.begin(id)||managedAccounts.reconnectAccount(id);
@@ -67,11 +68,32 @@ app.whenReady().then(async()=>{
  });
  handle('bootstrap',async()=>({...await runtime.start(),login:loginState}));
  handle('retryStartup',async()=>({...await runtime.start(),login:loginState}));
- handle('generate',input=>runtime.generate(input));
- handle('refreshAccounts',()=>runtime.refreshAccounts());
- handle('addAccount',()=>accountManager.addAccount());
- handle('reconnectAccount',id=>{if(!runtime.accounts.some(a=>a.id===id))throw new Error('Аккаунт не найден');return accountManager.reconnectAccount(id);});
- handle('checkAccount',async id=>{await managedAccounts.syncAccountNow(id);return runtime.checkAccount(id);});
+ const accountAction=fn=>{
+  if(accountTask||shutdownTask||runtime.closing)throw new Error('Дождитесь завершения действия с аккаунтами.');
+  if(['opening','waiting','syncing'].includes(loginState?.state))throw new Error('Сначала завершите или отмените вход в Google.');
+  runtime.accountActionPending=true;
+  accountTask=Promise.resolve().then(fn).finally(()=>{accountTask=null;runtime.accountActionPending=false;});return accountTask;
+ };
+ handle('generate',input=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.generate(input);});
+ handle('refreshAccounts',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.refreshAccounts();});
+ handle('addAccount',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return accountManager.addAccount();});
+ handle('reconnectAccount',id=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');if(!runtime.accounts.some(a=>a.id===id))throw new Error('Аккаунт не найден');return accountManager.reconnectAccount(id);});
+ const checkAccount=async id=>{await managedAccounts.syncAccountNow(id);return runtime.checkAccount(id);};
+ handle('checkAccount',id=>accountAction(()=>checkAccount(id)));
+ handle('checkEnabledAccounts',()=>accountAction(()=>{
+  if(runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед проверкой аккаунтов.');
+  return runtime.checkEnabledAccounts({checkAccount});
+ }));
+ handle('setAccountActive',(id,enabled)=>accountAction(()=>runtime.setAccountActive(id,enabled)));
+ handle('deleteAccount',id=>accountAction(async()=>{
+  if(!Number.isSafeInteger(id)||id<=0)throw new Error('Аккаунт не найден.');
+  if(runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед удалением аккаунта.');
+  const account=(await runtime.refreshAccounts()).find(a=>a.id===id);
+  if(!account)throw new Error('Аккаунт не найден.');
+  const choice=await dialog.showMessageBox(window,{type:'warning',title:'Удалить подключение',message:`Удалить подключение ${account.email}?`,detail:'Подключение будет удалено из Flow Studio. Аккаунт Google, профиль Chrome, сохранённые файлы и история генераций останутся. Для генерации потребуется подключить аккаунт заново.',buttons:['Отмена','Удалить подключение'],defaultId:0,cancelId:0,noLink:true});
+  if(choice.response!==1)return {deleted:false};
+  return managedAccounts.removeAccount(id,()=>runtime.deleteAccount(id));
+ }));
  handle('cancelLogin',()=>accountManager.cancelLogin());
  handle('completeLogin',()=>accountManager.completeLogin());
  handle('copyHelpText',text=>{
@@ -124,6 +146,7 @@ app.on('before-quit',event=>{
  accountManager?.shutdown();
  shutdownTask=(async()=>{
   await agentBridge?.close();
+  await accountTask?.catch(()=>{});
   await runtime?.close();
   quitting=true;app.quit();
  })().catch(()=>{

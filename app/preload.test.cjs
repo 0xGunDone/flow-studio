@@ -19,3 +19,10 @@ test('drop bridge rejects synthetic files and oversized lists before IPC without
  }
  assert.equal(resolutions,3);assert.equal(h.calls.length,0);
 });
+
+
+test('account controls forward only exact id and boolean to trusted IPC',async()=>{
+ const h=loadPreload(()=>{});
+ await h.api.setAccountActive(7,false);await h.api.deleteAccount(7);await h.api.checkEnabledAccounts();
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:setAccountActive',7,false],['studio:deleteAccount',7],['studio:checkEnabledAccounts']]);
+});

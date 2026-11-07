@@ -1,6 +1,7 @@
 import hashlib
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -77,6 +78,97 @@ class PluginSessionImportTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException):
                 await self.call()
             self.assertEqual((await self.db.get_token(token_id)).model_dump(), before.model_dump())
+
+    async def test_manual_disable_survives_import_and_automatic_failures_until_enabled(self):
+        token_id = await self.existing()
+        await admin.disable_token(token_id, token="synthetic")
+        result = await self.call()
+        await self.manager.disable_token(token_id)
+        with patch.object(self.db, "get_admin_config", return_value=SimpleNamespace(error_ban_threshold=1)):
+            await self.manager.record_error(token_id)
+        await self.manager.ban_token_for_429(token_id)
+        token = await self.db.get_token(token_id)
+        self.assertFalse(token.is_active)
+        self.assertEqual(token.ban_reason, "manual_disabled")
+        self.assertIsNone(token.banned_at)
+        self.assertEqual(token.google_cookies, FINAL)
+        self.assertFalse(result.get("auto_enabled", False))
+
+        await admin.enable_token(token_id, token="synthetic")
+        token = await self.db.get_token(token_id)
+        self.assertTrue(token.is_active)
+        self.assertIsNone(token.ban_reason)
+
+    async def test_automatic_disable_still_allows_plugin_recovery(self):
+        token_id = await self.existing()
+        await self.manager.disable_token(token_id)
+        result = await self.call()
+        self.assertTrue(result["auto_enabled"])
+        token = await self.db.get_token(token_id)
+        self.assertTrue(token.is_active)
+        self.assertIsNone(token.ban_reason)
+
+    async def test_disable_during_plugin_validation_survives_reconnect(self):
+        token_id = await self.existing()
+        session = self.flow.validate_session.return_value
+
+        async def disable_before_validation_returns(**kwargs):
+            await self.manager.disable_token(token_id, manual=True)
+            return session
+
+        self.flow.validate_session.side_effect = disable_before_validation_returns
+        await self.call()
+        token = await self.db.get_token(token_id)
+        self.assertFalse(token.is_active)
+        self.assertEqual(token.ban_reason, "manual_disabled")
+        self.assertEqual(token.google_cookies, FINAL)
+
+    async def test_disable_wins_credential_and_plugin_enable_commit_races(self):
+        token_id = await self.existing()
+        original_update = self.db.update_token
+        for stage in ("credentials", "plugin_enable"):
+            with self.subTest(stage=stage):
+                await self.manager.enable_token(token_id)
+                await self.manager.disable_token(token_id)
+                raced = False
+
+                async def disable_before_commit(id, **kwargs):
+                    nonlocal raced
+                    matches_stage = ("st" in kwargs) == (stage == "credentials")
+                    if not raced and kwargs.get("is_active") is True and matches_stage:
+                        raced = True
+                        await original_update(id, is_active=False, ban_reason="manual_disabled", banned_at=None)
+                    await original_update(id, **kwargs)
+
+                with patch.object(self.db, "update_token", side_effect=disable_before_commit):
+                    result = await self.call()
+                self.assertTrue(raced)
+                token = await self.db.get_token(token_id)
+                self.assertFalse(token.is_active)
+                self.assertEqual(token.ban_reason, "manual_disabled")
+                self.assertEqual(token.google_cookies, FINAL)
+                self.assertFalse(result.get("auto_enabled", False))
+
+    async def test_manual_disable_wins_stale_429_unban(self):
+        token_id = await self.existing()
+        now = datetime.now(timezone.utc)
+        await self.db.update_token(
+            token_id, is_active=False, ban_reason="429_rate_limit",
+            banned_at=now - timedelta(hours=13), at_expires=now + timedelta(days=1),
+        )
+        original_list = self.db.get_all_tokens
+
+        async def disable_after_snapshot():
+            snapshot = await original_list()
+            await self.manager.disable_token(token_id, manual=True)
+            return snapshot
+
+        with patch.object(self.db, "get_all_tokens", side_effect=disable_after_snapshot):
+            await self.manager.auto_unban_429_tokens()
+        token = await self.db.get_token(token_id)
+        self.assertFalse(token.is_active)
+        self.assertEqual(token.ban_reason, "manual_disabled")
+        self.assertIsNone(token.banned_at)
 
     async def test_new_account_keeps_rotations_during_project_setup(self):
         self.manager._get_project_pool_size = lambda: 2
