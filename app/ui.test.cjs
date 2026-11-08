@@ -27,6 +27,11 @@ test('upload verification is a local pre-upload failure, not a session or conten
   const error='Не удалось выполнить генерацию: Failed to obtain reCAPTCHA token for image upload';
   assert.equal(needsUploadVerification({error}),true);
   assert.equal(requiresLogin({error}),false);
+  for(const code of ['FLOW_UPLOAD_BROWSER_TIMEOUT','FLOW_UPLOAD_BROWSER_UNAVAILABLE','FLOW_UPLOAD_BROWSER_ERROR','FLOW_UPLOAD_VERIFICATION_EMPTY']){
+    const job={error:`Ошибка локального браузера [${code}]`};
+    assert.equal(needsUploadVerification(job),true);assert.equal(requiresLogin(job),false);
+  }
+  assert.equal(needsUploadVerification({error:'[FLOW_UPLOAD_BROWSER_UNKNOWN]'}),false);
   for(const error of ['rpc=maseQ, code=401','PUBLIC_ERROR_MINOR','reCAPTCHA evaluation failed','Failed to obtain reCAPTCHA token for video generation'])assert.equal(needsUploadVerification({error}),false);
 });
 

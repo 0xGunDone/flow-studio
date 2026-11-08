@@ -103,7 +103,8 @@ function requiresLogin(job) {
 }
 
 function needsUploadVerification(job) {
-  return /(?:^|:\s*)Failed to obtain reCAPTCHA token for image upload(?:$|[.\n])/i.test(String(job?.error || job?.progress || ''));
+  const error=String(job?.error || job?.progress || '');
+  return /\[(?:FLOW_UPLOAD_BROWSER_TIMEOUT|FLOW_UPLOAD_BROWSER_UNAVAILABLE|FLOW_UPLOAD_BROWSER_ERROR|FLOW_UPLOAD_VERIFICATION_EMPTY)\]/.test(error) || /(?:^|:\s*)Failed to obtain reCAPTCHA token for image upload(?:$|[.\n])/i.test(error);
 }
 
 function recoveryAccountId(job, accounts) {

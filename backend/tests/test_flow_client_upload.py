@@ -1,5 +1,10 @@
+import io
+import sys
+import traceback
+import types
 import unittest
-from unittest.mock import AsyncMock
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.services.flow_client import FlowClient
 
@@ -75,6 +80,77 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
                 project_id=PROJECT_ID, token_id=7,
             )
         client._current_rpc.assert_not_awaited()
+
+    async def test_browser_upload_failures_keep_safe_cause_without_sending_image(self):
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        secret = "synthetic-cookie-secret HTTP 401"
+        for error, code in (
+            (TimeoutError(secret), "FLOW_UPLOAD_BROWSER_TIMEOUT"),
+            (PlaywrightTimeoutError(secret), "FLOW_UPLOAD_BROWSER_TIMEOUT"),
+            (ImportError(secret), "FLOW_UPLOAD_BROWSER_UNAVAILABLE"),
+            (RuntimeError(secret), "FLOW_UPLOAD_BROWSER_ERROR"),
+            (ValueError(secret), "FLOW_UPLOAD_BROWSER_ERROR"),
+        ):
+            with self.subTest(error_type=type(error).__name__):
+                client = FlowClient(proxy_manager=None)
+                client._current_rpc = AsyncMock()
+                client._set_request_fingerprint({"user_agent": "synthetic"})
+                service = types.SimpleNamespace(get_token=AsyncMock(side_effect=error))
+                module = types.ModuleType("src.services.browser_captcha")
+                module.BrowserCaptchaService = types.SimpleNamespace(
+                    get_instance=AsyncMock(return_value=service)
+                )
+                module.BrowserCaptchaQueueTimeout = type("BrowserCaptchaQueueTimeout", (RuntimeError,), {})
+                output = io.StringIO()
+                logger = MagicMock()
+                with patch.dict(sys.modules, {module.__name__: module}), patch(
+                    "src.services.flow_client.config", types.SimpleNamespace(captcha_method="browser")
+                ), patch("src.services.flow_client.debug_logger", logger), redirect_stdout(output), redirect_stderr(output):
+                    with self.assertRaisesRegex(RuntimeError, rf"\[{code}\]") as raised:
+                        await client.upload_image(
+                            at="synthetic", image_bytes=JPEG_BYTES,
+                            project_id=PROJECT_ID, token_id=7,
+                        )
+                client._current_rpc.assert_not_awaited()
+                self.assertIsNone(client.get_request_fingerprint())
+                public_output = "".join(traceback.format_exception(raised.exception)) + output.getvalue() + repr(logger.mock_calls)
+                self.assertNotIn(secret, public_output)
+                self.assertNotIn("401", public_output)
+                self.assertIn(f"[{code}]", output.getvalue())
+
+    async def test_browser_empty_upload_verification_has_code_and_never_sends_image(self):
+        client = FlowClient(proxy_manager=None)
+        client._get_recaptcha_token = AsyncMock(return_value=(None, None))
+        client._set_captcha_request_context({"method": "browser"})
+        client._current_rpc = AsyncMock()
+        output = io.StringIO()
+        with redirect_stderr(output), self.assertRaisesRegex(RuntimeError, r"\[FLOW_UPLOAD_VERIFICATION_EMPTY\]"):
+            await client.upload_image(
+                at="synthetic", image_bytes=JPEG_BYTES,
+                project_id=PROJECT_ID, token_id=7,
+            )
+        client._current_rpc.assert_not_awaited()
+        self.assertIn("[FLOW_UPLOAD_VERIFICATION_EMPTY]", output.getvalue())
+
+    async def test_browser_nonupload_failure_and_queue_timeout_keep_existing_behavior(self):
+        queue_error = type("BrowserCaptchaQueueTimeout", (RuntimeError,), {})("synthetic queue timeout")
+        for action, error in (("IMAGE_GENERATION", RuntimeError("synthetic error")), ("UPLOAD_IMAGE", queue_error)):
+            with self.subTest(action=action):
+                client = FlowClient(proxy_manager=None)
+                module = types.ModuleType("src.services.browser_captcha")
+                module.BrowserCaptchaService = types.SimpleNamespace(
+                    get_instance=AsyncMock(side_effect=error)
+                )
+                module.BrowserCaptchaQueueTimeout = type(queue_error)
+                with patch.dict(sys.modules, {module.__name__: module}), patch(
+                    "src.services.flow_client.config", types.SimpleNamespace(captcha_method="browser")
+                ), patch("src.services.flow_client.debug_logger", MagicMock()), redirect_stdout(io.StringIO()):
+                    if action == "UPLOAD_IMAGE":
+                        with self.assertRaises(type(queue_error)) as raised:
+                            await client._get_recaptcha_token(PROJECT_ID, action=action)
+                        self.assertIs(raised.exception, queue_error)
+                    else:
+                        self.assertEqual(await client._get_recaptcha_token(PROJECT_ID, action=action), (None, None))
 
     async def test_upload_requires_project_id(self):
         client = FlowClient(proxy_manager=None)

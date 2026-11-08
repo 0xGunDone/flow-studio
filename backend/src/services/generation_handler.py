@@ -26,6 +26,7 @@ from .flow_frontend import (
     is_flow_content_policy_error,
 )
 from .video_inputs import read_video_reference
+from .flow_upload_errors import is_local_upload_verification_error
 
 
 def _video_poll_attempt_budget(
@@ -1967,6 +1968,7 @@ class GenerationHandler:
                 if token and not (
                     is_flow_content_policy_error(error_msg)
                     or error_msg == "Failed to obtain reCAPTCHA token for image upload"
+                    or is_local_upload_verification_error(error_msg)
                 ):
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
@@ -2140,7 +2142,7 @@ class GenerationHandler:
         reCAPTCHA 获取失败、验证码供应商错误、打码资源不足等问题通常不是账号本身异常；
         若将其纳入连续错误，会在回归测试或代理波动时把 token 自动打成 inactive。
         """
-        if is_flow_content_policy_error(error):
+        if is_flow_content_policy_error(error) or is_local_upload_verification_error(error):
             return False
         error_text = str(error or "").strip().lower()
         if not error_text:

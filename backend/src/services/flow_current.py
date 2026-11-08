@@ -7,6 +7,7 @@ the retired Labs tRPC and AI Sandbox REST endpoints.
 
 import base64
 import re
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..core.logger import debug_logger
 from .browser_cookie_utils import validate_flow_cookie_storage
+from .flow_upload_errors import FLOW_UPLOAD_VERIFICATION_EMPTY
 from .flow_frontend import (
     flow_public_error_code,
     flow_public_error_message,
@@ -344,6 +346,9 @@ class CurrentFlowClientMixin:
             ),
         )
         if not recaptcha_token:
+            if self._get_captcha_request_context().get("method") == "browser":
+                print(FLOW_UPLOAD_VERIFICATION_EMPTY, file=sys.stderr)
+                raise RuntimeError(FLOW_UPLOAD_VERIFICATION_EMPTY)
             raise RuntimeError("Failed to obtain reCAPTCHA token for image upload")
         try:
             context = self._frontend_project_context(

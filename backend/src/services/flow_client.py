@@ -10,6 +10,7 @@ import base64
 import gzip
 import ssl
 import re
+import sys
 from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
 from urllib.parse import quote, urljoin, urlparse
 import urllib.error
@@ -20,6 +21,12 @@ from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
 from .flow_current import CurrentFlowClientMixin
 from .flow_frontend import FlowFrontendMixin, is_terminal_flow_public_error
+from .flow_upload_errors import (
+    FLOW_UPLOAD_BROWSER_ERROR,
+    FLOW_UPLOAD_BROWSER_TIMEOUT,
+    FLOW_UPLOAD_BROWSER_UNAVAILABLE,
+    is_browser_timeout,
+)
 
 try:
     import httpx
@@ -5296,6 +5303,11 @@ class _FlowClientBase(FlowFrontendMixin):
                 from .browser_captcha import BrowserCaptchaQueueTimeout
                 if isinstance(e, BrowserCaptchaQueueTimeout):
                     raise
+                if action == "UPLOAD_IMAGE":
+                    self._set_request_fingerprint(None)
+                    debug_logger.log_error(FLOW_UPLOAD_BROWSER_ERROR)
+                    print(FLOW_UPLOAD_BROWSER_ERROR, file=sys.stderr)
+                    raise RuntimeError(FLOW_UPLOAD_BROWSER_ERROR) from None
                 # 捕获 Docker 环境或依赖缺失的明确错误
                 error_msg = str(e)
                 debug_logger.log_error(f"[reCAPTCHA Browser] {error_msg}")
@@ -5303,6 +5315,11 @@ class _FlowClientBase(FlowFrontendMixin):
                 self._set_request_fingerprint(None)
                 return None, None
             except ImportError as e:
+                if action == "UPLOAD_IMAGE":
+                    self._set_request_fingerprint(None)
+                    debug_logger.log_error(FLOW_UPLOAD_BROWSER_UNAVAILABLE)
+                    print(FLOW_UPLOAD_BROWSER_UNAVAILABLE, file=sys.stderr)
+                    raise RuntimeError(FLOW_UPLOAD_BROWSER_UNAVAILABLE) from None
                 debug_logger.log_error(f"[reCAPTCHA Browser] 导入失败: {str(e)}")
                 print(
                     f"[reCAPTCHA] ❌ playwright 未安装，请运行: pip install playwright && python -m playwright install chromium"
@@ -5310,6 +5327,16 @@ class _FlowClientBase(FlowFrontendMixin):
                 self._set_request_fingerprint(None)
                 return None, None
             except Exception as e:
+                if action == "UPLOAD_IMAGE":
+                    self._set_request_fingerprint(None)
+                    error_msg = (
+                        FLOW_UPLOAD_BROWSER_TIMEOUT
+                        if is_browser_timeout(e)
+                        else FLOW_UPLOAD_BROWSER_ERROR
+                    )
+                    debug_logger.log_error(error_msg)
+                    print(error_msg, file=sys.stderr)
+                    raise RuntimeError(error_msg) from None
                 debug_logger.log_error(f"[reCAPTCHA Browser] 错误: {str(e)}")
                 self._set_request_fingerprint(None)
                 return None, None

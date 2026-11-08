@@ -169,6 +169,10 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                 ("PUBLIC_ERROR_UNUSUAL_ACTIVITY", True, False),
                 ("HTTP 429: too many requests", True, True),
                 ("Failed to obtain reCAPTCHA token for image upload", False, False),
+                ("[FLOW_UPLOAD_BROWSER_TIMEOUT]", False, False),
+                ("[FLOW_UPLOAD_BROWSER_UNAVAILABLE]", False, False),
+                ("[FLOW_UPLOAD_BROWSER_ERROR]", False, False),
+                ("[FLOW_UPLOAD_VERIFICATION_EMPTY]", False, False),
                 ("Flow frontend RPC rejected: rpc=maseQ, code=401", True, True),
                 ("Unexpected upload failure", True, True),
             ):
