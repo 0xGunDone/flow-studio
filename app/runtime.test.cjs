@@ -46,6 +46,59 @@ test('media and public accounts never expose credentials',()=>{
  assert(!allowedMediaUrl('https://google.com.attacker.example/a'));
  assert(!allowedMediaUrl('file:///etc/passwd'));
 });
+test('provider settings return only configured state and method, never stored keys',async()=>{
+ const events=[],r=new Runtime({onEvent:event=>events.push(event)});
+ let key='';
+ r.request=async endpoint=>{assert.equal(endpoint,'/api/captcha/config');return {captcha_method:'personal',twocaptcha_api_key:key,yescaptcha_api_key:'synthetic-other-secret',browser_proxy_url:'http://user:synthetic-proxy-secret@example.test'};};
+ assert.deepEqual(await r.getProviderSettings(),{twoCaptchaKeyConfigured:false,captchaMethod:'personal'});
+ key='synthetic-stored-secret';
+ assert.deepEqual(await r.getProviderSettings(),{twoCaptchaKeyConfigured:true,captchaMethod:'personal'});
+ assert.doesNotMatch(JSON.stringify({snapshot:r.snapshot(),events}),/synthetic/);
+ r.request=async()=>{throw new Error(key);};
+ await assert.rejects(r.getProviderSettings(),error=>error.message==='Не удалось загрузить настройки 2Captcha.');
+});
+test('saving 2Captcha key preserves provider and browser config, verifies persistence and returns no secret',async()=>{
+ const events=[],r=new Runtime({onEvent:event=>events.push(event)}),calls=[];
+ const config={captcha_method:'personal',twocaptcha_api_key:'synthetic-old-key',twocaptcha_base_url:'https://api.2captcha.com',yescaptcha_api_key:'synthetic-other-secret',yescaptcha_task_type:'RecaptchaV3TaskProxylessM1',remote_browser_timeout:91,browser_proxy_enabled:true,browser_proxy_url:'http://user:synthetic-proxy-secret@example.test',browser_count:4,browser_personal_fresh_restart_every_n_solves:0};
+ r.request=async(endpoint,options)=>{
+  calls.push({endpoint,options});
+  if(options?.method==='POST'){Object.assign(config,options.body);return {success:true};}
+  return {...config};
+ };
+ const saved=await r.saveTwoCaptchaKey('  synthetic-new-key  ');
+ assert.deepEqual(saved,{saved:true,twoCaptchaKeyConfigured:true,captchaMethod:'personal'});
+ assert.deepEqual(calls.map(call=>[call.endpoint,call.options?.method||'GET']),[['/api/captcha/config','GET'],['/api/captcha/config','POST'],['/api/captcha/config','GET']]);
+ assert.deepEqual(calls[1].options.body,{twocaptcha_api_key:'synthetic-new-key',yescaptcha_task_type:'RecaptchaV3TaskProxylessM1',remote_browser_timeout:91,browser_proxy_enabled:true,browser_proxy_url:'http://user:synthetic-proxy-secret@example.test',browser_count:4,browser_personal_fresh_restart_every_n_solves:0});
+ assert.equal(config.captcha_method,'personal');assert.equal(config.yescaptcha_api_key,'synthetic-other-secret');
+ assert.equal(config.twocaptcha_base_url,'https://api.2captcha.com');
+ assert.doesNotMatch(JSON.stringify({saved,snapshot:r.snapshot(),events}),/synthetic/);
+});
+test('2Captcha save validates before requests and rejects active generation',async()=>{
+ const r=new Runtime({});let requests=0;r.request=async()=>{requests++;};
+ for(const key of [undefined,null,7,{},[],'',' \n\t ','x'.repeat(1025)])await assert.rejects(r.saveTwoCaptchaKey(key),/Введите API-ключ/);
+ r.jobs=[{status:'running'}];await assert.rejects(r.saveTwoCaptchaKey('synthetic-key'),/завершения генерации/);
+ assert.equal(requests,0);
+});
+test('2Captcha save hides server errors and rejects incomplete config or unconfirmed persistence',async()=>{
+ const config={captcha_method:'personal',twocaptcha_api_key:'synthetic-old-key',yescaptcha_task_type:'RecaptchaV3TaskProxylessM1',remote_browser_timeout:91,browser_proxy_enabled:false,browser_proxy_url:'',browser_count:4,browser_personal_fresh_restart_every_n_solves:0};
+ const message='Не удалось сохранить API-ключ 2Captcha. Повторите попытку.';
+ for(const mode of ['read-error','incomplete','write-error','write-rejected','old-key','provider-changed']){
+  const r=new Runtime({});let reads=0,writes=0;
+  r.request=async(_endpoint,options)=>{
+   if(options?.method==='POST'){
+    writes++;
+    if(mode==='write-error')throw new Error('synthetic-key reflected in request');
+    return {success:mode!=='write-rejected',message:'synthetic-key reflected by server'};
+   }
+   reads++;
+   if(mode==='read-error')throw new Error('synthetic-old-key in response');
+   if(mode==='incomplete')return {captcha_method:'personal'};
+   return {...config,...(reads>1&&mode==='provider-changed'?{captcha_method:'twocaptcha',twocaptcha_api_key:'synthetic-key'}:{})};
+  };
+  await assert.rejects(r.saveTwoCaptchaKey('synthetic-key'),error=>error.message===message);
+  if(['read-error','incomplete'].includes(mode))assert.equal(writes,0);
+ }
+});
 test('generation validates input before spending',()=>{
  const r=new Runtime({dataDir:'/unused'});r.ready=true;r.models=[{id:'veo-3.1-fast'}];
  assert.throws(()=>r.generate({model:'unknown',prompt:'test'}),/модель/);

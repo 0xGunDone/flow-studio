@@ -124,7 +124,7 @@ if (typeof document !== 'undefined') initialize();
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
+  const state = { currentPage: 'create', providerSettings: null, settingsLoading: false, settingsSaving: false, ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
@@ -185,6 +185,8 @@ function initialize() {
     return seconds < 60 ? `${Math.floor(seconds)}\u00a0с` : `${Math.floor(seconds / 60)}\u00a0мин ${Math.floor(seconds % 60)}\u00a0с`;
   }
   function page(name) {
+    if(name !== 'settings') $('twocaptcha-api-key').value = '';
+    state.currentPage = name;
     for (const section of document.querySelectorAll('.page')) section.hidden = section.id !== `page-${name}`;
     for (const item of document.querySelectorAll('[data-page]')) {
       const selected = item.dataset.page === name;
@@ -192,6 +194,42 @@ function initialize() {
       if (selected) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
     }
     if (name === 'history') renderHistory();
+    if (name === 'settings') void loadProviderSettings();
+  }
+  function renderProviderSettings() {
+    const available = state.ready && !state.startupPending;
+    const pending = state.settingsLoading || state.settingsSaving;
+    const blocked = !available || pending || Boolean(activeJob());
+    $('twocaptcha-api-key').disabled = blocked;
+    $('refresh-provider-settings').disabled = !available || pending;
+    $('save-twocaptcha-key').disabled = blocked || !state.providerSettings || !$('twocaptcha-api-key').value.trim();
+    $('save-twocaptcha-key').textContent = state.settingsSaving ? 'Сохраняем…' : 'Сохранить ключ';
+    $('provider-settings-form').setAttribute('aria-busy', String(pending));
+    const settings = state.providerSettings;
+    $('provider-settings-status').textContent = state.settingsLoading ? 'Загружаем статус…' : !available ? 'Дождитесь подключения Flow' : settings ? settings.twoCaptchaKeyConfigured ? 'Ключ сохранён' : 'Ключ не задан' : 'Статус не загружен';
+    const names = {browser:'Встроенный браузер',personal:'Локальный браузер',twocaptcha:'2Captcha',yescaptcha:'YesCaptcha',captcharun:'Captcha.run',capmonster:'CapMonster',ezcaptcha:'EzCaptcha',capsolver:'CapSolver',remote_browser:'Удалённый браузер',extension:'Расширение Chrome'};
+    $('provider-method').textContent = activeJob() ? 'Сохранение доступно после завершения генерации' : settings ? `Текущий способ проверки: ${names[settings.captchaMethod] || settings.captchaMethod}` : '';
+  }
+  async function loadProviderSettings() {
+    if(!state.ready || state.startupPending || state.settingsLoading || state.settingsSaving) { renderProviderSettings(); return; }
+    state.settingsLoading=true;setError('provider-settings-error','');renderProviderSettings();
+    try { state.providerSettings=await api.getProviderSettings(); }
+    catch { setError('provider-settings-error','Не удалось загрузить настройки. Обновите статус после подключения Flow.'); }
+    finally { state.settingsLoading=false;renderProviderSettings(); }
+  }
+  async function saveTwoCaptchaKey(event) {
+    event.preventDefault();
+    if(!state.ready || state.startupPending || state.settingsLoading || state.settingsSaving || !state.providerSettings || activeJob())return;
+    const key=$('twocaptcha-api-key').value.trim();
+    if(!key)return;
+    state.settingsSaving=true;setError('provider-settings-error','');$('provider-settings-result').textContent='';renderProviderSettings();
+    try {
+      const result=await api.saveTwoCaptchaKey(key);
+      if(result?.saved!==true)throw new Error('not_saved');
+      state.providerSettings={twoCaptchaKeyConfigured:result.twoCaptchaKeyConfigured,captchaMethod:result.captchaMethod};
+      $('twocaptcha-api-key').value='';$('provider-settings-result').textContent='Ключ сохранён. Способ проверки не изменён';
+    } catch { setError('provider-settings-error','Не удалось сохранить ключ. Проверьте подключение Flow и повторите сохранение.'); }
+    finally { state.settingsSaving=false;renderProviderSettings(); }
   }
   function updateReady(message, ready) {
     state.ready = Boolean(ready);
@@ -204,6 +242,8 @@ function initialize() {
     $('retry-startup').hidden = ready || state.startupPending;
     renderLogin();
     updateGenerate();
+    renderProviderSettings();
+    if (state.ready && state.currentPage === 'settings' && !state.providerSettings) void loadProviderSettings();
   }
   function updateGenerate() {
     const running = Boolean(activeJob()) || state.submitting;
@@ -766,6 +806,9 @@ function initialize() {
       await importFrame(index, () => api.dropMedia(files,{allowVideos:false}));
     });
   }
+  $('provider-settings-form').addEventListener('submit', saveTwoCaptchaKey);
+  $('twocaptcha-api-key').addEventListener('input', () => { $('provider-settings-result').textContent='';renderProviderSettings(); });
+  $('refresh-provider-settings').addEventListener('click', loadProviderSettings);
   $('add-account').addEventListener('click', () => beginLogin());
   $('check-enabled-accounts').addEventListener('click', checkEnabledAccounts);
   $('complete-login').addEventListener('click', async () => {
@@ -813,7 +856,7 @@ function initialize() {
       if (event.job.status === 'running' || !state.selectedJobId) state.selectedJobId = event.job.id;
       renderHistory();
       if (event.job.id === state.selectedJobId) renderResult();
-      updateGenerate();renderLogin();
+      updateGenerate();renderLogin();renderProviderSettings();
     } else if (event.type === 'accounts') { accountVersion++; state.accounts = event.accounts || []; renderAccounts(); }
     else if (event.type === 'account-checks') {
       state.batchCheck=event;

@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('flowStudio',{
   bootstrap:()=>ipcRenderer.invoke('studio:bootstrap'),
   openFlow:()=>ipcRenderer.invoke('studio:openFlow'),
   retryStartup:()=>ipcRenderer.invoke('studio:retryStartup'),
+  getProviderSettings:()=>ipcRenderer.invoke('studio:getProviderSettings'),
+  saveTwoCaptchaKey:key=>ipcRenderer.invoke('studio:saveTwoCaptchaKey',key),
   generate:input=>ipcRenderer.invoke('studio:generate',input),
   pickImages:options=>ipcRenderer.invoke('studio:pickImages',options),
   dropMedia:async(files,options={})=>{

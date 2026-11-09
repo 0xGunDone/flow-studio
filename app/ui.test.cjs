@@ -548,4 +548,37 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert(accountNodes().some(node=>node.tagName==='PRE'&&node.textContent==='rpc=nzlxg, code=401'));
   assert.equal(byId('check-enabled-accounts').disabled,false);
   }
+  {
+    const settingsTab=nodes.find(node=>node.dataset.page==='settings');
+    let reads=0,writes=0,finishSettings,finishSave;
+    bridge.getProviderSettings=async()=>{reads++;return new Promise(resolve=>{finishSettings=resolve;});};
+    assert.equal(reads,0,'Startup does not fetch provider secrets or settings');
+    await settingsTab.dispatch('click');
+    assert.equal(byId('page-settings').hidden,false);assert.equal(byId('twocaptcha-api-key').value,'');
+    assert.equal(byId('twocaptcha-api-key').disabled,true);
+    await byId('refresh-provider-settings').dispatch('click');assert.equal(reads,1,'Only one settings read at a time');
+    finishSettings({twoCaptchaKeyConfigured:true,captchaMethod:'browser'});await new Promise(setImmediate);
+    assert.equal(byId('provider-settings-status').textContent,'Ключ сохранён');
+    assert.equal(byId('twocaptcha-api-key').value,'','Existing key is never prefilled');
+    assert.equal(byId('save-twocaptcha-key').disabled,true);
+    await byId('provider-settings-form').dispatch('submit');assert.equal(writes,0,'Empty field never writes config');
+    const syntheticKey='synthetic-provider-key-only';
+    bridge.saveTwoCaptchaKey=async key=>{writes++;assert.equal(key,syntheticKey);return new Promise(resolve=>{finishSave=resolve;});};
+    byId('twocaptcha-api-key').value=syntheticKey;await byId('twocaptcha-api-key').dispatch('input');
+    assert.equal(byId('save-twocaptcha-key').disabled,false);
+    const saving=byId('provider-settings-form').dispatch('submit');
+    assert.equal(byId('save-twocaptcha-key').disabled,true);assert.equal(byId('twocaptcha-api-key').disabled,true);
+    await byId('provider-settings-form').dispatch('submit');assert.equal(writes,1);
+    finishSave({saved:true,twoCaptchaKeyConfigured:true,captchaMethod:'browser'});await saving;
+    assert.equal(byId('twocaptcha-api-key').value,'');
+    assert.match(byId('provider-settings-result').textContent,/Способ проверки не изменён/);
+    assert.match(byId('provider-method').textContent,/Встроенный браузер/);
+    assert(!JSON.stringify([...stored.values()]).includes(syntheticKey),'Provider secret cannot enter draft storage');
+    bridge.saveTwoCaptchaKey=async()=>{throw new Error('SERVER ECHO '+syntheticKey);};
+    byId('twocaptcha-api-key').value=syntheticKey;await byId('twocaptcha-api-key').dispatch('input');
+    await byId('provider-settings-form').dispatch('submit');
+    assert(!byId('provider-settings-error').textContent.includes(syntheticKey));
+    await nodes.find(node=>node.dataset.page==='create').dispatch('click');
+    assert.equal(byId('twocaptcha-api-key').value,'','Leaving settings clears unsaved secret');
+  }
 });

@@ -2,10 +2,10 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 function loadPreload(getPathForFile){
- let api;const calls=[];
- const electron={contextBridge:{exposeInMainWorld(_name,value){api=value;}},webUtils:{getPathForFile},ipcRenderer:{invoke(...args){calls.push(args);return Promise.resolve([]);}}};
+ let api,apiName;const calls=[];
+ const electron={contextBridge:{exposeInMainWorld(name,value){apiName=name;api=value;}},webUtils:{getPathForFile},ipcRenderer:{invoke(...args){calls.push(args);return Promise.resolve([]);}}};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'preload.cjs'),'utf8'),{require:name=>{assert.equal(name,'electron');return electron;}});
- return {api,calls};
+ return {api,apiName,calls};
 }
 test('drop bridge resolves native File paths in order and sends only import options',async()=>{
  const image={},video={},h=loadPreload(file=>file===image?'/native/image.png':file===video?'/native/clip.mov':'');
@@ -31,4 +31,11 @@ test('account controls forward only exact id and boolean to trusted IPC',async()
 test('Flow handoff forwards no arbitrary URL or account data',async()=>{
  const h=loadPreload(()=>{});await h.api.openFlow('https://attacker.invalid');
  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:openFlow']]);
+});
+
+test('provider settings bridge exposes only fixed IPC methods on flowStudio',async()=>{
+ const h=loadPreload(()=>{});assert.equal(h.apiName,'flowStudio');
+ await h.api.getProviderSettings('/arbitrary/endpoint');
+ await h.api.saveTwoCaptchaKey('synthetic-key',{captcha_method:'twocaptcha'});
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:getProviderSettings'],['studio:saveTwoCaptchaKey','synthetic-key']]);
 });

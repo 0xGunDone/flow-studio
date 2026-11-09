@@ -75,6 +75,8 @@ app.whenReady().then(async()=>{
   runtime.accountActionPending=true;
   accountTask=Promise.resolve().then(fn).finally(()=>{accountTask=null;runtime.accountActionPending=false;});return accountTask;
  };
+ handle('getProviderSettings',()=>runtime.getProviderSettings());
+ handle('saveTwoCaptchaKey',key=>accountAction(()=>runtime.saveTwoCaptchaKey(key)));
  handle('generate',input=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.generate(input);});
  handle('refreshAccounts',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.refreshAccounts();});
  handle('addAccount',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return accountManager.addAccount();});

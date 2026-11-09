@@ -202,6 +202,30 @@ class Runtime {
   snapshot(){return {ready:this.ready,message:this.message,models:this.models,accounts:this.accounts,history:this.publicJobs()};}
   publicJobs(){return this.jobs.map(j=>this.publicJob(j));}
   publicJob(job){return {...job,media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};}
+  async getProviderSettings(){
+    try{
+      const config=await this.request('/api/captcha/config');
+      if(typeof config?.captcha_method!=='string'||typeof config.twocaptcha_api_key!=='string')throw new Error();
+      return {twoCaptchaKeyConfigured:!!config.twocaptcha_api_key.trim(),captchaMethod:config.captcha_method};
+    }catch{throw new Error('Не удалось загрузить настройки 2Captcha.');}
+  }
+  async saveTwoCaptchaKey(key){
+    if(typeof key!=='string'||!key.trim()||key.length>1024)throw new Error('Введите API-ключ 2Captcha длиной до 1024 символов.');
+    if(this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед сохранением настроек.');
+    try{
+      const config=await this.request('/api/captcha/config');
+      // This endpoint resets omitted browser fields; preserve them without selecting a provider.
+      const fields=['yescaptcha_task_type','remote_browser_timeout','browser_proxy_enabled','browser_proxy_url','browser_count','browser_personal_fresh_restart_every_n_solves'];
+      if(typeof config?.captcha_method!=='string'||fields.some(field=>!Object.hasOwn(config,field)))throw new Error();
+      const body=Object.fromEntries(fields.map(field=>[field,config[field]]));
+      body.twocaptcha_api_key=key.trim();
+      const result=await this.request('/api/captcha/config',{method:'POST',body});
+      if(result?.success!==true)throw new Error();
+      const saved=await this.request('/api/captcha/config');
+      if(saved?.twocaptcha_api_key!==body.twocaptcha_api_key||saved.captcha_method!==config.captcha_method)throw new Error();
+      return {saved:true,twoCaptchaKeyConfigured:true,captchaMethod:saved.captcha_method};
+    }catch{throw new Error('Не удалось сохранить API-ключ 2Captcha. Повторите попытку.');}
+  }
   async refreshAccounts(options){
     const version=++this.accountRefreshVersion;
     const rows=await this.request('/api/tokens',options);

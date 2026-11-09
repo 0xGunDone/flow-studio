@@ -108,3 +108,25 @@ test('manual Flow handoff opens only fixed official URL from trusted renderer',a
  assert(h.events.some(e=>Array.isArray(e)&&e[0]==='external'&&e[1]==='https://flow.google.com/'));
  assert.throws(()=>h.handlers.get('studio:openFlow')({sender:{},senderFrame:event.senderFrame}),/Недопустимый источник/);
 });
+
+test('provider settings IPC trusts only local renderer and serializes saves with account actions and shutdown',async()=>{
+ const calls=[];let finish;
+ const h=await launch({accountRuntime:{getProviderSettings:async(...args)=>{calls.push(['get',...args]);return {twoCaptchaKeyConfigured:false,captchaMethod:'personal'};},saveTwoCaptchaKey:async(...args)=>{calls.push(['save',...args]);await new Promise(resolve=>{finish=resolve;});return {saved:true,twoCaptchaKeyConfigured:true,captchaMethod:'personal'};}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ const read=h.handlers.get('studio:getProviderSettings'),save=h.handlers.get('studio:saveTwoCaptchaKey');
+ assert.deepEqual(await read(event,'/arbitrary/endpoint'),{twoCaptchaKeyConfigured:false,captchaMethod:'personal'});
+ for(const invalid of [{sender:{},senderFrame:event.senderFrame},{sender:event.sender,senderFrame:{url:'https://example.test'}}]){
+  assert.throws(()=>read(invalid),/Недопустимый источник/);
+  assert.throws(()=>save(invalid,'synthetic-key'),/Недопустимый источник/);
+ }
+ const pending=save(event,'synthetic-key',{captcha_method:'twocaptcha'});await new Promise(setImmediate);
+ assert.equal(h.runtime.accountActionPending,true);
+ assert.deepEqual(calls,[['get'],['save','synthetic-key']]);
+ assert.throws(()=>save(event,'synthetic-other-key'),/Дождитесь/);
+ assert.throws(()=>h.handlers.get('studio:generate')(event,{}),/Дождитесь/);
+ assert.throws(()=>h.handlers.get('studio:setAccountActive')(event,7,false),/Дождитесь/);
+ h.app.quit();await new Promise(setImmediate);assert.equal(h.events.includes('stop'),false);
+ finish();assert.deepEqual(await pending,{saved:true,twoCaptchaKeyConfigured:true,captchaMethod:'personal'});
+ await new Promise(setImmediate);assert.equal(h.runtime.accountActionPending,false);assert.equal(h.events.includes('stop'),true);
+ h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+});
