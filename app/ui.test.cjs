@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { modelInfo, requestFor, mediaUrl, readDraft, requiresLogin, needsUploadVerification, recoveryAccountId, errorMessage } = require('./renderer.js');
+const { modelInfo, requestFor, mediaUrl, readDraft, requiresLogin, needsUploadVerification, recoveryAccountId, cooldownSeconds, cooldownLabel, errorMessage } = require('./renderer.js');
 
 test('account errors hide Electron wrapper but retain actual reason and RPC code', () => {
   assert.equal(errorMessage(new Error("Error invoking remote method 'studio:checkAccount': Error: Google Flow не подтвердил вход (rpc=nzlxg, code=401)")), 'Google Flow не подтвердил вход (rpc=nzlxg, code=401)');
@@ -33,6 +33,14 @@ test('upload verification is a local pre-upload failure, not a session or conten
   }
   assert.equal(needsUploadVerification({error:'[FLOW_UPLOAD_BROWSER_UNKNOWN]'}),false);
   for(const error of ['rpc=maseQ, code=401','PUBLIC_ERROR_MINOR','reCAPTCHA evaluation failed','Failed to obtain reCAPTCHA token for video generation'])assert.equal(needsUploadVerification({error}),false);
+});
+
+test('cooldown labels use expiry and tolerate absent or malformed timestamps',()=>{
+ const now=Date.parse('2026-11-09T00:00:00Z');
+ assert.equal(cooldownSeconds({cooldownUntil:'2026-11-09T00:30:00Z'},now),1800);
+ assert.equal(cooldownLabel({cooldownUntil:'2026-11-09T00:30:00Z'},now),'Остывает · 30:00');
+ assert.equal(cooldownLabel({cooldownUntil:'2026-11-08T23:00:00Z'},now),'КД завершён');
+ assert.equal(cooldownSeconds({cooldownUntil:'bad'},now),0);assert.equal(cooldownSeconds(null,now),0);
 });
 
 test('draft reader allows only harmless fields and tolerates unavailable or corrupt storage', () => {
@@ -133,6 +141,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     querySelector() { return null; }
     requestSubmit() { return this.dispatch('submit'); }
   }
+  let tick;
   const html = fs.readFileSync(require.resolve('./index.html'), 'utf8');
   for (const match of html.matchAll(/<(\w+)\b([^>]*)>/g)) {
     const attributes = match[2];
@@ -198,7 +207,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   };
   const stored = new Map([['flowStudio.draft', JSON.stringify({ mode: 'video', model: snapshot.models[2].id, prompt: 'Saved draft', sourceVideoId: 'saved-source' })]]);
   const localStorage = { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) };
-  vm.runInNewContext(fs.readFileSync(require.resolve('./renderer.js'), 'utf8'), { document, window: { flowStudio: bridge, localStorage, addEventListener(name, callback) { (windowEvents[name] ||= []).push(callback); } }, Intl, Date, setInterval: () => 1, clearInterval() {}, console });
+  vm.runInNewContext(fs.readFileSync(require.resolve('./renderer.js'), 'utf8'), { document, window: { flowStudio: bridge, localStorage, addEventListener(name, callback) { (windowEvents[name] ||= []).push(callback); } }, Intl, Date, setInterval: callback => { tick=callback; return 1; }, clearInterval() {}, console });
   assert.equal(byId('refresh-accounts').disabled, true, 'Account refresh waits for startup');
   await byId('refresh-accounts').dispatch('click');
   assert.equal(accountRefreshes, 0, 'Early refresh must not reach the backend');
@@ -580,5 +589,52 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     assert(!byId('provider-settings-error').textContent.includes(syntheticKey));
     await nodes.find(node=>node.dataset.page==='create').dispatch('click');
     assert.equal(byId('twocaptcha-api-key').value,'','Leaving settings clears unsaved secret');
+  }
+  {
+    const until=new Date(Date.now()+30*60*1000).toISOString();
+    let accounts=[{id:9,email:'cooling@example.test',isActive:true,credits:50,cooldownUntil:until,cooldownResetAllowed:true,lastGenerationError:'HTTP 503: provider unavailable',lastGenerationErrorAt:new Date().toISOString()},{id:10,email:'held@example.test',isActive:true,credits:25,cooldownUntil:until,cooldownResetAllowed:false,lastGenerationError:'PUBLIC_ERROR_UNUSUAL_ACTIVITY'}];
+    eventHandler({type:'accounts',accounts});
+    const accountTree=()=>descendants(byId('accounts-list'));
+    assert(accountTree().some(node=>node.textContent?.startsWith('Остывает · 29:')||node.textContent==='Остывает · 30:00'));
+    assert(accountTree().some(node=>node.tagName==='PRE'&&node.textContent==='PUBLIC_ERROR_UNUSUAL_ACTIVITY'));
+    const resets=accountTree().filter(node=>node.className.includes('reset-cooldown'));
+    assert.equal(resets.length,2);assert.equal(resets[0].disabled,false);assert.equal(resets[1].disabled,true,'Google hold cannot be lifted through local reset');
+    let clears=0;bridge.clearCooldown=async id=>{clears++;assert.equal(id,9);accounts=accounts.map(a=>a.id===id?{...a,cooldownUntil:null}:a);return {accounts};};
+    await resets[0].dispatch('click');assert.equal(clears,1);
+    let retryCalls=0,finishRetry;const retryArgs=[];
+    bridge.retryGeneration=async args=>{retryCalls++;retryArgs.push(args);return new Promise(resolve=>{finishRetry=resolve;});};
+    const failed={id:'retry-source',model:snapshot.models[1].id,kind:'video',status:'failed',prompt:'same scene',error:'HTTP 503: provider unavailable',media:[],accountId:9,accountEmail:'cooling@example.test',retryAvailable:true};
+    eventHandler({type:'job',job:failed});await byId('history').children[0].dispatch('click');
+    assert(descendants(byId('result')).some(node=>node.textContent==='cooling@example.test'));
+    let retry=resultButton('Повторить генерацию');assert(retry);assert.equal(retry.disabled,false);
+    const repeated=retry.dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,true);
+    await retry.dispatch('click');assert.equal(retryCalls,1);
+    assert.equal(retryArgs[0].jobId,'retry-source');assert.ok(retryArgs[0].requestId);
+    finishRetry({jobId:'retry-child'});await repeated;
+    assert.equal(generated.length,5,'Retry calls only dedicated bridge, not edited composer inputs');
+    eventHandler({type:'job',job:{...failed,id:'held-job',accountId:10,accountEmail:'held@example.test'}});await byId('history').children[0].dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,true);
+    eventHandler({type:'job',job:{...failed,id:'legacy-job',retryAvailable:false,retryBlockedReason:'Нет сохранённых исходников'}});await byId('history').children[0].dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,true);
+    assert(descendants(byId('result')).some(node=>node.textContent==='Нет сохранённых исходников'));
+    eventHandler({type:'accounts',accounts,history:[{...failed,retryAvailable:false,retryBlockedReason:'Включите исходный аккаунт перед повтором.'}]});
+    await byId('history').children[0].dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,true,'Account events refresh derived replay eligibility');
+    const past=new Date(Date.now()-1000).toISOString();
+    eventHandler({type:'accounts',accounts:accounts.map(a=>({...a,cooldownUntil:past})),history:[{...failed,retryAvailable:true}]});
+    await byId('history').children[0].dispatch('click');tick();
+    assert.equal(resultButton('Повторить генерацию').disabled,false);
+    assert.equal(byId('generate').disabled,false,'Cooldown expiry restores manual controls without starting a job');
+    assert.equal(retryCalls,1,'Cooldown expiry never generates automatically');
+    eventHandler({type:'accounts',accounts:[{...accounts[0],cooldownUntil:until}],history:[failed]});
+    await byId('history').children[0].dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,true);
+    bridge.clearCooldown=async()=>{const updated=[{...accounts[0],cooldownUntil:null}];eventHandler({type:'accounts',accounts:updated,history:[failed]});return {accounts:updated};};
+    await accountTree().find(node=>node.className.includes('reset-cooldown')).dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,false,'Reset completion immediately restores selected retry');
+    bridge.checkEnabledAccounts=async()=>{eventHandler({type:'accounts',accounts:[accounts[0]],history:[failed]});return {running:false,results:[],failed:0};};
+    await byId('check-enabled-accounts').dispatch('click');
+    assert.equal(resultButton('Повторить генерацию').disabled,false,'Account check completion restores selected retry');
   }
 });

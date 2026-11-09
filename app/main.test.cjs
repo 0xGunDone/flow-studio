@@ -130,3 +130,22 @@ test('provider settings IPC trusts only local renderer and serializes saves with
  await new Promise(setImmediate);assert.equal(h.runtime.accountActionPending,false);assert.equal(h.events.includes('stop'),true);
  h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
 });
+
+test('retry IPC accepts only original job id and stable request id and serializes with cooldown reset',async()=>{
+ const calls=[];let finish;
+ const h=await launch({accountRuntime:{retryGeneration:async input=>{calls.push(['retry',input]);return {jobId:'new-job'};},clearCooldown:async id=>{calls.push(['clear',id]);await new Promise(resolve=>{finish=resolve;});return {cleared:true,accounts:[]};}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ const retry=h.handlers.get('studio:retryGeneration'),clear=h.handlers.get('studio:clearCooldown');
+ assert.deepEqual(await retry(event,{jobId:'original',requestId:'click-id'}),{jobId:'new-job'});
+ for(const input of [{jobId:'original',requestId:'click-id',model:'override'},{jobId:'original',requestId:''},{jobId:'original',requestId:'x'.repeat(129)},null,[]])assert.throws(()=>retry(event,input),/параметры повтора/);
+ for(const invalid of [{sender:{},senderFrame:event.senderFrame},{sender:event.sender,senderFrame:{url:'https://example.test'}}]){
+  assert.throws(()=>retry(invalid,{jobId:'original',requestId:'click-id'}),/Недопустимый источник/);
+  assert.throws(()=>clear(invalid,7),/Недопустимый источник/);
+ }
+ const pending=clear(event,7);await new Promise(setImmediate);assert.equal(h.runtime.accountActionPending,true);
+ assert.throws(()=>retry(event,{jobId:'original',requestId:'second-click'}),/Дождитесь/);
+ assert.throws(()=>clear(event,8),/Дождитесь/);
+ finish();await pending;assert.equal(h.runtime.accountActionPending,false);
+ h.runtime.retryTask=Promise.resolve();assert.throws(()=>clear(event,7),/Дождитесь/);
+ assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['retry',{jobId:'original',requestId:'click-id'}],['clear',7]]);
+});

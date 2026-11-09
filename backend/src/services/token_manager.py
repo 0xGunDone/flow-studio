@@ -1198,6 +1198,11 @@ class TokenManager:
             )
             await self.disable_token(token_id)
 
+    async def record_generation_error(self, token_id: int, error: str):
+        """Pause new submissions for 30 minutes without changing account enablement."""
+        await self.db.increment_token_stats(token_id, "error")
+        await self.db.set_generation_cooldown(token_id, error)
+
     async def record_success(self, token_id: int):
         """Record successful request (reset consecutive error count)
 

@@ -65,17 +65,18 @@ class PublicErrorSubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.client._current_rpc.assert_awaited_once()
         self.client._handle_retryable_generation_error.assert_not_awaited()
 
-    async def test_video_unusual_activity_keeps_configured_retry_budget(self):
+    async def test_video_unusual_activity_stops_after_first_submission(self):
         for code in (
             "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
             "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY HTTP 429: too many requests",
         ):
             with self.subTest(code=code):
                 self.setUp()
                 self.client._current_rpc.side_effect = RuntimeError(code)
-                with self.assertRaisesRegex(RuntimeError, code):
+                with self.assertRaisesRegex(RuntimeError, code.split()[0]):
                     await self.video()
-                self.assertEqual(self.client._current_rpc.await_count, 3)
+                self.client._current_rpc.assert_awaited_once()
 
     def test_shared_retry_distinguishes_public_rejection_from_transient_error(self):
         for error in (
@@ -84,9 +85,27 @@ class PublicErrorSubmissionTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(error=error):
                 self.assertIsNone(self.client._get_retry_reason(error))
-        self.assertIsNotNone(self.client._get_retry_reason("PUBLIC_ERROR_UNUSUAL_ACTIVITY"))
-        self.assertIsNotNone(self.client._get_retry_reason("PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC"))
+        self.assertIsNone(self.client._get_retry_reason("PUBLIC_ERROR_UNUSUAL_ACTIVITY"))
+        self.assertIsNone(self.client._get_retry_reason("PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC"))
         self.assertIsNotNone(self.client._get_retry_reason("HTTP 429: too many requests"))
+
+    async def test_malformed_accepted_video_response_is_unknown_outcome(self):
+        self.client._current_rpc.return_value = {"malformed": True}
+        with self.assertRaises(RuntimeError) as error:
+            await self.video()
+        self.assertTrue(getattr(error.exception, "outcome_unknown", False))
+        self.client._current_rpc.assert_awaited_once()
+
+    async def test_paid_rpc_transport_failure_is_unknown_outcome(self):
+        self.client._resolve_flow_frontend_cookie_storage.return_value = "OSID=synthetic-cookie"
+        self.client._current_rpc = FlowClient._current_rpc.__get__(self.client)
+        self.client._call_flow_frontend_rpc = FlowClient._call_flow_frontend_rpc.__get__(self.client)
+        self.client._load_flow_frontend_bootstrap = AsyncMock(return_value='boq_labs-ai-sandbox-frontend_20261007.14_p0 {"FdrFJe":"123","SNlM0e":"XSRF"}')
+        self.client._make_text_request = AsyncMock(side_effect=RuntimeError("Flow API text request failed: connection reset"))
+        with self.assertRaises(RuntimeError) as error:
+            await self.video()
+        self.assertTrue(getattr(error.exception, "outcome_unknown", False))
+        self.client._make_text_request.assert_awaited_once()
 
     def test_terminal_submission_payload_preserves_minor_rejection(self):
         payload = [OPERATION, PROJECT, MEDIA, None, [4, [3, MINOR]]]
@@ -166,7 +185,7 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                 ("PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED", False, False),
                 ("PUBLIC_ERROR_USER_MINOR", True, True),
                 ("PUBLIC_ERROR_UNKNOWN_FUTURE", True, True),
-                ("PUBLIC_ERROR_UNUSUAL_ACTIVITY", True, False),
+                ("PUBLIC_ERROR_UNUSUAL_ACTIVITY", True, True),
                 ("HTTP 429: too many requests", True, True),
                 ("Failed to obtain reCAPTCHA token for image upload", False, False),
                 ("[FLOW_UPLOAD_BROWSER_TIMEOUT]", False, False),
@@ -193,7 +212,7 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                     )
                     manager.ensure_valid_token = AsyncMock(return_value=token)
                     manager.ensure_project_exists = AsyncMock(return_value=PROJECT)
-                    manager.record_error = AsyncMock(wraps=manager.record_error)
+                    manager.record_generation_error = AsyncMock()
                     manager.record_usage = AsyncMock()
                     manager.record_success = AsyncMock()
                     manager.disable_token = AsyncMock()
@@ -215,13 +234,10 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
                         )]
                     self.assertIn(code, output[0]["error"]["message"])
                     if (count_exception if raises else count_result):
-                        handler.token_manager.record_error.assert_awaited_once_with(7)
-                        manager.db.increment_token_stats.assert_awaited_once_with(7, "error")
-                        manager.disable_token.assert_awaited_once_with(7)
+                        handler.token_manager.record_generation_error.assert_awaited_once_with(7, code)
                     else:
-                        handler.token_manager.record_error.assert_not_awaited()
-                        manager.db.increment_token_stats.assert_not_awaited()
-                        manager.disable_token.assert_not_awaited()
+                        handler.token_manager.record_generation_error.assert_not_awaited()
+                    manager.disable_token.assert_not_awaited()
                     handler.token_manager.record_usage.assert_not_awaited()
                     handler.token_manager.record_success.assert_not_awaited()
                     handler.load_balancer.release_pending.assert_awaited_once()
@@ -230,7 +246,7 @@ class PublicErrorAccountTests(unittest.IsolatedAsyncioTestCase):
         handler = GenerationHandler.__new__(GenerationHandler)
         self.assertTrue(handler._should_count_token_error(RuntimeError("PUBLIC_ERROR_UNKNOWN_FUTURE")))
         self.assertTrue(handler._should_count_token_error(RuntimeError("PUBLIC_ERROR_USER_MINOR")))
-        self.assertFalse(handler._should_count_token_error(RuntimeError("PUBLIC_ERROR_UNUSUAL_ACTIVITY")))
+        self.assertTrue(handler._should_count_token_error(RuntimeError("PUBLIC_ERROR_UNUSUAL_ACTIVITY")))
         self.assertTrue(handler._should_count_token_error(RuntimeError("HTTP 401: session rejected")))
 
 

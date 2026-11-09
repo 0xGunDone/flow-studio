@@ -343,3 +343,133 @@ test('late account refresh cannot restore old toggle state or a deleted row',asy
  requests[2]([{id:7,email:'owner@example.test',is_active:true}]);await stale;
  assert.deepEqual(r.accounts,[]);assert.equal(events.length,1);
 });
+
+test('cooldown metadata exposes only public fields and manual reset verifies backend state',async()=>{
+ const until=new Date(Date.now()+1800000).toISOString(),at=new Date().toISOString();
+ const row={id:7,email:'owner@example.test',is_active:true,generation_cooldown_until:until,generation_last_error:'rpc=MZZa6b, code=401',generation_last_error_at:at,generation_cooldown_remaining_seconds:1800,generation_cooldown_reset_allowed:true,google_cookies:'private-secret'};
+ const account=publicAccount(row);
+ assert.deepEqual(account,{id:7,email:row.email,credits:0,isActive:true,videoEnabled:true,cooldownUntil:until,lastGenerationError:row.generation_last_error,lastGenerationErrorAt:at,cooldownRemainingSeconds:1800,cooldownResetAllowed:true});
+ const r=new Runtime({}),calls=[];r.refreshAccounts=async()=>{r.accounts=[publicAccount(row)];return r.accounts;};
+ r.request=async(endpoint,options)=>{calls.push([endpoint,options.method]);row.generation_cooldown_until=null;row.generation_cooldown_remaining_seconds=0;return {success:true};};
+ assert.equal((await r.clearCooldown(7)).cleared,true);assert.deepEqual(calls,[['/api/tokens/7/clear-cooldown','POST']]);
+ assert.equal(r.accounts[0].cooldownUntil,null);assert.equal(r.accounts[0].lastGenerationError,'rpc=MZZa6b, code=401');
+ await assert.rejects(r.clearCooldown(0),/не найден/);
+ row.generation_cooldown_until=until;row.generation_cooldown_reset_allowed=false;
+ await assert.rejects(r.clearCooldown(7),/UNUSUAL_ACTIVITY/);assert.equal(calls.length,1);
+ r.jobs=[{status:'running'}];await assert.rejects(r.clearCooldown(7),/завершения генерации/);
+});
+
+test('saved retry replays exact model, frame order, immutable video and source id after restart on original account',async t=>{
+ const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os'),http=require('node:http'),{EventEmitter}=require('node:events'),{Readable}=require('node:stream');
+ const folder=await fs.mkdtemp(path.join(os.tmpdir(),'flow-retry-'));t.after(()=>fs.rm(folder,{recursive:true,force:true}));
+ const originalVideo=path.join(folder,'original.mov');await fs.writeFile(originalVideo,'original-video-content');
+ const models=['omni-1.2-flash-edit-landscape','veo-3.1-fast-i2v-8s-landscape','veo-3.1-fast-extend-8s-landscape'].map(id=>({id}));
+ const images=['data:image/png;base64,c3RhcnQ=','data:image/png;base64,ZW5k'];
+ const payloads=[],videos=[],events=[];
+ t.mock.method(http,'request',(_url,options,callback)=>{
+  assert.equal(options.method,'POST');
+  const request=new EventEmitter();request.end=body=>{
+   const payload=JSON.parse(body);payloads.push(payload);
+   (async()=>{
+    videos.push(await Promise.all((payload.video_references||[]).map(ref=>fs.readFile(path.join(folder,'engine','tmp','flow-studio-inputs',ref.file_id),'utf8'))));
+    const stream=Readable.from(['data: '+JSON.stringify({flow_studio:{account:{id:7,email:'owner@example.test'}}})+'\n\n','data: '+JSON.stringify({error:{message:'Synthetic upstream failure',code:'generation_failed'}})+'\n\n'].map(text=>Buffer.from(text)));
+    stream.statusCode=200;stream.headers={'content-type':'text/event-stream'};callback(stream);
+   })().catch(error=>request.emit('error',error));
+  };return request;
+ });
+ const setup=r=>{
+  r.ready=true;r.models=models;r.accounts=[{id:7,email:'owner@example.test',isActive:true}];r.start=async()=>{};
+  r.refreshAccounts=async()=>r.accounts;r.command=async()=>({stdout:JSON.stringify({username:'test-only',password:'test-only',apiKey:'test-only'})});return r;
+ };
+ let r=setup(new Runtime({dataDir:folder,databasePath:path.join(folder,'engine','data','flow.db'),composePath:'/synthetic-compose',onEvent:event=>events.push(event)}));
+ const cases=[
+  {model:models[0].id,prompt:'  Preserve exact edit  ',references:[{kind:'image',dataUrl:images[1]},{kind:'video',path:originalVideo},{kind:'image',dataUrl:images[0]}]},
+  {model:models[1].id,prompt:'Preserve frames',images},
+  {model:models[2].id,prompt:'Preserve extension',sourceVideoId:'source-generation-id'},
+ ];
+ const ids=[];
+ for(const input of cases){ids.push(r.generate(input).jobId);await Promise.all([...r.jobTasks]);}
+ assert.equal(payloads.length,3);
+ const history=await fs.readFile(path.join(folder,'history.json'),'utf8');
+ assert.doesNotMatch(history,/base64|original\.mov|video-content/);
+ assert.doesNotMatch(JSON.stringify({jobs:r.publicJobs(),events}),/base64|original\.mov|video-content|test-only/);
+ const manifest=path.join(r.retryFolder(ids[0]),'input.json');assert.equal((await fs.stat(manifest)).mode&0o777,0o600);
+ await fs.writeFile(originalVideo,'changed-original');await fs.unlink(originalVideo);
+ r=setup(new Runtime({dataDir:folder,databasePath:path.join(folder,'engine','data','flow.db'),composePath:'/synthetic-compose'}));await r.initializeHistory();
+ for(let i=0;i<ids.length;i++){
+  const original=r.jobs.find(job=>job.id===ids[i]);assert.equal(r.publicJob(original).retryAvailable,true,JSON.stringify(r.publicJob(original)));
+  const input={jobId:original.id,requestId:'retry-stable-'+i};
+  const first=r.retryGeneration(input),duplicate=r.retryGeneration(input);assert.equal(first,duplicate);
+  assert.throws(()=>r.generate(cases[1]),/подготовки повтора/);
+  const result=await first;await Promise.all([...r.jobTasks]);
+  assert.equal((await r.retryGeneration(input)).jobId,result.jobId);assert.equal(r.jobs.find(job=>job.id===result.jobId).retryOf,original.id);
+  const replay=payloads[3+i],initial=payloads[i];
+  assert.equal(replay.model,initial.model);assert.deepEqual(replay.messages,initial.messages);assert.equal(replay.flow_studio_account_id,7);
+  assert.deepEqual(replay.video_references?.map(({file_id,...metadata})=>metadata),initial.video_references?.map(({file_id,...metadata})=>metadata));
+  assert.deepEqual(videos[3+i],videos[i]);assert.equal(original.status,'failed');
+ }
+ assert.equal(payloads.length,6);assert.deepEqual(videos[3],['original-video-content']);
+ assert.equal(payloads[5].messages[0].content[1].image_url.url,'extend://source-generation-id');
+});
+
+test('retry blocks unknown outcomes, policy denials and changed account, with no submission or fallback',async t=>{
+ const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os');
+ const folder=await fs.mkdtemp(path.join(os.tmpdir(),'flow-retry-block-'));t.after(()=>fs.rm(folder,{recursive:true,force:true}));
+ const r=new Runtime({dataDir:folder});r.ready=true;r.models=[{id:'gemini-3.1-flash-image-landscape'}];
+ const original={id:'original',model:r.models[0].id,prompt:'unchanged',status:'failed',accountId:7,accountEmail:'owner@example.test',media:[]};r.jobs=[original];
+ await r.saveRetryInput(original,[],undefined,[]);
+ r.accounts=[{id:7,email:'owner@example.test',isActive:true}];r.refreshAccounts=async()=>r.accounts;
+ let submissions=0;r.runJob=async()=>{submissions++;};
+ for(const patch of [{unknownOutcome:true},{cancelRequested:true},{errorCode:'PUBLIC_ERROR_MINOR'},{errorCode:'PUBLIC_ERROR_UNSAFE_GENERATION'},{errorCode:'PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED'}]){
+  Object.assign(original,patch);assert.equal(r.publicJob(original).retryAvailable,false);
+  await assert.rejects(r.retryGeneration({jobId:original.id,requestId:'blocked'}));
+  for(const key of Object.keys(patch))delete original[key];
+ }
+ r.accounts[0].email='changed@example.test';await assert.rejects(r.retryGeneration({jobId:original.id,requestId:'blocked'}),/исходный аккаунт/);
+ r.accounts[0].email=original.accountEmail;r.accounts[0].isActive=false;await assert.rejects(r.retryGeneration({jobId:original.id,requestId:'blocked'}),/Включите/);
+ r.accounts[0].isActive=true;r.accounts[0].cooldownUntil=new Date(Date.now()+60000).toISOString();
+ assert.equal(r.publicJob(original).retryAvailable,true,'UI can enable retry when live countdown expires');
+ await assert.rejects(r.retryGeneration({jobId:original.id,requestId:'blocked'}),/паузе/);
+ r.accounts[0].cooldownUntil=null;r.accountActionPending=true;await assert.rejects(r.retryGeneration({jobId:original.id,requestId:'blocked'}),/аккаунтами/);r.accountActionPending=false;
+ for(const input of [{jobId:original.id,requestId:'stable',model:'override'},{jobId:original.id,requestId:''},{jobId:original.id,requestId:'x'.repeat(129)},null])await assert.rejects(r.retryGeneration(input),/параметры/);
+ assert.equal(submissions,0);
+ original.status='succeeded';assert.equal(r.publicJob(original).retryAvailable,true);
+ const retry=await r.retryGeneration({jobId:original.id,requestId:'success-variant'});assert(retry.jobId);assert.equal(submissions,1);
+});
+
+test('interrupted history and unknown stream outcomes never offer one-click retry',async t=>{
+ const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os');
+ const folder=await fs.mkdtemp(path.join(os.tmpdir(),'flow-retry-unknown-'));t.after(()=>fs.rm(folder,{recursive:true,force:true}));
+ const r=new Runtime({dataDir:folder});
+ await fs.writeFile(path.join(folder,'history.json'),JSON.stringify([{id:'interrupted',status:'running'}]));await r.initializeHistory();
+ assert.equal(r.jobs[0].unknownOutcome,true);assert.equal(r.publicJob(r.jobs[0]).retryAvailable,false);assert.match(r.publicJob(r.jobs[0]).retryBlockedReason,/неизвестен/);
+ await assert.rejects(consumeGeneration(sse(['data: {"error":{"message":"Provider timed out","code":"outcome_unknown"}}\n\n']),()=>{}),error=>error.unknownOutcome===true&&error.code==='outcome_unknown');
+ await assert.rejects(consumeGeneration(sse(['data: {"error":{"message":"Known terminal failure","code":"generation_failed"}}\n\n']),()=>{}),error=>error.generationTerminal===true&&error.unknownOutcome===false);
+ await assert.rejects(consumeGeneration(sse(['data: {"error":{"message":"Unclassified proxy failure"}}\n\n']),()=>{}),error=>error.generationTerminal===false);
+});
+
+test('retry input cache caps count and bytes while keeping ordinary history and private payloads separate',async t=>{
+ const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os');
+ const folder=await fs.mkdtemp(path.join(os.tmpdir(),'flow-retry-cap-'));t.after(()=>fs.rm(folder,{recursive:true,force:true}));
+ const r=new Runtime({dataDir:folder});
+ for(let i=0;i<21;i++){
+  const job={id:'job-'+i,model:'image',prompt:'test',status:'succeeded'};r.jobs.unshift(job);await r.saveRetryInput(job,[],undefined,[]);
+ }
+ assert.equal(r.jobs.length,21);assert.equal(r.retryInputs.size,20);assert.equal(r.retryInputs.has('job-0'),false);
+ await assert.rejects(fs.access(r.retryFolder('job-0')));
+ const large=await fs.open(path.join(r.retryFolder('job-20'),'sparse.bin'),'w');await large.truncate(513*1024*1024);await large.close();
+ await r.pruneRetryInputs();assert.equal(r.retryInputs.has('job-20'),false);assert.equal(r.retryInputs.size,19);
+ r.jobs[0].images=['private-payload'];r.jobs[0].privateInput={password:'private-secret'};
+ assert.doesNotMatch(JSON.stringify(r.publicJobs()),/private-payload|private-secret/);
+});
+
+test('account refresh and deletion send freshly derived retry availability with history',async()=>{
+ const events=[],r=new Runtime({onEvent:event=>events.push(event)});
+ const job={id:'saved',status:'succeeded',model:'image',prompt:'test',accountId:7,accountEmail:'owner@example.test'};r.jobs=[job];r.retryInputs.add(job.id);
+ let rows=[{id:7,email:job.accountEmail,is_active:true}];
+ r.request=async(_endpoint,options)=>options?.method==='DELETE'?{success:true}:rows;
+ await r.refreshAccounts();assert.equal(events.at(-1).history[0].retryAvailable,true);
+ rows=[{...rows[0],is_active:false}];await r.refreshAccounts();assert.equal(events.at(-1).history[0].retryAvailable,false);
+ rows=[{...rows[0],is_active:true}];await r.refreshAccounts();assert.equal(events.at(-1).history[0].retryAvailable,true);
+ await r.deleteAccount(7);assert.equal(events.at(-1).accounts.length,0);assert.equal(events.at(-1).history[0].retryAvailable,false);
+});

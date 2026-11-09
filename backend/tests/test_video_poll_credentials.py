@@ -130,6 +130,7 @@ class VideoPollCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.handler.flow_client.check_video_status.await_count, 3)
         self.assertEqual(self.handler.db.get_token.await_args_list, [call(7)] * 3)
         self.assertEqual(result[0]["error"]["status_code"], 502)
+        self.assertEqual(result[0]["error"]["code"], "outcome_unknown")
         self.assertIn(AUTH_ERROR, result[0]["error"]["message"])
         self.assertEqual(self.handler.db.update_task.await_args.kwargs["status"], "failed")
         self.handler.token_manager.refresh_cookies.assert_awaited_once_with(7)
@@ -177,6 +178,7 @@ class VideoPollCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.handler.flow_client.check_video_status.assert_awaited_once()
         self.handler.token_manager.refresh_cookies.assert_awaited_once_with(7)
         self.assertEqual(result[0]["error"]["status_code"], 504)
+        self.assertEqual(result[0]["error"]["code"], "outcome_unknown")
         self.assertIn(AUTH_ERROR, result[0]["error"]["message"])
         self.assert_no_generation_replay()
 

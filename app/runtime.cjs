@@ -13,11 +13,21 @@ const BASE = 'http://127.0.0.1:38000';
 const COMMAND_ENV = {...process.env, PATH:[process.env.PATH,'/opt/homebrew/bin','/usr/local/bin','/Applications/Docker.app/Contents/Resources/bin','/usr/bin','/bin','/usr/sbin','/sbin'].filter(Boolean).join(':')};
 const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
 function publicAccount(t) {
-  return {id:t.id,email:t.login_account||t.email,credits:t.credits??0,isActive:!!t.is_active,videoEnabled:t.video_enabled!==false};
+  const account={id:t.id,email:t.login_account||t.email,credits:t.credits??0,isActive:!!t.is_active,videoEnabled:t.video_enabled!==false};
+  const fields={generation_cooldown_until:'cooldownUntil',generation_last_error:'lastGenerationError',generation_last_error_at:'lastGenerationErrorAt',generation_cooldown_remaining_seconds:'cooldownRemainingSeconds',generation_cooldown_reset_allowed:'cooldownResetAllowed'};
+  for(const [source,target] of Object.entries(fields))if(Object.hasOwn(t,source))account[target]=t[source];
+  return account;
 }
 function errorMessage(body,fallback) {
   if(typeof body==='string')return body;
   return body?.error?.message||body?.detail||body?.message||fallback;
+}
+function generationError(body,fallback) {
+  const error=new Error(String(errorMessage(body,fallback)));
+  if(typeof body?.error?.code==='string')error.code=body.error.code;
+  error.generationTerminal=/^(?:generation_failed|account_cooldown|account_unavailable|PUBLIC_ERROR_[A-Z0-9_]+)$/.test(error.code||'');
+  error.unknownOutcome=error.code==='outcome_unknown';
+  return error;
 }
 async function readCredentials(databasePath,composePath,command=exec,signal) {
   const script = "import sqlite3,json,sys; c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True); r=c.execute('SELECT username,password,api_key FROM admin_config WHERE id=1').fetchone(); print(json.dumps(dict(zip(('username','password','apiKey'),r)))); c.close()";
@@ -80,7 +90,7 @@ function generationRequest(payload,apiKey,signal) {
 async function consumeGeneration(response,onProgress,onAccount=()=>{}) {
   if(!response.ok){
     let body;try{body=await response.json();}catch{}
-    throw new Error(errorMessage(body,'Ошибка сервера: '+response.status));
+    throw generationError(body,'Ошибка сервера: '+response.status);
   }
   if(!response.body)throw new Error('Сервер вернул пустой ответ.');
   const reader=response.body.getReader(),decoder=new TextDecoder();
@@ -88,7 +98,7 @@ async function consumeGeneration(response,onProgress,onAccount=()=>{}) {
   const consume=data=>{
     const account=data.flow_studio?.account;
     if(Number.isSafeInteger(account?.id)&&account.id>0&&typeof account.email==='string')onAccount({id:account.id,email:account.email});
-    if(data.error){streamError=errorMessage(data,'Не удалось выполнить генерацию');return;}
+    if(data.error){streamError=generationError(data,'Не удалось выполнить генерацию');return;}
     for(const choice of data.choices||[]){
       const delta=choice.delta||choice.message||{};
       const fragment=delta.reasoning_content||delta.content||'';
@@ -105,11 +115,11 @@ async function consumeGeneration(response,onProgress,onAccount=()=>{}) {
       const {done,value}=await reader.read();if(done)break;
       pending+=decoder.decode(value,{stream:true});
       pending=splitSSE(pending,consume);
-      if(streamError)throw new Error(streamError);
+      if(streamError)throw streamError;
     }
     pending+=decoder.decode();
     if(pending.trim())splitSSE(pending+'\n\n',consume);
-    if(streamError)throw new Error(streamError);
+    if(streamError)throw streamError;
     const media=extractMedia(content);
     if(!media.length)throw new Error(lastProgress||'Генерация завершилась без изображения или видео.');
     return media;
@@ -120,7 +130,7 @@ class Runtime {
     Object.assign(this,{composePath,databasePath,dataDir,onEvent});
     this.ready=false;this.message='Запускаем Flow Studio…';this.models=[];this.accounts=[];this.accountRefreshVersion=0;this.accountAppliedVersion=0;this.jobs=[];
     this.sessionCookie='';this.startTask=null;this.aborts=new Map();this.persistTask=Promise.resolve();
-    this.closing=false;this.closeTask=null;this.engineManaged=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();
+    this.closing=false;this.closeTask=null;this.engineManaged=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();this.retryInputs=new Set();this.retryTask=null;
   }
   status(message,ready=this.ready){this.message=message;this.ready=ready;this.onEvent({type:'status',message,ready});}
   initializeHistory(){
@@ -128,8 +138,12 @@ class Runtime {
     this.historyTask=(async()=>{
       await fs.mkdir(this.dataDir,{recursive:true,mode:0o700});
       try{this.jobs=JSON.parse(await fs.readFile(path.join(this.dataDir,'history.json'),'utf8')).filter(j=>j&&typeof j.id==='string');}catch{this.jobs=[];}
-      for(const job of this.jobs)if(job.status==='running'){job.status='failed';job.error='Приложение закрылось до завершения генерации.';}
+      for(const job of this.jobs)if(job.status==='running'){job.status='failed';job.error='Приложение закрылось до завершения генерации. Проверьте результат в Flow перед новым запросом.';job.unknownOutcome=true;}
       this.jobs=this.jobs.slice(0,100);
+      for(const job of this.jobs){
+        try{const stat=await fs.lstat(path.join(this.retryFolder(job.id),'input.json'));if(stat.isFile())this.retryInputs.add(job.id);}catch{}
+      }
+      await this.pruneRetryInputs();
     })();
     return this.historyTask;
   }
@@ -201,7 +215,24 @@ class Runtime {
   }
   snapshot(){return {ready:this.ready,message:this.message,models:this.models,accounts:this.accounts,history:this.publicJobs()};}
   publicJobs(){return this.jobs.map(j=>this.publicJob(j));}
-  publicJob(job){return {...job,media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};}
+  publicJob(job){
+    const fields=['id','model','prompt','kind','createdAt','status','progress','error','needsLogin','elapsedSeconds','accountId','accountEmail','retryOf','unknownOutcome','errorCode'];
+    const result=Object.fromEntries(fields.filter(key=>Object.hasOwn(job,key)).map(key=>[key,job[key]]));
+    const reason=this.retryBlockedReason(job);
+    return {...result,retryAvailable:!reason,...(reason?{retryBlockedReason:reason}:{}),media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};
+  }
+  retryBlockedReason(job){
+    if(job.status==='running')return 'Дождитесь завершения генерации.';
+    if(job.unknownOutcome||job.errorCode==='outcome_unknown'||job.cancelRequested)return 'Результат запроса неизвестен. Проверьте задачу в Flow перед новым запросом.';
+    if(/\bPUBLIC_ERROR_(?:MINOR|UNSAFE_GENERATION|PROMINENT_PEOPLE_FILTER_FAILED)\b/.test([job.errorCode,job.error].join('\n')))return 'Google Flow отклонил содержимое. Измените запрос или исходные файлы перед новой генерацией.';
+    if(!this.retryInputs.has(job.id))return 'Исходные файлы для повтора не сохранены. Перенесите запрос в редактор и добавьте их заново.';
+    if(!Number.isSafeInteger(job.accountId)||job.accountId<=0||!job.accountEmail)return 'Аккаунт исходного запроса не определён. Перенесите запрос в редактор.';
+    const account=this.accounts.find(a=>a.id===job.accountId&&a.email?.toLowerCase()===job.accountEmail.toLowerCase());
+    if(!account)return 'Подключите исходный аккаунт перед повтором.';
+    if(!account.isActive)return 'Включите исходный аккаунт перед повтором.';
+    if(this.models.length&&!this.models.some(m=>m.id===job.model))return 'Исходная модель больше недоступна. Выберите модель в редакторе.';
+    return '';
+  }
   async getProviderSettings(){
     try{
       const config=await this.request('/api/captcha/config');
@@ -231,7 +262,7 @@ class Runtime {
     const rows=await this.request('/api/tokens',options);
     if(version<this.accountAppliedVersion)return this.accounts;
     this.accountAppliedVersion=version;
-    this.accounts=rows.map(publicAccount);this.onEvent({type:'accounts',accounts:this.accounts});return this.accounts;
+    this.accounts=rows.map(publicAccount);this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});return this.accounts;
   }
   async checkAccount(accountId,{signal}={}){
     if(!Number.isSafeInteger(accountId)||accountId<=0)throw new Error('Аккаунт не найден.');
@@ -252,6 +283,19 @@ class Runtime {
     if(accounts.find(a=>a.id===accountId)?.isActive!==enabled)throw new Error('Сервер не подтвердил состояние аккаунта.');
     return {accounts};
   }
+  async clearCooldown(accountId){
+    if(!Number.isSafeInteger(accountId)||accountId<=0)throw new Error('Аккаунт не найден.');
+    if(this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед сбросом паузы.');
+    const account=(await this.refreshAccounts()).find(a=>a.id===accountId);
+    if(!account)throw new Error('Аккаунт не найден.');
+    if(account.cooldownResetAllowed===false&&Date.parse(account.cooldownUntil)>Date.now())throw new Error('Пауза Google Flow UNUSUAL_ACTIVITY пока не допускает ручной сброс. Дождитесь её окончания.');
+    const result=await this.request('/api/tokens/'+accountId+'/clear-cooldown',{method:'POST'});
+    if(result.success!==true)throw new Error('Не удалось сбросить паузу аккаунта.');
+    const accounts=await this.refreshAccounts();
+    const after=accounts.find(a=>a.id===accountId);
+    if(!after||after.email?.toLowerCase()!==account.email?.toLowerCase()||Date.parse(after.cooldownUntil)>Date.now())throw new Error('Сервер не подтвердил сброс паузы.');
+    return {cleared:true,accounts};
+  }
   async deleteAccount(accountId){
     if(!Number.isSafeInteger(accountId)||accountId<=0)throw new Error('Аккаунт не найден.');
     if(this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед удалением аккаунта.');
@@ -260,7 +304,7 @@ class Runtime {
     if(result.success!==true)throw new Error('Не удалось удалить подключение.');
     this.accountAppliedVersion=++this.accountRefreshVersion;
     this.accounts=this.accounts.filter(a=>a.id!==accountId);
-    this.onEvent({type:'accounts',accounts:this.accounts});
+    this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});
     return {deleted:true,accounts:this.accounts};
   }
   checkEnabledAccounts({checkAccount=id=>this.checkAccount(id)}={}){
@@ -320,7 +364,69 @@ class Runtime {
     return this.persistTask;
   }
   emitJob(job){this.onEvent({type:'job',job:this.publicJob(job)});}
-  generate(input){
+  retryFolder(jobId){
+    if(typeof jobId!=='string'||!(/^[a-zA-Z0-9_-]{1,128}$/).test(jobId))throw new Error('Задача не найдена.');
+    return path.join(this.dataDir,'retry-inputs',jobId);
+  }
+  async saveRetryInput(job,images,sourceVideoId,videos,videoNames=[]){
+    const folder=this.retryFolder(job.id);
+    await fs.mkdir(folder,{recursive:true,mode:0o700});
+    const copied=[];
+    try{
+      for(const file of videos)copied.push(await stageVideo(file,folder));
+      const input={version:1,model:job.model,prompt:job.prompt,images,sourceVideoId:sourceVideoId||'',videos:copied.map(file=>path.basename(file.target)),videoNames:copied.map((file,i)=>videoNames[i]||file.reference.filename)};
+      await fs.writeFile(path.join(folder,'input.json'),JSON.stringify(input),{flag:'wx',mode:0o600});
+      this.retryInputs.add(job.id);await this.pruneRetryInputs();
+      return copied.map(file=>file.target);
+    }catch(error){this.retryInputs.delete(job.id);await fs.rm(folder,{recursive:true,force:true}).catch(()=>{});throw error;}
+  }
+  async readRetryInput(job){
+    try{
+      const folder=this.retryFolder(job.id),file=await fs.open(path.join(folder,'input.json'),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+      let input;
+      try{const stat=await file.stat();if(!stat.isFile()||stat.size>200*1024*1024)throw new Error();input=JSON.parse(await file.readFile('utf8'));}finally{await file.close();}
+      if(input.version!==1||input.model!==job.model||input.prompt!==job.prompt||!Array.isArray(input.images)||!Array.isArray(input.videos)||input.videos.some(name=>typeof name!=='string'||path.basename(name)!==name||!/^[-a-zA-Z0-9_]+\.(mp4|mov|m4v)$/i.test(name))||!Array.isArray(input.videoNames)||input.videoNames.length!==input.videos.length||input.videoNames.some(name=>typeof name!=='string'||name.length>256))throw new Error();
+      return {model:input.model,prompt:input.prompt,images:input.images,sourceVideoId:input.sourceVideoId,videos:input.videos.map(name=>path.join(folder,name)),videoNames:input.videoNames};
+    }catch{this.retryInputs.delete(job.id);throw new Error('Исходные файлы для повтора недоступны. Перенесите запрос в редактор и добавьте их заново.');}
+  }
+  async pruneRetryInputs(){
+    // ponytail: keep 20 jobs / 512 MiB; older requests remain editable in history.
+    const root=path.join(this.dataDir,'retry-inputs'),keep=new Set();let bytes=0;
+    for(const job of this.jobs.slice(0,20)){
+      if(!this.retryInputs.has(job.id))continue;
+      const folder=this.retryFolder(job.id);let size=0;
+      try{for(const entry of await fs.readdir(folder,{withFileTypes:true}))if(entry.isFile())size+=(await fs.lstat(path.join(folder,entry.name))).size;}catch{this.retryInputs.delete(job.id);continue;}
+      if(bytes+size<=512*1024*1024){keep.add(job.id);bytes+=size;}
+    }
+    let folders;try{folders=await fs.readdir(root,{withFileTypes:true});}catch{return;}
+    for(const entry of folders)if(entry.isDirectory()&&/^[a-zA-Z0-9_-]{1,128}$/.test(entry.name)&&!keep.has(entry.name)){
+      await fs.rm(path.join(root,entry.name),{recursive:true,force:true});this.retryInputs.delete(entry.name);
+    }
+  }
+  retryGeneration(input){
+    if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['jobId','requestId'].includes(key))||typeof input.jobId!=='string'||typeof input.requestId!=='string'||!input.requestId.trim()||input.requestId.length>128)return Promise.reject(new Error('Неверные параметры повтора.'));
+    const original=this.jobs.find(job=>job.id===input.jobId);
+    if(!original)return Promise.reject(new Error('Задача не найдена.'));
+    const existing=this.jobs.find(job=>job.requestId===input.requestId);
+    if(existing)return existing.retryOf===original.id?Promise.resolve({jobId:existing.id}):Promise.reject(new Error('requestId уже использован с другими параметрами.'));
+    if(this.retryTask)return this.retryRequestId===input.requestId&&this.retryJobId===original.id?this.retryTask:Promise.reject(new Error('Дождитесь подготовки повтора.'));
+    if(this.closing||!this.ready)return Promise.reject(new Error(this.closing?'Приложение закрывается.':'Генератор ещё запускается.'));
+    if(this.accountActionPending||this.accountCheckTask)return Promise.reject(new Error('Дождитесь завершения действия с аккаунтами.'));
+    if(this.jobs.some(job=>job.status==='running'))return Promise.reject(new Error('Дождитесь текущей генерации.'));
+    this.retryRequestId=input.requestId;this.retryJobId=original.id;
+    this.retryTask=(async()=>{
+      await this.refreshAccounts();
+      const reason=this.retryBlockedReason(original);if(reason)throw new Error(reason);
+      const account=this.accounts.find(account=>account.id===original.accountId);
+      if(Date.parse(account.cooldownUntil)>Date.now())throw new Error('Аккаунт на паузе после ошибки. Дождитесь окончания паузы или сбросьте её вручную.');
+      const saved=await this.readRetryInput(original);
+      return this.generate({model:saved.model,prompt:saved.prompt,sourceVideoId:saved.sourceVideoId,references:[...saved.images.map(dataUrl=>({kind:'image',dataUrl})),...saved.videos.map(file=>({kind:'video',path:file}))],requestId:input.requestId},{retryOf:original.id,accountId:original.accountId,accountEmail:original.accountEmail,videoNames:saved.videoNames});
+    })().finally(()=>{this.retryTask=null;this.retryRequestId=null;this.retryJobId=null;});
+    return this.retryTask;
+  }
+  generate(input,{retryOf,accountId,accountEmail,videoNames}={}){
+    if(this.closing)throw new Error('Приложение закрывается.');
+    if(this.retryTask&&!retryOf)throw new Error('Дождитесь подготовки повтора.');
     if(!this.ready)throw new Error('Генератор ещё запускается.');
     if(!input||!this.models.some(m=>m.id===input.model))throw new Error('Выберите доступную модель.');
     if(typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
@@ -331,23 +437,23 @@ class Runtime {
     const images=refs.filter(r=>r.kind==='image').map(r=>r.dataUrl),videos=refs.filter(r=>r.kind==='video').map(r=>r.path);
     if(images.length>info.maxImages||images.some(s=>typeof s!=='string'||s.length>28*1024*1024||!/^data:image\/(?:png|jpeg|webp|gif);base64,/.test(s)))throw new Error('Слишком много изображений или неверный формат. Изображение: до 20 МБ.');
     if(videos.length>(info.maxVideos||0)||videos.some(p=>typeof p!=='string'||!path.isAbsolute(p)||! /\.(mp4|mov|m4v)$/i.test(p))||info.edit&&videos.length!==1)throw new Error(`Для редактирования Omni нужно одно видео MP4/MOV/M4V до ${info.maxInputDuration} секунд и до 100 МБ.`);
-    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||''})).digest('hex');
+    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||'',...(retryOf?{retryOf,accountId}:{})})).digest('hex');
     if(input.requestId){
       const existing=this.jobs.find(j=>j.requestId===input.requestId);
       if(existing){if(existing.requestHash!==requestHash)throw new Error('requestId уже использован с другими параметрами.');return {jobId:existing.id};}
     }
     if(this.accountActionPending||this.accountCheckTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
-    const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{})};
+    const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{}),...(retryOf?{retryOf,accountId,accountEmail}:{})};
     this.jobs.unshift(job);this.emitJob(job);
-    const task=this.runJob(job,images,input.sourceVideoId,videos).catch(()=>{});
+    const task=this.runJob(job,images,input.sourceVideoId,videos,{accountId,videoNames}).catch(()=>{});
     this.jobTasks.add(task);task.finally(()=>this.jobTasks.delete(task));
     return {jobId:id};
   }
-  async runJob(job,images,sourceVideoId,videos=[]){
+  async runJob(job,images,sourceVideoId,videos=[],{accountId,videoNames=[]}={}){
     const start=Date.now(),controller=new AbortController();this.aborts.set(job.id,controller);
     const timer=setTimeout(()=>controller.abort(),35*60*1000);
-    const staged=[];
+    const staged=[];let submitted=false;
     try{
       const content=[{type:'text',text:job.prompt},...images.map(url=>({type:'image_url',image_url:{url}}))];
       if(/(?:-|_)extend(?:-|_)/.test(job.model)){
@@ -357,16 +463,21 @@ class Runtime {
       await this.persist();
       await this.start();
       if(!this.ready)throw new Error(this.message);
-      for(const file of videos)staged.push(await stageVideo(file,path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs')));
+      const savedVideos=await this.saveRetryInput(job,images,sourceVideoId,videos,videoNames);
+      for(let i=0;i<savedVideos.length;i++){
+        const file=await stageVideo(savedVideos[i],path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs'));
+        file.reference.filename=videoNames[i]||path.basename(videos[i]).slice(0,256);staged.push(file);
+      }
       this.credentials=await readCredentials(this.databasePath,this.composePath,this.command.bind(this),controller.signal);
-      const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true,...(staged.length?{video_references:staged.map(x=>x.reference)}:{})},this.credentials.apiKey,controller.signal);
+      controller.signal.throwIfAborted();submitted=true;
+      const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true,...(staged.length?{video_references:staged.map(x=>x.reference)}:{}),...(accountId?{flow_studio_account_id:accountId}:{})},this.credentials.apiKey,controller.signal);
       const media=await consumeGeneration(response,text=>{job.progress=text;this.emitJob(job);},account=>{job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);});
       job.media=media;
       for(let i=0;i<media.length;i++){
         try{media[i].path=await this.cacheMedia(job.id,i,media[i],controller.signal);}catch{ /* Original URL remains usable; save can retry. */ }
       }
       job.status='succeeded';job.progress='Готово';
-    }catch(e){job.status='failed';job.error=this.closing?'Приложение закрыто. Задача Google могла продолжиться; проверьте Flow перед повтором.':job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
+    }catch(e){job.status='failed';job.unknownOutcome=submitted&&(!e.generationTerminal||e.unknownOutcome||this.closing||job.cancelRequested||e.name==='AbortError');if(e.code)job.errorCode=e.code;job.error=this.closing?'Приложение закрыто. Задача Google могла продолжиться; проверьте Flow перед повтором.':job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
     finally{
       for(const file of staged)await fs.unlink(file.target).catch(()=>{});
       clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});if(!this.closing&&this.ready)await this.refreshAccounts().catch(()=>{});
@@ -399,6 +510,7 @@ class Runtime {
     this.closeTask=(async()=>{
       await this.historyTask?.catch(()=>{});
       await this.startTask?.catch(()=>{});
+      await this.retryTask?.catch(()=>{});
       await Promise.allSettled([...this.jobTasks]);
       try{await this.persist();}
       finally{

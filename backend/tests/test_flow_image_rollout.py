@@ -397,7 +397,15 @@ class ImageModelRolloutTests(unittest.IsolatedAsyncioTestCase):
                     await self.generate()
                 self.client._current_rpc.assert_awaited_once()
 
-    async def test_captcha_rejections_respect_configured_retry_limit(self):
+    async def test_malformed_accepted_image_response_is_unknown_outcome(self):
+        self.client._get_runtime_config = lambda: types.SimpleNamespace(flow_max_retries=3, flow_image_request_timeout=10)
+        self.client._normalize_frontend_image_generation_response.side_effect = RuntimeError("Flow frontend image RPC returned no downloadable media")
+        with self.assertRaises(RuntimeError) as error:
+            await self.generate()
+        self.assertTrue(getattr(error.exception, "outcome_unknown", False))
+        self.client._current_rpc.assert_awaited_once()
+
+    async def test_unusual_activity_never_uses_configured_retry_limit(self):
         self.client._get_runtime_config = lambda: types.SimpleNamespace(
             flow_max_retries=2,
             flow_image_request_timeout=10,
@@ -408,12 +416,13 @@ class ImageModelRolloutTests(unittest.IsolatedAsyncioTestCase):
         self.client._handle_retryable_generation_error.return_value = True
         with self.assertRaises(RuntimeError):
             await self.generate()
-        self.assertEqual(self.client._current_rpc.await_count, 2)
+        self.client._current_rpc.assert_awaited_once()
+        self.client._handle_retryable_generation_error.assert_not_awaited()
         models = [
             call.kwargs["argument"][1][0][5]
             for call in self.client._current_rpc.call_args_list
         ]
-        self.assertEqual(models, ["BELUGA", "BELUGA"])
+        self.assertEqual(models, ["BELUGA"])
 
 
 if __name__ == "__main__":

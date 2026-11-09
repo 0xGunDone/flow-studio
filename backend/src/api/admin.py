@@ -1036,6 +1036,11 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
             else None,
         "ban_reason": row.get("ban_reason"),
         "banned_at": to_iso(row.get("banned_at")) if row.get("banned_at") else None,
+        "generation_cooldown_until": to_iso(normalize_dt(row.get("generation_cooldown_until"))),
+        "generation_last_error": row.get("generation_last_error") or "",
+        "generation_last_error_at": to_iso(normalize_dt(row.get("generation_last_error_at"))),
+        "generation_cooldown_remaining_seconds": Token(**row).generation_cooldown_remaining_seconds,
+        "generation_cooldown_reset_allowed": Token(**row).generation_cooldown_reset_allowed,
         }
         for row in token_rows
     ]  # 直接返回数组,兼容前端
@@ -1186,6 +1191,23 @@ async def enable_token(token_id: int, token: str = Depends(verify_admin_token)):
     """Enable token"""
     await token_manager.enable_token(token_id)
     return {"success": True, "message": "Токен включён"}
+
+
+@router.post("/api/tokens/{token_id}/clear-cooldown")
+async def clear_token_cooldown(token_id: int, token: str = Depends(verify_admin_token)):
+    """Clear only a local cooldown; never change Google or manual account state."""
+    account = await db.get_token(token_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    if not await db.clear_generation_cooldown(token_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY: локальный cooldown нельзя снять до истечения 30 минут. "
+                "Сброс не снимает ограничение Google; проверьте аккаунт в веб-версии Flow."
+            ),
+        )
+    return {"success": True, "message": "Локальный cooldown сброшен. Ограничения Google не изменены."}
 
 
 @router.post("/api/tokens/{token_id}/disable")

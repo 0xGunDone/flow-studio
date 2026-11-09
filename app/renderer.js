@@ -113,21 +113,32 @@ function recoveryAccountId(job, accounts) {
   return active.length === 1 ? active[0].id : null;
 }
 
+function cooldownSeconds(account, now = Date.now()) {
+  const until = Date.parse(account?.cooldownUntil || '');
+  return Number.isFinite(until) ? Math.max(0, Math.ceil((until-now)/1000)) : 0;
+}
+function cooldownLabel(account, now = Date.now()) {
+  const seconds = cooldownSeconds(account,now);
+  return seconds ? `Остывает · ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}` : 'КД завершён';
+}
+
 function errorMessage(error) {
   return (error?.message || String(error || 'Не удалось выполнить действие'))
     .replace(/^Error invoking remote method ['"]studio:[A-Za-z]+['"]:\s*(?:Error:\s*)?/, '');
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, preferredModel, PREFERRED_VIDEO_FAMILY, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, needsUploadVerification, recoveryAccountId, errorMessage };
+if (typeof module !== 'undefined' && module.exports) module.exports = { modelInfo, modelSettings, preferredModel, PREFERRED_VIDEO_FAMILY, frameReferences, VIDEO_METHODS, requestFor, mediaUrl, readDraft, requiresLogin, needsUploadVerification, recoveryAccountId, cooldownSeconds, cooldownLabel, errorMessage };
 if (typeof document !== 'undefined') initialize();
 
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { currentPage: 'create', providerSettings: null, settingsLoading: false, settingsSaving: false, ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
+  const state = { retryingJobId: null, currentPage: 'create', providerSettings: null, settingsLoading: false, settingsSaving: false, ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
+  const retryRequests = new Map(), expiredCooldowns = new Set();
+  let retrySequence = 0;
   let jobVersion = 0;
   let accountVersion = 0;
   let loginVersion = 0;
@@ -247,10 +258,10 @@ function initialize() {
   }
   function updateGenerate() {
     const running = Boolean(activeJob()) || state.submitting;
-    const available = state.accounts.some(account => account.isActive);
-    $('generate').disabled = !state.ready || !selectedModel() || running || !available || state.importPending || state.accountPending !== null || Boolean(state.batchCheck?.running);
+    const available = state.accounts.some(account => account.isActive && !cooldownSeconds(account));
+    $('generate').disabled = !state.ready || !selectedModel() || running || !available || state.importPending || state.accountPending !== null || Boolean(state.batchCheck?.running) || state.retryingJobId !== null;
     $('generate-label').textContent = running ? 'Генерация идет…' : state.mode === 'video' ? 'Создать видео' : 'Создать изображение';
-    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.batchCheck?.running ? 'Проверяем аккаунты…' : state.accountPending !== null ? 'Обновляем подключение…' : state.importPending ? 'Добавляем вложения…' : !available ? 'Подключите активный аккаунт в разделе «Аккаунты»' : '⌘ Enter — создать';
+    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.batchCheck?.running ? 'Проверяем аккаунты…' : state.accountPending !== null ? 'Обновляем подключение…' : state.importPending ? 'Добавляем вложения…' : !available ? (state.accounts.some(account => account.isActive) ? 'Аккаунты на КД — дождитесь окончания или откройте «Аккаунты»' : 'Подключите активный аккаунт в разделе «Аккаунты»') : '⌘ Enter — создать';
   }
   function renderModels(requestedModel) {
     if (requestedModel !== undefined) draft.model = requestedModel;
@@ -464,6 +475,12 @@ function initialize() {
     result.replaceChildren();
     $('result-tag').textContent = !job ? 'Предпросмотр' : job.status === 'running' ? 'В процессе' : job.status === 'failed' || requiresLogin(job) ? 'Не получилось' : 'Готово';
     if (!job) { result.append(emptyResult()); return; }
+    const account = state.accounts.find(item => item.id === job.accountId);
+    const accountName = job.accountEmail || account?.email || (job.accountId ? `#${job.accountId}` : 'ещё не выбран');
+    const accountLine = element('div','job-account');
+    accountLine.append(element('span','','Аккаунт: '),element('strong','',accountName));
+    if(cooldownSeconds(account)) accountLine.append(element('span','cooldown-countdown',cooldownLabel(account)));
+    result.append(accountLine);
     if (job.status === 'running') {
       const panel = element('div', 'job-running');
       const progress = element('progress');
@@ -489,6 +506,7 @@ function initialize() {
         panel.append(element('h3', '', 'Не удалось загрузить исходник'), element('p', 'inline-error', 'Локальный движок не получил подтверждение reCAPTCHA для загрузки одного из изображений. Этот файл не отправлен, генерация результата не запущена.'), button('Открыть Flow в браузере', 'primary', async () => { try { await api.openFlow(); } catch(error) { notify(errorMessage(error),true); } }), element('p', 'hint recovery-note', 'В браузере выберите тот же Google-аккаунт и попробуйте прикрепить файл без запуска генерации. Если Google покажет проверку, выполните её вручную. Это действие не отправляет запрос повторно.'), button('Редактировать запрос', 'secondary', () => reuse(job)));
         const details=element('details','error-details');details.append(element('summary','','Технические детали'),element('pre','',job.error||job.progress));panel.append(details);
       } else panel.append(element('h3', '', 'Генерация не завершилась'), element('p', 'inline-error', job.error || job.progress || 'Попробуйте повторить запрос'), button('Редактировать запрос', 'secondary', () => reuse(job)));
+      appendRetry(panel,job,account);
       result.append(panel);
     } else if (job.media?.length) {
       const media = element('div', 'result-media');
@@ -535,7 +553,31 @@ function initialize() {
     const model = state.models.find(item => item.id === job.model) || { id: job.model, description: job.model };
     meta.append(element('span', '', modelInfo(model).label), element('span', '', duration(job.elapsedSeconds) || date(job.createdAt)));
     details.append(meta, element('p', '', job.prompt), button('Использовать запрос', '', () => reuse(job)));
+    if(job.status === 'succeeded') appendRetry(details,job,account);
     result.append(details);
+  }
+  function appendRetry(container,job,account) {
+    const retry = button('Повторить генерацию', 'secondary retry-generation', () => retryGeneration(job));
+    retry.dataset.jobId=job.id;
+    retry.disabled=!state.ready || !job.retryAvailable || Boolean(activeJob()) || state.retryingJobId !== null || Boolean(cooldownSeconds(account)) || state.accountPending !== null || Boolean(state.batchCheck?.running);
+    container.append(retry);
+    const reason = cooldownSeconds(account) ? 'Повтор доступен после завершения КД аккаунта' : job.retryBlockedReason || (!job.retryAvailable ? 'Для этой задачи нет сохранённых исходников. Используйте «Редактировать запрос»' : 'Новая попытка с теми же исходниками и настройками может расходовать кредиты');
+    container.append(element('p','hint retry-hint',reason));
+  }
+  async function retryGeneration(job) {
+    if(state.retryingJobId !== null || activeJob() || !state.ready || !job.retryAvailable || state.accountPending !== null || state.batchCheck?.running)return;
+    const account=state.accounts.find(a=>a.id===job.accountId);
+    if(cooldownSeconds(account))return;
+    let requestId=retryRequests.get(job.id);
+    if(!requestId){requestId=window.crypto?.randomUUID?.() || `retry-${job.id}-${Date.now()}-${++retrySequence}`;retryRequests.set(job.id,requestId);}
+    state.retryingJobId=job.id;renderResult();updateGenerate();
+    try{
+      const result=await api.retryGeneration({jobId:job.id,requestId});
+      state.selectedJobId=result.jobId;
+      retryRequests.delete(job.id);
+      renderResult();renderHistory();
+    }catch(error){notify(errorMessage(error),true);}
+    finally{state.retryingJobId=null;renderResult();updateGenerate();}
   }
   function updateElapsed() {
     const job = state.jobs.find(item => item.id === state.selectedJobId);
@@ -566,6 +608,7 @@ function initialize() {
       const meta = element('div');
       meta.append(element('span', '', job.kind === 'video' ? 'Видео' : 'Изображение'), element('time', '', date(job.createdAt)));
       content.append(element('p', '', job.prompt), meta);
+      if(job.accountEmail || job.accountId) content.append(element('small','history-account',`Аккаунт: ${job.accountEmail || '#'+job.accountId}`));
       card.append(content);
       $('history').append(card);
     }
@@ -575,6 +618,8 @@ function initialize() {
     const active = state.accounts.filter(account => account.isActive).length;
     const countWord = { one: 'аккаунт', few: 'аккаунта', many: 'аккаунтов', other: 'аккаунта' }[new Intl.PluralRules('ru-RU').select(active)];
     $('account-summary').textContent = !state.accounts.length ? 'Подключить аккаунт' : `Для генерации: ${active} ${countWord}`;
+    const cooling=state.accounts.filter(account=>cooldownSeconds(account)).length;
+    if(cooling) $('account-summary').textContent += ` · на КД: ${cooling}`;
     $('accounts-list').replaceChildren();
     if (!state.accounts.length) {
       const empty = element('div', 'empty-section');
@@ -588,6 +633,18 @@ function initialize() {
       status.append(element('span', `badge${account.isActive ? '' : ' inactive'}`, account.isActive ? 'Включен для генерации' : 'Выключен для генерации'));
       if (account.videoEnabled === false) status.append(document.createTextNode(' · Видео недоступно'));
       identity.append(element('h3', '', account.email || `Аккаунт ${account.id}`), status);
+      if(cooldownSeconds(account)){
+        const cooldown=element('p','account-cooldown cooldown-countdown',cooldownLabel(account));
+        cooldown.dataset.accountId=String(account.id);identity.append(cooldown);
+        const until=new Date(account.cooldownUntil);
+        if(Number.isFinite(until.getTime()))identity.append(element('p','hint',`До ${dates.format(until)}`));
+      }
+      if(account.lastGenerationError){
+        const details=element('details','error-details generation-error-details');
+        details.append(element('summary','','Последняя ошибка генерации'),element('pre','',account.lastGenerationError));
+        if(account.lastGenerationErrorAt)details.append(element('p','hint',date(account.lastGenerationErrorAt)));
+        identity.append(details);
+      }
       const check = state.accountChecks.get(String(account.id));
       const connection = element('p', `account-connection${check?.status === 'verified' ? ' verified' : check?.status === 'error' ? ' failed' : ''}`, state.checkingAccountId === account.id ? 'Проверяем подключение…' : check?.status === 'verified' ? `Подключение проверено${check.checkedAt ? ` · ${date(check.checkedAt)}` : ''}` : check?.status === 'error' ? 'Подключение не подтверждено' : 'Вход ещё не проверен');
       connection.setAttribute('role', 'status');
@@ -606,6 +663,12 @@ function initialize() {
       input.addEventListener('change',()=>changeAccount(account.id,()=>api.setAccountActive(account.id,input.checked)));
       toggle.append(input,element('span','switch-track'),element('span','switch-label',account.isActive?'Включён':'Выключен'));
       actions.append(toggle);
+      if(cooldownSeconds(account)){
+        const reset=button('Сбросить КД','small secondary reset-cooldown',()=>changeAccount(account.id,()=>api.clearCooldown(account.id)));
+        reset.dataset.accountId=String(account.id);
+        reset.disabled=account.cooldownResetAllowed===false;actions.append(reset);
+        if(account.cooldownResetAllowed===false) actions.append(element('p','hint cooldown-hold','Ограничение Google: дождитесь окончания паузы'));
+      }
       actions.append(button('Войти заново', 'small secondary reconnect', () => beginLogin(account.id)), button('Проверить подключение', 'small secondary check-account', () => checkAccount(account.id)),button('Удалить', 'small secondary delete-account', () => changeAccount(account.id,()=>api.deleteAccount(account.id),true)));
       row.append(element('div', 'avatar', (account.email || 'G').slice(0, 1)), identity, balance, actions);
       $('accounts-list').append(row);
@@ -625,6 +688,10 @@ function initialize() {
     $('account-check-progress').textContent = batch ? batch.running ? `Проверено ${batch.checked} из ${batch.total}. Успешно: ${batch.verified}, ошибок: ${batch.failed}` : `Проверка завершена: ${batch.verified} успешно, ${batch.failed} с ошибками${batch.skipped ? ', пропущено: '+batch.skipped : ''}` : '';
     for(const node of document.querySelectorAll('.account-toggle'))node.disabled = !state.ready || working || busy;
     for(const node of document.querySelectorAll('.delete-account'))node.disabled = !state.ready || working || busy || Boolean(activeJob());
+    for(const node of document.querySelectorAll('.reset-cooldown')){
+      const account=state.accounts.find(a=>String(a.id)===node.dataset.accountId);
+      node.disabled=!state.ready || working || busy || Boolean(activeJob()) || account?.cooldownResetAllowed===false;
+    }
     $('add-account').disabled = busy || working || !state.ready;
     document.querySelectorAll('.reconnect').forEach(item => { item.disabled = busy || working || !state.ready; });
     document.querySelectorAll('.check-account').forEach(item => { item.disabled = busy || working || !state.ready; });
@@ -656,24 +723,24 @@ function initialize() {
   }
   async function changeAccount(accountId,action,deleting=false) {
     if(state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null || state.loginPending || ['opening','waiting','syncing'].includes(state.login?.state) || !state.ready)return;
-    state.accountPending=accountId;setError('accounts-error','');renderAccounts();
+    state.accountPending=accountId;setError('accounts-error','');renderAccounts();renderResult();
     try{
       const result=await action();
       if(result?.accounts){accountVersion++;state.accounts=result.accounts;}
       if(deleting&&result?.deleted)state.accountChecks.delete(String(accountId));
     }catch(error){setError('accounts-error',errorMessage(error));}
-    finally{state.accountPending=null;renderAccounts();}
+    finally{state.accountPending=null;renderAccounts();renderResult();}
   }
   async function checkEnabledAccounts() {
     if(state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null || state.loginPending || ['opening','waiting','syncing'].includes(state.login?.state) || !state.ready || activeJob())return;
     state.batchCheck={running:true,total:state.accounts.filter(a=>a.isActive).length,checked:0,verified:0,failed:0,skipped:0};
-    setError('accounts-error','');renderAccounts();
+    setError('accounts-error','');renderAccounts();renderResult();
     try{
       const result=await api.checkEnabledAccounts();state.batchCheck=result;
       for(const item of result.results||[])state.accountChecks.set(String(item.accountId),item);
       if(result.failed)setError('accounts-error','Не все аккаунты подтвердили подключение. Причины указаны у каждого аккаунта.');
     }catch(error){setError('accounts-error',errorMessage(error));}
-    finally{if(state.batchCheck)state.batchCheck.running=false;state.checkingAccountId=null;renderAccounts();}
+    finally{if(state.batchCheck)state.batchCheck.running=false;state.checkingAccountId=null;renderAccounts();renderResult();}
   }
   async function checkAccount(accountId) {
     if (state.refreshPending || state.accountPending !== null || state.batchCheck?.running || state.checkingAccountId !== null || state.loginPending || ['opening', 'waiting', 'syncing'].includes(state.login?.state) || !state.ready) return;
@@ -723,7 +790,7 @@ function initialize() {
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.submitting || state.importPending || state.accountPending !== null || state.batchCheck?.running || activeJob() || !state.ready) return;
+    if (state.submitting || state.retryingJobId !== null || state.importPending || state.accountPending !== null || state.batchCheck?.running || activeJob() || !state.ready) return;
     setError('form-error', '');
     let request;
     try { request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value); }
@@ -857,17 +924,33 @@ function initialize() {
       renderHistory();
       if (event.job.id === state.selectedJobId) renderResult();
       updateGenerate();renderLogin();renderProviderSettings();
-    } else if (event.type === 'accounts') { accountVersion++; state.accounts = event.accounts || []; renderAccounts(); }
+    } else if (event.type === 'accounts') {
+      accountVersion++; state.accounts = event.accounts || [];
+      if (Array.isArray(event.history)) { jobVersion++; state.jobs = event.history; renderHistory(); }
+      renderAccounts(); renderResult();
+    }
     else if (event.type === 'account-checks') {
       state.batchCheck=event;
       state.checkingAccountId=event.running&&event.status==='checking'?event.accountId:null;
       if(event.accountId!=null&&['verified','error'].includes(event.status))state.accountChecks.set(String(event.accountId),event);
-      renderAccounts();
+      renderAccounts();renderResult();
     }
     else if (event.type === 'login') { loginVersion++; acceptLogin(event.login); }
     else if (event.type === 'error') notify(event.message, true);
   });
-  const timer = setInterval(updateElapsed, 1000);
+  function updateCooldowns() {
+    for(const node of document.querySelectorAll('.cooldown-countdown')){
+      const account=state.accounts.find(a=>String(a.id)===node.dataset.accountId) || state.accounts.find(a=>a.id===state.jobs.find(j=>j.id===state.selectedJobId)?.accountId);
+      node.textContent=cooldownLabel(account);
+    }
+    let expired=false;
+    for(const account of state.accounts){
+      const key=`${account.id}:${account.cooldownUntil}`;
+      if(account.cooldownUntil && !cooldownSeconds(account) && !expiredCooldowns.has(key)){expiredCooldowns.add(key);expired=true;}
+    }
+    if(expired){renderAccounts();renderResult();}
+  }
+  const timer = setInterval(() => {updateElapsed();updateCooldowns();}, 1000);
   window.addEventListener('beforeunload', () => { clearInterval(timer); unsubscribe?.(); });
   start();
 }

@@ -91,6 +91,7 @@ class NormalizedGenerationRequest:
     messages: Optional[List[ChatMessage]] = None
     video_media_id: Optional[str] = None
     video_references: Optional[List[Dict[str, Any]]] = None
+    requested_token_id: Optional[int] = None
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -469,6 +470,7 @@ async def _normalize_openai_request(
             messages=request.messages,
             video_media_id=video_media_id,
             video_references=request.video_references,
+            requested_token_id=request.flow_studio_account_id,
         )
 
     if request.contents:
@@ -478,6 +480,7 @@ async def _normalize_openai_request(
         )
         normalized = await _normalize_gemini_request(request.model, gemini_request)
         normalized.messages = request.messages
+        normalized.requested_token_id = request.flow_studio_account_id
         return normalized
 
     raise HTTPException(status_code=400, detail="Messages or contents cannot be empty")
@@ -522,6 +525,7 @@ async def _collect_non_stream_result(
     base_url_override: Optional[str] = None,
     video_media_id: Optional[str] = None,
     video_references: Optional[List[Dict[str, Any]]] = None,
+    requested_token_id: Optional[int] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -533,6 +537,7 @@ async def _collect_non_stream_result(
         base_url_override=base_url_override,
         video_media_id=video_media_id,
         **({"video_references": video_references} if video_references else {}),
+        **({"requested_token_id": requested_token_id} if requested_token_id is not None else {}),
     ):
         result = chunk
 
@@ -765,6 +770,7 @@ async def _iterate_openai_stream(
         base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
         **({"video_references": normalized.video_references} if normalized.video_references else {}),
+        **({"requested_token_id": normalized.requested_token_id} if normalized.requested_token_id is not None else {}),
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -917,6 +923,7 @@ async def create_chat_completion(
                 base_url_override=request_base_url,
                 video_media_id=normalized.video_media_id,
                 video_references=normalized.video_references,
+                requested_token_id=normalized.requested_token_id,
             )
         )
         return _build_openai_json_response(payload)

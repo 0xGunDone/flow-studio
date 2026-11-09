@@ -1543,6 +1543,21 @@ class GenerationHandler:
             generation_result["error_message"] = None
             generation_result["error_emitted"] = False
 
+    async def _prepare_generation_error_chunk(self, chunk: str, token, generation_result: Dict[str, Any]) -> str:
+        """Persist account pause before the client sees a terminal error."""
+        if not chunk.startswith("{"):
+            return chunk
+        payload = json.loads(chunk)
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return chunk
+        message = error.get("message", "")
+        if self._should_count_token_error(message) and not generation_result.get("account_error_recorded"):
+            await self.token_manager.record_generation_error(token.id, message)
+            generation_result["account_error_recorded"] = True
+        payload["flow_studio"] = {"account": {"id": token.id, "email": token.email}}
+        return json.dumps(payload, ensure_ascii=False)
+
     async def _resolve_video_asset(
         self,
         token,
@@ -1681,6 +1696,7 @@ class GenerationHandler:
         base_url_override: Optional[str] = None,
         video_media_id: Optional[str] = None,
         video_references: Optional[List[Dict[str, Any]]] = None,
+        requested_token_id: Optional[int] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1790,6 +1806,7 @@ class GenerationHandler:
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
+                **({"token_id": requested_token_id} if requested_token_id is not None else {}),
             )
         else:
             token = await self.load_balancer.select_token(
@@ -1798,6 +1815,7 @@ class GenerationHandler:
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
+                **({"token_id": requested_token_id} if requested_token_id is not None else {}),
             )
         perf_trace["token_select_ms"] = int(
             (time.time() - token_select_started_at) * 1000
@@ -1812,6 +1830,7 @@ class GenerationHandler:
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
                     model=model,
+                    **({"token_id": requested_token_id} if requested_token_id is not None else {}),
                 )
             if not error_msg:
                 error_msg = self._get_no_token_error_message(generation_type)
@@ -1832,7 +1851,10 @@ class GenerationHandler:
             )
             if stream:
                 yield self._create_stream_chunk(f"Ошибка: {error_msg}\n")
-            yield self._create_error_response(error_msg, status_code=503)
+            yield self._create_error_response(
+                error_msg, status_code=503,
+                code="account_cooldown" if "cooldown" in error_msg.lower() else "account_unavailable",
+            )
             return
 
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
@@ -1862,20 +1884,22 @@ class GenerationHandler:
                 progress=15,
             )
             ensure_at_started_at = time.time()
-            token = await self.token_manager.ensure_valid_token(token)
+            valid_token = await self.token_manager.ensure_valid_token(token)
             perf_trace["ensure_at_ms"] = int(
                 (time.time() - ensure_at_started_at) * 1000
             )
-            if not token:
+            if not valid_token:
                 error_msg = "Токен AT недействителен или не удалось его обновить"
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
+                await self.token_manager.record_generation_error(token.id, error_msg)
                 record_generation_result(
                     generation_type, "failed", time.time() - start_time
                 )
                 if stream:
                     yield self._create_stream_chunk(f"Ошибка: {error_msg}\n")
-                yield self._create_error_response(error_msg, status_code=503)
+                yield self._create_error_response(error_msg, status_code=503, account=token)
                 return
+            token = valid_token
 
             # 4. 确保Project存在
             debug_logger.log_info(f"[GENERATION] 检查/创建Project...")
@@ -1894,7 +1918,7 @@ class GenerationHandler:
                 )
                 if stream:
                     yield self._create_stream_chunk(f"Ошибка: {error_msg}\n")
-                yield self._create_error_response(error_msg, status_code=403)
+                yield self._create_error_response(error_msg, status_code=403, account=token)
                 return
 
             ensure_project_started_at = time.time()
@@ -1936,7 +1960,7 @@ class GenerationHandler:
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state,
                 ):
-                    yield chunk
+                    yield await self._prepare_generation_error_chunk(chunk, token, generation_result)
             else:  # video
                 debug_logger.log_info(f"[GENERATION] 开始视频生成流程...")
                 async for chunk in self._handle_video_generation(
@@ -1954,7 +1978,7 @@ class GenerationHandler:
                     video_media_id=video_media_id,
                     video_references=loaded_videos,
                 ):
-                    yield chunk
+                    yield await self._prepare_generation_error_chunk(chunk, token, generation_result)
             perf_trace["generation_pipeline_ms"] = int(
                 (time.time() - generation_pipeline_started_at) * 1000
             )
@@ -1965,12 +1989,8 @@ class GenerationHandler:
                 debug_logger.log_warning(
                     f"[GENERATION] 生成未成功，不扣次数: {error_msg}"
                 )
-                if token and not (
-                    is_flow_content_policy_error(error_msg)
-                    or error_msg == "Failed to obtain reCAPTCHA token for image upload"
-                    or is_local_upload_verification_error(error_msg)
-                ):
-                    await self.token_manager.record_error(token.id)
+                if token and self._should_count_token_error(error_msg) and not generation_result.get("account_error_recorded"):
+                    await self.token_manager.record_generation_error(token.id, error_msg)
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
@@ -2090,8 +2110,8 @@ class GenerationHandler:
             error_msg = f"Не удалось выполнить генерацию: {str(e)}"
             debug_logger.log_error(f"[GENERATION] 生成失败: {error_msg}")
             if token:
-                if self._should_count_token_error(e):
-                    await self.token_manager.record_error(token.id)
+                if self._should_count_token_error(e) and not generation_result.get("account_error_recorded"):
+                    await self.token_manager.record_generation_error(token.id, str(e))
                 else:
                     debug_logger.log_info(
                         f"[GENERATION] 跳过 token 错误计数: token_id={token.id}, reason={str(e)[:200]}"
@@ -2119,7 +2139,10 @@ class GenerationHandler:
             )
             if stream:
                 yield self._create_stream_chunk(f"Ошибка: {error_msg}\n")
-            yield self._create_error_response(error_msg, status_code=500)
+            yield self._create_error_response(
+                error_msg, status_code=500, account=token,
+                code=("outcome_unknown" if getattr(e, "outcome_unknown", False) or getattr(e, "submission_uncertain", False) else getattr(e, "code", None)),
+            )
         finally:
             if pending_token_state.get("active") and token and self.load_balancer:
                 await self.load_balancer.release_pending(
@@ -2144,6 +2167,10 @@ class GenerationHandler:
         """
         if is_flow_content_policy_error(error) or is_local_upload_verification_error(error):
             return False
+        if getattr(error, "code", None) in {"account_cooldown", "account_unavailable"}:
+            return False
+        if flow_public_error_code(error).startswith("PUBLIC_ERROR_UNUSUAL_ACTIVITY"):
+            return True
         error_text = str(error or "").strip().lower()
         if not error_text:
             return True
@@ -2153,8 +2180,6 @@ class GenerationHandler:
             "recaptcha evaluation failed",
             "recaptcha 验证失败",
             "recaptcha 错误",
-            "public_error_unusual_activity",
-            "too much traffic",
             "error_no_slot_available",
             "打码服务资源不足",
             "打码服务资源阻塞",
@@ -3471,7 +3496,7 @@ class GenerationHandler:
                     self._mark_generation_failed(generation_result, error_msg)
                     if stream:
                         yield self._create_stream_chunk(f"Ошибка: {error_msg}\n")
-                    yield self._create_error_response(error_msg, status_code=502)
+                    yield self._create_error_response(error_msg, status_code=502, code="outcome_unknown")
                     return
                 continue
 
@@ -3482,7 +3507,7 @@ class GenerationHandler:
             error_msg = f"Время ожидания видео истекло: генерация не завершилась за {int(poll_budget_seconds)} с"
         await self._fail_video_task(operations, error_msg)
         self._mark_generation_failed(generation_result, error_msg)
-        yield self._create_error_response(error_msg, status_code=504)
+        yield self._create_error_response(error_msg, status_code=504, code="outcome_unknown")
 
     # ========== 响应格式化 ==========
 
@@ -3558,7 +3583,9 @@ class GenerationHandler:
 
         return json.dumps(response, ensure_ascii=False)
 
-    def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
+    def _create_error_response(
+        self, error_message: str, status_code: int = 500, code: Optional[str] = None, account=None,
+    ) -> str:
         """创建错误响应"""
         import json
 
@@ -3568,10 +3595,13 @@ class GenerationHandler:
                 "type": "server_error"
                 if status_code >= 500
                 else "invalid_request_error",
-                "code": "generation_failed",
+                "code": code or flow_public_error_code(error_message) or "generation_failed",
                 "status_code": status_code,
             }
         }
+
+        if account is not None:
+            error["flow_studio"] = {"account": {"id": account.id, "email": account.email}}
 
         return json.dumps(error, ensure_ascii=False)
 

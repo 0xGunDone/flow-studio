@@ -28,9 +28,9 @@ app.whenReady().then(async()=>{
  const {createRecoveryManager}=require('./recovery.cjs');
  recoveryManager=createRecoveryManager({chromeDataDir:path.join(app.getPath('appData'),'Google/Chrome'),chromePath,listAccounts:()=>runtime.refreshAccounts(),verifyAccount:(id,options)=>runtime.checkAccount(id,options),onState:onLoginState});
  accountManager={
-  addAccount(){if(accountTask||shutdownTask)throw new Error('Дождитесь завершения действия с аккаунтами.');recoveryManager.cancel();return managedAccounts.addAccount();},
+  addAccount(){if(accountTask||shutdownTask||runtime.retryTask)throw new Error('Дождитесь завершения действия с аккаунтами.');recoveryManager.cancel();return managedAccounts.addAccount();},
   async reconnectAccount(id){
-   if(accountTask||shutdownTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
+   if(accountTask||shutdownTask||runtime.retryTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
    managedAccounts.cancelLogin();
    if(await managedAccounts.hasAccountProfile(id)){recoveryManager.cancel();return managedAccounts.reconnectAccount(id);}
    return await recoveryManager.begin(id)||managedAccounts.reconnectAccount(id);
@@ -70,7 +70,7 @@ app.whenReady().then(async()=>{
  handle('openFlow',async()=>{await shell.openExternal('https://flow.google.com/');return {opened:true};});
  handle('retryStartup',async()=>({...await runtime.start(),login:loginState}));
  const accountAction=fn=>{
-  if(accountTask||shutdownTask||runtime.closing)throw new Error('Дождитесь завершения действия с аккаунтами.');
+  if(accountTask||shutdownTask||runtime.closing||runtime.retryTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
   if(['opening','waiting','syncing'].includes(loginState?.state))throw new Error('Сначала завершите или отмените вход в Google.');
   runtime.accountActionPending=true;
   accountTask=Promise.resolve().then(fn).finally(()=>{accountTask=null;runtime.accountActionPending=false;});return accountTask;
@@ -78,6 +78,12 @@ app.whenReady().then(async()=>{
  handle('getProviderSettings',()=>runtime.getProviderSettings());
  handle('saveTwoCaptchaKey',key=>accountAction(()=>runtime.saveTwoCaptchaKey(key)));
  handle('generate',input=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.generate(input);});
+ handle('retryGeneration',input=>{
+  if(accountTask||shutdownTask||runtime.closing)throw new Error('Дождитесь завершения действия с аккаунтами.');
+  if(['opening','waiting','syncing'].includes(loginState?.state))throw new Error('Сначала завершите или отмените вход в Google.');
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['jobId','requestId'].includes(key))||typeof input.jobId!=='string'||!input.jobId||input.jobId.length>128||typeof input.requestId!=='string'||!input.requestId.trim()||input.requestId.length>128)throw new Error('Неверные параметры повтора.');
+  return runtime.retryGeneration({jobId:input.jobId,requestId:input.requestId});
+ });
  handle('refreshAccounts',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.refreshAccounts();});
  handle('addAccount',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return accountManager.addAccount();});
  handle('reconnectAccount',id=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');if(!runtime.accounts.some(a=>a.id===id))throw new Error('Аккаунт не найден');return accountManager.reconnectAccount(id);});
@@ -88,6 +94,7 @@ app.whenReady().then(async()=>{
   return runtime.checkEnabledAccounts({checkAccount});
  }));
  handle('setAccountActive',(id,enabled)=>accountAction(()=>runtime.setAccountActive(id,enabled)));
+ handle('clearCooldown',id=>accountAction(()=>runtime.clearCooldown(id)));
  handle('deleteAccount',id=>accountAction(async()=>{
   if(!Number.isSafeInteger(id)||id<=0)throw new Error('Аккаунт не найден.');
   if(runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед удалением аккаунта.');

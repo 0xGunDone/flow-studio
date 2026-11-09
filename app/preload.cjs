@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('flowStudio',{
   getProviderSettings:()=>ipcRenderer.invoke('studio:getProviderSettings'),
   saveTwoCaptchaKey:key=>ipcRenderer.invoke('studio:saveTwoCaptchaKey',key),
   generate:input=>ipcRenderer.invoke('studio:generate',input),
+  retryGeneration:input=>ipcRenderer.invoke('studio:retryGeneration',input),
   pickImages:options=>ipcRenderer.invoke('studio:pickImages',options),
   dropMedia:async(files,options={})=>{
     if(!Array.isArray(files))throw new Error('Перетащите файлы с диска.');
@@ -23,6 +24,7 @@ contextBridge.exposeInMainWorld('flowStudio',{
   checkAccount:id=>ipcRenderer.invoke('studio:checkAccount',id),
   checkEnabledAccounts:()=>ipcRenderer.invoke('studio:checkEnabledAccounts'),
   setAccountActive:(id,enabled)=>ipcRenderer.invoke('studio:setAccountActive',id,enabled),
+  clearCooldown:id=>ipcRenderer.invoke('studio:clearCooldown',id),
   deleteAccount:id=>ipcRenderer.invoke('studio:deleteAccount',id),
   cancelLogin:()=>ipcRenderer.invoke('studio:cancelLogin'),
   completeLogin:()=>ipcRenderer.invoke('studio:completeLogin'),

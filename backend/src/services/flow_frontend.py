@@ -37,9 +37,9 @@ def is_flow_content_policy_error(error: Any) -> bool:
 def is_terminal_flow_public_error(error: Any) -> bool:
     error_text = str(error or "")
     code = flow_public_error_code(error_text)
-    return bool(code) and not code.startswith("PUBLIC_ERROR_UNUSUAL_ACTIVITY") and not (
+    return bool(code) and (code.startswith("PUBLIC_ERROR_UNUSUAL_ACTIVITY") or not (
         "429" in error_text or "too many requests" in error_text.lower()
-    )
+    ))
 
 
 def flow_public_error_message(error: Any, media_kind: str = "видео") -> str:
@@ -58,6 +58,11 @@ def flow_public_error_message(error: Any, media_kind: str = "видео") -> str
             "Сработала проверка ограничений на изображение известных людей."
         ),
     }.get(code, "Сервис не сообщил причину отказа.")
+    if code.startswith("PUBLIC_ERROR_UNUSUAL_ACTIVITY"):
+        detail = (
+            "Google ограничил запросы этого аккаунта. Автоматическая повторная отправка остановлена. "
+            "Локальный cooldown не снимает ограничение Google."
+        )
     return (
         f"Google Flow отклонил создание {media_kind} ({code}). {detail} "
         "Проверьте сообщение этой задачи в веб-версии Flow."
@@ -939,39 +944,35 @@ class FlowFrontendMixin:
         if at_token:
             request_fields["at"] = at_token
         request_body = urlencode(request_fields)
-        response_text = await self._make_text_request(
-            method="POST",
-            url=url,
-            headers=headers,
-            raw_body=request_body,
-            timeout=timeout,
-            apply_default_client_headers=False,
-            return_error_response=True,
-            redact_sensitive_logs=True,
-            cookie_jar=cookie_jar,
-            impersonate=self._resolve_runtime_impersonate(),
-        )
+        paid_submission = rpc_id in {"ogiZ0b", "YhhmEf", "MZZa6b", "nprQif", "eb1hJf", "fZytfe", "p0UkFb", "jIps6", "SPrCad"}
+
+        async def post_rpc(body):
+            try:
+                return await self._make_text_request(
+                    method="POST", url=url, headers=headers, raw_body=body,
+                    timeout=timeout, apply_default_client_headers=False,
+                    return_error_response=True, redact_sensitive_logs=True,
+                    cookie_jar=cookie_jar, impersonate=self._resolve_runtime_impersonate(),
+                )
+            except Exception as error:
+                if paid_submission and not flow_public_error_code(error):
+                    error.outcome_unknown = True
+                raise
+
+        response_text = await post_rpc(request_body)
         xsrf_match = re.search(r'\["xsrf"\s*,\s*"((?:\\.|[^"\\])*)"', response_text)
         if xsrf_match:
             request_fields["at"] = json.loads('"' + xsrf_match.group(1) + '"')
-            response_text = await self._make_text_request(
-                method="POST",
-                url=url,
-                headers=headers,
-                raw_body=urlencode(request_fields),
-                timeout=timeout,
-                apply_default_client_headers=False,
-                return_error_response=True,
-                redact_sensitive_logs=True,
-                cookie_jar=cookie_jar,
-                impersonate=self._resolve_runtime_impersonate(),
-            )
+            response_text = await post_rpc(urlencode(request_fields))
 
         frames = self._parse_batchexecute_frames(response_text)
         self._raise_batchexecute_error(frames, rpc_id)
         payload = self._extract_batchexecute_payload(frames, rpc_id)
         if payload is None:
-            raise RuntimeError(f"Flow frontend RPC returned no payload: rpc={rpc_id}")
+            error = RuntimeError(f"Flow frontend RPC returned no payload: rpc={rpc_id}")
+            if paid_submission:
+                error.outcome_unknown = True
+            raise error
         if session_context is not None:
             session_context["google_cookies"] = _export_cookie_jar(
                 cookie_jar.jar, cookie_storage or cookie_header

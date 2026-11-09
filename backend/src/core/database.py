@@ -4,7 +4,7 @@ import asyncio
 import aiosqlite
 import json
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
@@ -537,6 +537,9 @@ class Database:
                     ("last_st_refresh_result", "TEXT DEFAULT ''"),
                     ("ban_reason", "TEXT"),  # 禁用原因
                     ("banned_at", "TIMESTAMP"),  # 禁用时间
+                    ("generation_cooldown_until", "TIMESTAMP"),
+                    ("generation_last_error", "TEXT DEFAULT ''"),
+                    ("generation_last_error_at", "TIMESTAMP"),
                 ]
 
                 for col_name, col_type in columns_to_add:
@@ -774,7 +777,10 @@ class Database:
                     last_st_refresh_at TIMESTAMP,
                     last_st_refresh_result TEXT DEFAULT '',
                     ban_reason TEXT,
-                    banned_at TIMESTAMP
+                    banned_at TIMESTAMP,
+                    generation_cooldown_until TIMESTAMP,
+                    generation_last_error TEXT DEFAULT '',
+                    generation_last_error_at TIMESTAMP
                 )
             """)
 
@@ -1351,6 +1357,39 @@ class Database:
                 query = f"UPDATE tokens SET {', '.join(updates)} WHERE id = ?"
                 await db.execute(query, params)
                 await db.commit()
+
+    async def set_generation_cooldown(self, token_id: int, error: str):
+        """Persist a 30-minute pause, preserving any active Google restriction."""
+        now = datetime.now(timezone.utc)
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                UPDATE tokens
+                SET generation_cooldown_until = ?, generation_last_error = ?, generation_last_error_at = ?
+                WHERE id = ? AND NOT (
+                    COALESCE(generation_last_error, '') LIKE '%PUBLIC_ERROR_UNUSUAL_ACTIVITY%'
+                    AND COALESCE(julianday(generation_cooldown_until) > julianday(?), 0)
+                )
+                """,
+                (now + timedelta(minutes=30), str(error), now, token_id, now),
+            )
+            await db.commit()
+
+    async def clear_generation_cooldown(self, token_id: int) -> bool:
+        """Clear a local pause atomically without bypassing an active restriction."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                UPDATE tokens SET generation_cooldown_until = NULL
+                WHERE id = ? AND NOT (
+                    COALESCE(generation_last_error, '') LIKE '%PUBLIC_ERROR_UNUSUAL_ACTIVITY%'
+                    AND COALESCE(julianday(generation_cooldown_until) > julianday(?), 0)
+                )
+                """,
+                (token_id, datetime.now(timezone.utc)),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def update_token_if_cookie_matches(
         self, token_id: int, expected_cookies: str, **kwargs

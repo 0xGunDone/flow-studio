@@ -39,3 +39,9 @@ test('provider settings bridge exposes only fixed IPC methods on flowStudio',asy
  await h.api.saveTwoCaptchaKey('synthetic-key',{captcha_method:'twocaptcha'});
  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:getProviderSettings'],['studio:saveTwoCaptchaKey','synthetic-key']]);
 });
+
+test('retry and cooldown reset bridge use fixed IPC without arbitrary endpoints',async()=>{
+ const h=loadPreload(()=>{});
+ await h.api.retryGeneration({jobId:'original',requestId:'click-id'});await h.api.clearCooldown(7,'/arbitrary');
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:retryGeneration',{jobId:'original',requestId:'click-id'}],['studio:clearCooldown',7]]);
+});

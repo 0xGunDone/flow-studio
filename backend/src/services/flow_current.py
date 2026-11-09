@@ -44,6 +44,23 @@ class CurrentFlowClientMixin:
             token_id=token_id,
         )
 
+    async def _assert_account_generation_ready(self, token_id: Optional[int]):
+        """Recheck queued work immediately before a paid submission."""
+        if token_id is None or self.db is None:
+            return
+        account = await self.db.get_token(token_id)
+        if account is None or not account.is_active:
+            error = RuntimeError(f"Аккаунт #{token_id} недоступен для генерации")
+            error.code = "account_unavailable"
+            raise error
+        if account.generation_cooldown_remaining_seconds:
+            error = RuntimeError(
+                f"Аккаунт {account.email} на cooldown после ошибки генерации. "
+                f"Последняя ошибка: {account.generation_last_error}"
+            )
+            error.code = "account_cooldown"
+            raise error
+
     @staticmethod
     def _normalize_media_name(media_name: str) -> str:
         normalized = str(media_name or "").strip().rstrip("/")
@@ -448,6 +465,7 @@ class CurrentFlowClientMixin:
             model_name = "BELUGA"
         if model_name not in self.CURRENT_IMAGE_MODELS:
             raise ValueError(f"Unsupported Flow image model: {model_name}")
+        await self._assert_account_generation_ready(token_id)
         await self._frontend_cookie(google_cookies, token_id)
         max_retries = max(1, int(self._get_runtime_config().flow_max_retries or 1))
         trace: Dict[str, Any] = {"max_retries": max_retries, "generation_attempts": []}
@@ -483,6 +501,7 @@ class CurrentFlowClientMixin:
                 if progress_callback:
                     await progress_callback("submitting_image", 48)
                 session_id = str(uuid.uuid4()).upper()
+                await self._assert_account_generation_ready(token_id)
                 payload = await self._current_rpc(
                     rpc_id="ogiZ0b",
                     argument=self._build_frontend_image_generation_argument(
@@ -514,6 +533,8 @@ class CurrentFlowClientMixin:
                 attempt["error"] = str(error)[:240]
                 attempt["duration_ms"] = int((time.time() - started_at) * 1000)
                 trace["generation_attempts"].append(attempt)
+                if getattr(error, "code", None) in {"account_cooldown", "account_unavailable"}:
+                    raise
                 if is_terminal_flow_public_error(error):
                     raise RuntimeError(
                         flow_public_error_message(error, "изображения")
@@ -523,6 +544,7 @@ class CurrentFlowClientMixin:
                     or bool(getattr(error, "outcome_unknown", False))
                     or bool(getattr(error, "submission_uncertain", False))
                 ):
+                    error.outcome_unknown = True
                     raise
                 retry_handler = getattr(
                     self, "_handle_retryable_generation_error", None
@@ -610,11 +632,13 @@ class CurrentFlowClientMixin:
         end_frame: Optional[int] = None,
         resolution: Optional[str] = None,
     ) -> dict:
+        await self._assert_account_generation_ready(token_id)
         await self._frontend_cookie(google_cookies, token_id)
         max_retries = 1 if mode == "edit" else max(1, int(self._get_runtime_config().flow_max_retries or 1))
         last_error: Optional[Exception] = None
         for retry_attempt in range(max_retries):
             browser_id = None
+            submission_accepted = False
             try:
                 token, browser_id = await self._get_recaptcha_token(
                     project_id,
@@ -642,6 +666,7 @@ class CurrentFlowClientMixin:
                     end_frame=end_frame,
                     resolution=resolution,
                 )
+                await self._assert_account_generation_ready(token_id)
                 payload = await self._current_rpc(
                     rpc_id=rpc_id,
                     argument=argument,
@@ -650,6 +675,7 @@ class CurrentFlowClientMixin:
                     project_id=project_id,
                     timeout=max(self._get_video_submit_timeout(), 90),
                 )
+                submission_accepted = True
                 return self._normalize_frontend_video_submission(
                     payload,
                     project_id=project_id,
@@ -659,8 +685,13 @@ class CurrentFlowClientMixin:
                 )
             except Exception as error:
                 last_error = error
+                if getattr(error, "code", None) in {"account_cooldown", "account_unavailable"}:
+                    raise
                 if is_terminal_flow_public_error(error):
                     raise RuntimeError(flow_public_error_message(error)) from error
+                if submission_accepted or getattr(error, "outcome_unknown", False) or getattr(error, "submission_uncertain", False):
+                    error.outcome_unknown = True
+                    raise
                 # MODEL_ACCESS_DENIED 为账号权限拒绝，重试不会改变结果
                 if "MODEL_ACCESS_DENIED" in str(error):
                     raise

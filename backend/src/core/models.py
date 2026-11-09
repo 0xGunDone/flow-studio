@@ -1,8 +1,9 @@
 """Data models for Flow2API"""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Union, Any, Literal
-from datetime import datetime
+from datetime import datetime, timezone
+import math
 
 
 class Token(BaseModel):
@@ -58,6 +59,25 @@ class Token(BaseModel):
     # 429禁用相关
     ban_reason: Optional[str] = None  # "429_rate_limit", "manual_disabled", or None
     banned_at: Optional[datetime] = None  # 禁用时间
+
+    generation_cooldown_until: Optional[datetime] = None
+    generation_last_error: str = ""
+    generation_last_error_at: Optional[datetime] = None
+
+    @property
+    def generation_cooldown_remaining_seconds(self) -> int:
+        until = self.generation_cooldown_until
+        if until is None:
+            return 0
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return max(0, math.ceil((until - datetime.now(timezone.utc)).total_seconds()))
+
+    @property
+    def generation_cooldown_reset_allowed(self) -> bool:
+        return not self.generation_cooldown_remaining_seconds or (
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY" not in self.generation_last_error
+        )
 
 
 class Project(BaseModel):
@@ -324,6 +344,7 @@ class ChatCompletionRequest(BaseModel):
     image: Optional[str] = None  # Base64 encoded image (deprecated, use messages)
     video: Optional[str] = None  # Base64 encoded video (deprecated)
     video_references: Optional[List[dict]] = None  # App-staged UUID files, never arbitrary paths or URLs.
+    flow_studio_account_id: Optional[int] = Field(default=None, strict=True, gt=0)
     # Gemini extension parameters (from extra_body or top-level)
     generationConfig: Optional[GenerationConfigParam] = None
     contents: Optional[List[Any]] = None  # Gemini native contents

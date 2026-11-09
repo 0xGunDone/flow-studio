@@ -23,7 +23,8 @@
 - Up to 7 image references for Omni; a separate Omni Edit model accepts a source video and up to 5 images.
 - Dedicated start and end frame slots with Finder drag and drop or file selection; a separate ingredient list with previews, arrow controls, and individual removal.
 - Multiple Google accounts with separate managed Chrome profiles and explicit reauthentication.
-- Local previews, export, Finder integration, and the latest 100 jobs in persistent history.
+- Local previews, export, Finder integration, and the latest 100 jobs in persistent history, with submitting account identity and manual replay from cached inputs.
+- A persistent 30-minute account cooldown after attributed failures, countdown and last error, with local reset controls; Google restrictions remain in force.
 - A local MCP server exposing 14 tools for models, jobs, media, and accounts.
 - Bundled Flow2API source, built into a local Docker image on first launch.
 

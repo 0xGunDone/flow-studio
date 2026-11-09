@@ -173,6 +173,7 @@ class LoadBalancer:
         reserve: bool = False,
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
+        token_id: Optional[int] = None,
     ) -> Optional[Token]:
         """
         Select a token using load-aware balancing
@@ -199,6 +200,8 @@ class LoadBalancer:
         )
 
         active_tokens = await self.token_manager.get_active_tokens()
+        if token_id is not None:
+            active_tokens = [token for token in active_tokens if token.id == token_id]
         debug_logger.log_info(
             f"[LOAD_BALANCER] 获取到 {len(active_tokens)} 个活跃Token"
         )
@@ -212,6 +215,9 @@ class LoadBalancer:
         required_tier = get_required_paygate_tier_for_model(model)
 
         for token in active_tokens:
+            if token.generation_cooldown_remaining_seconds:
+                filtered_reasons[token.id] = "Аккаунт на cooldown после ошибки генерации"
+                continue
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
                 filtered_reasons[token.id] = (
@@ -334,12 +340,12 @@ class LoadBalancer:
         # 只为候选列表中真正尝试到的 token 做 AT 校验，避免每次请求把所有 token 全扫一遍
         for item in available_tokens:
             token = item["token"]
-            token_id = token.id
+            candidate_id = token.id
 
             token = await self.token_manager.ensure_valid_token(token)
             if not token:
                 debug_logger.log_info(
-                    f"[LOAD_BALANCER] 跳过 Token {token_id}: AT无效或已过期"
+                    f"[LOAD_BALANCER] 跳过 Token {candidate_id}: AT无效或已过期"
                 )
                 continue
 
@@ -373,9 +379,18 @@ class LoadBalancer:
         for_image_generation: bool = False,
         for_video_generation: bool = False,
         model: Optional[str] = None,
+        token_id: Optional[int] = None,
     ) -> Optional[str]:
         """给出更明确的“无可用账号”原因，优先用于分辨率/tier 档位提示。"""
         active_tokens = await self.token_manager.get_active_tokens()
+        if token_id is not None:
+            all_tokens = await self.token_manager.get_all_tokens()
+            requested = next((token for token in all_tokens if token.id == token_id), None)
+            if requested is None:
+                return f"Аккаунт #{token_id} не найден. Повторная отправка через другой аккаунт не выполнялась."
+            if not requested.is_active:
+                return f"Аккаунт {requested.email} отключён. Включите его вручную перед повторной отправкой."
+            active_tokens = [requested]
         if not active_tokens:
             tokens = await self.token_manager.get_all_tokens()
             if not tokens:
@@ -410,5 +425,14 @@ class LoadBalancer:
                 return "当前有符合档位的账号，但图片生成功能已全部禁用。"
             if for_video_generation:
                 return "当前有符合档位的账号，但视频生成功能已全部禁用。"
+
+        cooling = [token for token in capability_tokens if token.generation_cooldown_remaining_seconds]
+        if capability_tokens and len(cooling) == len(capability_tokens):
+            next_token = min(cooling, key=lambda token: token.generation_cooldown_remaining_seconds)
+            minutes = (next_token.generation_cooldown_remaining_seconds + 59) // 60
+            return (
+                f"Аккаунт {next_token.email} на cooldown после ошибки генерации. "
+                f"Осталось {minutes} мин. Последняя ошибка: {next_token.generation_last_error}"
+            )
 
         return None
