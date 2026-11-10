@@ -1722,6 +1722,7 @@ class GenerationHandler:
             "/"
         ) or None
         request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        cookie_scope_started = False
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1944,6 +1945,11 @@ class GenerationHandler:
             )
 
             # 5. 根据类型处理
+            if hasattr(self.flow_client, "begin_flow_cookie_scope"):
+                self.flow_client.begin_flow_cookie_scope(
+                    token_id=token.id, expected_email=(token.login_account or token.email or ""),
+                )
+                cookie_scope_started = True
             generation_pipeline_started_at = time.time()
             if generation_type == "image":
                 debug_logger.log_info(f"[GENERATION] 开始图片生成流程...")
@@ -2144,6 +2150,8 @@ class GenerationHandler:
                 code=("outcome_unknown" if getattr(e, "outcome_unknown", False) or getattr(e, "submission_uncertain", False) else getattr(e, "code", None)),
             )
         finally:
+            if cookie_scope_started:
+                self.flow_client.clear_flow_cookie_scope()
             if pending_token_state.get("active") and token and self.load_balancer:
                 await self.load_balancer.release_pending(
                     token.id,

@@ -5,7 +5,9 @@ batchexecute.  This mixin overrides every runtime path that previously called
 the retired Labs tRPC and AI Sandbox REST endpoints.
 """
 
+import asyncio
 import base64
+import contextvars
 import re
 import sys
 import time
@@ -17,6 +19,7 @@ from ..core.logger import debug_logger
 from .browser_cookie_utils import validate_flow_cookie_storage
 from .flow_upload_errors import FLOW_UPLOAD_VERIFICATION_EMPTY
 from .flow_frontend import (
+    FlowFrontendAuthError,
     flow_public_error_code,
     flow_public_error_message,
     is_terminal_flow_public_error,
@@ -24,6 +27,25 @@ from .flow_frontend import (
 
 class CurrentFlowClientMixin:
     FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
+
+    def begin_flow_cookie_scope(self, *, token_id: Optional[int] = None, expected_email: str = ""):
+        """Keep server cookie rotation within one generation's owning task."""
+        if not hasattr(self, "_flow_cookie_scope_ctx"):
+            self._flow_cookie_scope_ctx = contextvars.ContextVar("flow_cookie_scope", default=None)
+        scope = {"owner": asyncio.current_task(), "email": expected_email.strip().casefold()}
+        if token_id is not None:
+            scope["token_id"] = token_id
+        self._flow_cookie_scope_ctx.set(scope)
+
+    def clear_flow_cookie_scope(self):
+        if hasattr(self, "_flow_cookie_scope_ctx"):
+            self._flow_cookie_scope_ctx.set(None)
+
+    def _get_flow_cookie_scope(self):
+        context = getattr(self, "_flow_cookie_scope_ctx", None)
+        scope = context.get() if context is not None else None
+        return scope if scope and scope["owner"] is asyncio.current_task() else None
+
     @staticmethod
     def _frontend_paygate_tier(payload: Any) -> str:
         # GetCredits field 4 is serviceTier; a positive credit balance proves no subscription.
@@ -138,7 +160,32 @@ class CurrentFlowClientMixin:
             google_cookies=google_cookies,
             token_id=token_id,
         )
-        return await self._call_flow_frontend_rpc(
+        scope = self._get_flow_cookie_scope() if session_context is None else None
+        baseline = None
+        caller_cookies = cookie_storage
+        if scope is not None:
+            if scope.get("token_id", token_id) != token_id:
+                raise FlowFrontendAuthError("Аккаунт Flow изменился во время генерации.")
+            expected_email = scope.get("email", "")
+            if token_id is not None and self.db is not None:
+                account = await self.db.get_token(token_id)
+                if account is None or not account.is_active or not str(account.google_cookies or "").strip():
+                    raise FlowFrontendAuthError("Сессия аккаунта Flow больше недоступна.")
+                account_email = str(account.login_account or account.email or "").strip().casefold()
+                if not account_email or (expected_email and expected_email != account_email):
+                    raise FlowFrontendAuthError("Аккаунт Flow изменился во время генерации.")
+                expected_email = account_email
+                baseline = str(account.google_cookies).strip()
+                if baseline == scope.get("baseline") and cookie_storage in {scope.get("source"), scope.get("storage"), baseline}:
+                    cookie_storage = scope.get("storage", cookie_storage)
+                else:
+                    # The DB owns newer plugin pushes, including before the first RPC.
+                    cookie_storage = baseline
+            elif cookie_storage in {scope.get("source"), scope.get("storage")}:
+                cookie_storage = scope.get("storage", cookie_storage)
+            session_context = {"expected_email": expected_email}
+
+        payload = await self._call_flow_frontend_rpc(
             rpc_id=rpc_id,
             argument=argument,
             cookie_header="",
@@ -148,6 +195,24 @@ class CurrentFlowClientMixin:
             cookie_storage=cookie_storage,
             **({"session_context": session_context} if session_context is not None else {}),
         )
+        if scope is not None:
+            latest = session_context["google_cookies"]
+            if baseline is not None and latest != baseline:
+                try:
+                    if await self.db.update_token_if_cookie_matches(
+                        token_id, baseline, google_cookies=latest,
+                    ):
+                        baseline = latest
+                except Exception:
+                    # A local save must not discard an accepted paid RPC and cause a retry.
+                    debug_logger.log_warning("[FLOW_SESSION] Cookie rotation could not be saved locally.")
+            # Replace, never mutate: child tasks may inherit a ContextVar value.
+            self._flow_cookie_scope_ctx.set({
+                "owner": asyncio.current_task(), "token_id": token_id,
+                "source": caller_cookies, "storage": latest, "baseline": baseline,
+                "email": session_context["email"],
+            })
+        return payload
 
     async def validate_session(
         self, *, google_cookies: str, expected_email: str,

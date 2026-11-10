@@ -43,7 +43,7 @@ jobs:
       - name: Test backend session, transport and generation behavior
         working-directory: backend
         run: |
-          for suite in test_generation_cooldown test_flow_public_errors test_flow_client_upload test_omni_1_2_support test_current_video_catalog test_session_check test_plugin_session_import test_unavailable_accounts test_flow_frontend_transport test_video_asset_resolution test_video_poll_credentials test_flow_image_generation_args; do
+          for suite in test_flow_cookie_continuity test_generation_cooldown test_flow_public_errors test_flow_client_upload test_omni_1_2_support test_current_video_catalog test_session_check test_plugin_session_import test_unavailable_accounts test_flow_frontend_transport test_video_asset_resolution test_video_poll_credentials test_flow_image_generation_args; do
             python -m unittest discover -s tests -p "${suite}.py" -v
           done
       - name: Test backend model UI

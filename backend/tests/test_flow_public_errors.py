@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.core.models import Token
 from src.services.flow_client import FlowClient
-from src.services.flow_frontend import FlowFrontendMixin
+from src.services.flow_frontend import FlowFrontendMixin, flow_public_error_message
 from src.services.generation_handler import GenerationHandler
 from src.services.token_manager import TokenManager
 
@@ -77,6 +77,21 @@ class PublicErrorSubmissionTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, code.split()[0]):
                     await self.video()
                 self.client._current_rpc.assert_awaited_once()
+
+    def test_unusual_activity_preserves_rpc_without_claiming_account_block(self):
+        message = flow_public_error_message(
+            "Flow frontend RPC rejected: rpc=MZZa6b, error=PUBLIC_ERROR_UNUSUAL_ACTIVITY"
+        )
+        self.assertIn("rpc=MZZa6b", message)
+        self.assertIn("PUBLIC_ERROR_UNUSUAL_ACTIVITY", message)
+        self.assertIn("не подтверждает блокировку аккаунта", message)
+        self.assertNotIn("Google ограничил запросы этого аккаунта", message)
+        self.assertNotIn("SID=", flow_public_error_message(
+            "rpc=MZZa6b, error=PUBLIC_ERROR_UNUSUAL_ACTIVITY SID=synthetic-secret"
+        ))
+        self.assertNotIn("rpc=untrusted", flow_public_error_message(
+            "rpc=untrusted/path, error=PUBLIC_ERROR_UNUSUAL_ACTIVITY"
+        ))
 
     def test_shared_retry_distinguishes_public_rejection_from_transient_error(self):
         for error in (

@@ -44,6 +44,8 @@ def is_terminal_flow_public_error(error: Any) -> bool:
 
 def flow_public_error_message(error: Any, media_kind: str = "видео") -> str:
     code = flow_public_error_code(error) or str(error or "")
+    rpc_match = re.search(r"\brpc=([A-Za-z0-9]{1,16})(?=[,;\s)]|$)", str(error or ""))
+    technical = f"rpc={rpc_match.group(1)}, {code}" if rpc_match else code
     detail = {
         "PUBLIC_ERROR_MINOR": (
             "Возможна возрастная проверка содержимого. "
@@ -60,11 +62,12 @@ def flow_public_error_message(error: Any, media_kind: str = "видео") -> str
     }.get(code, "Сервис не сообщил причину отказа.")
     if code.startswith("PUBLIC_ERROR_UNUSUAL_ACTIVITY"):
         detail = (
-            "Google ограничил запросы этого аккаунта. Автоматическая повторная отправка остановлена. "
-            "Локальный cooldown не снимает ограничение Google."
+            "Google отклонил эту отправку при проверке активности. Сам код не подтверждает блокировку аккаунта; "
+            "генерация в обычном Flow может оставаться доступной. Автоматическая повторная отправка остановлена. "
+            "Локальная пауза предотвращает повторные отказы, но не исправляет причину."
         )
     return (
-        f"Google Flow отклонил создание {media_kind} ({code}). {detail} "
+        f"Google Flow отклонил создание {media_kind} ({technical}). {detail} "
         "Проверьте сообщение этой задачи в веб-версии Flow."
     )
 
