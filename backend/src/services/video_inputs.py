@@ -29,7 +29,7 @@ async def read_video_reference(reference: dict, *, max_duration_seconds: int = 1
             raise ValueError("Видео должно быть не больше 100 МБ.")
         process = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
-            "-show_entries", "format=duration:stream=codec_type,duration",
+            "-show_entries", "format=duration:stream=codec_type,duration,width,height",
             "-of", "json", f"/proc/self/fd/{fd}", pass_fds=(fd,),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -46,6 +46,9 @@ async def read_video_reference(reference: dict, *, max_duration_seconds: int = 1
         duration = float(metadata.get("format", {}).get("duration") or (videos[0].get("duration") if videos else 0) or 0)
         if not videos or not math.isfinite(duration) or not 0 < duration <= max_duration_seconds + 0.02:
             raise ValueError(f"Omni Edit принимает видео длительностью до {max_duration_seconds} секунд. Обрежьте исходный файл.")
+        width, height = videos[0].get("width"), videos[0].get("height")
+        if any(isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 32768 for value in (width, height)):
+            raise ValueError("Не удалось подтвердить ширину и высоту исходного видео.")
         with os.fdopen(os.dup(fd), "rb") as source:
             source.seek(0)
             data = source.read(100 * 1024 * 1024 + 1)
@@ -53,6 +56,6 @@ async def read_video_reference(reference: dict, *, max_duration_seconds: int = 1
             raise ValueError("Видеофайл изменился во время чтения.")
         return {"bytes": data, "mime_type": MIMES[extension],
                 "filename": str(reference.get("filename") or identifier)[:256],
-                "duration_seconds": duration, "end_frame": min(max_duration_seconds * 30, max(1, round(duration * 30)))}
+                "duration_seconds": duration, "width": width, "height": height, "end_frame": min(max_duration_seconds * 30, max(1, round(duration * 30)))}
     finally:
         os.close(fd)

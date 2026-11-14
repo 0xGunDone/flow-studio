@@ -4,6 +4,8 @@ const fs=require('node:fs/promises');
 const path=require('node:path');
 const {randomBytes,timingSafeEqual}=require('node:crypto');
 const {modelSettings,PREFERRED_VIDEO_FAMILY}=require('./renderer.js');
+const {supportsVeoModel}=require('./browser-video-models.cjs');
+const {supportsImageModel}=require('./browser-images.cjs');
 const {importMedia}=require('./input-files.cjs');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const methods=['image','text','ingredients','frames','edit','extend'];
@@ -18,7 +20,7 @@ function capabilities(model){
   const minVideos=method==='edit'?1:0,maxVideos=method==='edit'?info.maxVideos:0;
   inputsByMethod[method]={minImages,maxImages,minVideos,maxVideos,minReferences:minImages+minVideos,maxReferences:maxImages+maxVideos,supportsStartFrame:method==='frames',supportsEndFrame:method==='frames'&&maxImages>1,requiresSourceVideoId:method==='extend'};
  }
- return {id:model.id,description:info.label,kind:info.kind,mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
+ return {id:model.id,description:info.label,kind:info.kind,generationEngine:model.id==='omni-1.2-flash'||/^omni-1\.2-flash-(?:(?:i2v-)?(?:[3-9]|1[0-5])s-|edit-)(?:landscape|portrait)(?:-360p)?$/.test(model.id)||supportsVeoModel({model:model.id})||supportsImageModel({model:model.id})?'isolated-browser':'server',mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
 }
 function externalJob(job){
  const {requestHash,...result}=job;
@@ -63,6 +65,7 @@ function selection(runtime,params){
 }
 async function validatedInput(runtime,params){
  if(!params||typeof params!=='object'||Array.isArray(params))throw new Error('Параметры должны быть объектом.');
+ if(Object.hasOwn(params,'accountId')&&(!Number.isSafeInteger(params.accountId)||params.accountId<=0))throw failure('accountId должен быть положительным целым числом.');
  if(typeof params.prompt!=='string'||!params.prompt.trim()||params.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
  const {model,method,info,settings}=selection(runtime,params),refs=params.referencePaths??[],videos=params.videoPaths??[];
  if(!Array.isArray(refs))throw new Error('referencePaths должен быть массивом путей.');
@@ -88,22 +91,28 @@ async function validatedInput(runtime,params){
  const images=media.slice(0,files.length).map(item=>item.dataUrl);
  const inputs=videos.length?{references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...videos.map(file=>({kind:'video',path:file}))]}:{images};
  const generateArguments={model:model.id,method,prompt:params.prompt};
- for(const key of ['referencePaths','videoPaths','startFramePath','endFramePath','sourceVideoId'])if(params[key]!==undefined)generateArguments[key]=params[key];
- return {input:{model:model.id,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId},preview:{valid:true,model:info,method,settings,inputs:{images:files.length,videos:videos.length,references:hasFrames?0:refs.length+videos.length,startFrame:params.startFramePath!==undefined,endFrame:params.endFramePath!==undefined,sourceVideo:hasSource},generateArguments,checks:{localFiles:'passed',videoDuration:videos.length?'checked_at_submission':'not_applicable',accountAccess:'not_checked',credits:'not_checked'}}};
+ for(const key of ['accountId','referencePaths','videoPaths','startFramePath','endFramePath','sourceVideoId'])if(params[key]!==undefined)generateArguments[key]=params[key];
+ return {input:{model:model.id,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId,...(params.accountId!==undefined?{accountId:params.accountId}:{})},preview:{valid:true,model:info,method,settings,inputs:{images:files.length,videos:videos.length,references:hasFrames?0:refs.length+videos.length,startFrame:params.startFramePath!==undefined,endFrame:params.endFramePath!==undefined,sourceVideo:hasSource},generateArguments,checks:{localFiles:'passed',videoDuration:videos.length?'checked_at_submission':'not_applicable',accountAccess:'not_checked',credits:'not_checked'}}};
 }
 async function generationInput(runtime,params){
+ if(params&&Object.hasOwn(params,'checkBrowser'))throw failure('checkBrowser доступен только для подготовки.');
  if(params?.confirmCreditSpend!==true)throw new Error('Генерация расходует кредиты. Требуется confirmCreditSpend:true для запроса пользователя.');
  if(typeof params.requestId!=='string'||!params.requestId.trim()||params.requestId.length>128)throw new Error('Укажите стабильный requestId длиной до 128 символов.');
  const {input}=await validatedInput(runtime,params);
  return {...input,requestId:params.requestId.trim()};
 }
-function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell}){
+function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell,checkIsolatedInputs,accountCheck=id=>runtime.checkAccount(id)}){
  const jobById=id=>{const job=runtime.jobs.find(j=>j.id===id);if(!job)throw new Error('Задача не найдена.');return job;};
+ const serializeJob=job=>{
+  const publicJob=runtime.publicJob?.(job),derived={};
+  for(const key of ['retryAvailable','retryBlockedReason','recoveryAvailable','recoveryBlockedReason'])if(publicJob&&Object.hasOwn(publicJob,key))derived[key]=publicJob[key];
+  return externalJob({...job,...derived});
+ };
  const ready=async()=>{await runtime.start();if(!runtime.ready)throw new Error(runtime.message);};
  return async function dispatch(method,params={}){
   switch(method){
    case 'status':
-    await ready();return {ready:runtime.ready,message:runtime.message,modelsCount:runtime.models.length,accounts:runtime.accounts,runningJobs:runtime.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,model:j.model,progress:j.progress})),countHistory:runtime.jobs.length,login:getLoginState(),apiVersion:2,features:['generation-settings','prepare-generation','explicit-methods']};
+    await ready();return {ready:runtime.ready,message:runtime.message,modelsCount:runtime.models.length,accounts:runtime.accounts,runningJobs:runtime.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,model:j.model,progress:j.progress,...(j.generationEngine?{generationEngine:j.generationEngine}:{})})),countHistory:runtime.jobs.length,login:getLoginState(),apiVersion:3,features:['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation']};
    case 'models':{
     await ready();let models=runtime.models.map(capabilities);
     if(params.kind)models=models.filter(m=>m.kind===params.kind);
@@ -114,23 +123,40 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
     return {models,note:'Каталог не гарантирует доступ на конкретном Google-тарифе. Ошибки доступа не переключают модель автоматически.'};
    }
    case 'prepare':{
-    await ready();return (await validatedInput(runtime,params)).preview;
+    if(!params||typeof params!=='object'||Array.isArray(params))throw failure('Параметры должны быть объектом.');
+    const {checkBrowser,...localParams}=params;
+    if(checkBrowser!==undefined&&typeof checkBrowser!=='boolean')throw failure('checkBrowser должен быть true или false.');
+    if(checkBrowser===true&&(!Number.isSafeInteger(localParams.accountId)||localParams.accountId<=0))throw failure('Проверка браузера требует явный accountId.');
+    await ready();const {input,preview}=await validatedInput(runtime,localParams);
+    if(checkBrowser!==true)return preview;
+    if(preview.model.generationEngine!=='isolated-browser')throw failure('Проверка браузера поддерживает доступные режимы Nano Banana, Omni 1.2 Flash и Veo 3.1 из текущего каталога.','BROWSER_MODEL_UNSUPPORTED');
+    if(typeof checkIsolatedInputs!=='function')throw failure('Проверка фонового браузера недоступна. Обновите приложение.','BROWSER_CHECK_UNAVAILABLE');
+    const checked=await checkIsolatedInputs({model:input.model,prompt:input.prompt,accountId:input.accountId,references:input.references||(input.images||[]).map(dataUrl=>({kind:'image',dataUrl}))});
+    if(checked?.ready!==true||checked.accountId!==input.accountId||checked.cleared!==true||checked.submitted!==false||checked.uploadedImages!==preview.inputs.images||checked.model!==undefined&&checked.model!==input.model||checked.uploadedVideos!==undefined&&checked.uploadedVideos!==preview.inputs.videos)throw failure('Браузер не подтвердил проверку и очистку подготовленного запроса.','BROWSER_CHECK_UNCONFIRMED');
+    const browserCheck=Object.fromEntries(['ready','accountId','accountEmail','projectURL','model','referenceCount','uploadedImages','submitted','cleared'].filter(key=>Object.hasOwn(checked,key)).map(key=>[key,checked[key]]));
+    if(typeof checked.email==='string'&&!browserCheck.accountEmail)browserCheck.accountEmail=checked.email;
+    browserCheck.uploadedVideos=preview.inputs.videos;
+    return {...preview,checks:{...preview.checks,browser:'passed',upload:preview.inputs.images||preview.inputs.videos?'passed':'not_applicable'},browserCheck};
    }
    case 'generate':{
     await ready();const input=await generationInput(runtime,params);
-    const {jobId}=runtime.generate(input);await runtime.persist();return {jobId,job:externalJob(jobById(jobId))};
+    const {jobId}=runtime.generate(input);await runtime.persist();return {jobId,job:serializeJob(jobById(jobId))};
    }
-   case 'job':return externalJob(jobById(params.jobId));
+   case 'job':return serializeJob(jobById(params.jobId));
+   case 'recover':{
+    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).length!==1||typeof params.jobId!=='string'||!params.jobId||params.jobId.length>128)throw failure('Для проверки результата укажите только jobId.');
+    await ready();const result=runtime.recoverGeneration(params.jobId);await runtime.persist();return {...result,job:serializeJob(jobById(result.jobId))};
+   }
    case 'wait':{
     const timeout=Math.min(30,Math.max(0,Number(params.timeoutSeconds??20)));
     if(!Number.isFinite(timeout))throw new Error('Неверное время ожидания.');
     const until=Date.now()+timeout*1000;
     while(jobById(params.jobId).status==='running'&&Date.now()<until)await delay(Math.min(300,until-Date.now()));
-    const job=jobById(params.jobId);return {job:externalJob(job),done:job.status!=='running'};
+    const job=jobById(params.jobId);return {job:serializeJob(job),done:job.status!=='running'};
    }
    case 'history':{
     const limit=Number(params.limit??20);if(!Number.isInteger(limit)||limit<1||limit>100)throw new Error('limit: 1–100');
-    return {jobs:runtime.jobs.slice(0,limit).map(externalJob)};
+    return {jobs:runtime.jobs.slice(0,limit).map(serializeJob)};
    }
    case 'save':{
     const job=jobById(params.jobId),index=params.index??0,media=job.media?.[index];
@@ -149,6 +175,29 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
     await fs.access(file);shell.showItemInFolder(file);return {opened:true,path:file};
    }
    case 'accounts':await ready();return {accounts:await runtime.refreshAccounts()};
+   case 'set_account_active':
+   case 'check_account':{
+    const set=method==='set_account_active',allowed=set?['accountId','enabled']:['accountId'];
+    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).length!==allowed.length||Object.keys(params).some(key=>!allowed.includes(key))||!Number.isSafeInteger(params.accountId)||params.accountId<=0||set&&typeof params.enabled!=='boolean')throw failure('Укажите точный accountId'+(set?' и enabled: true или false.':'.'));
+    await ready();
+    if(runtime.accountActionPending||runtime.accountCheckTask||runtime.retryTask||runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения текущей генерации или действия с аккаунтами.');
+    runtime.accountActionPending=true;
+    try{return set?await runtime.setAccountActive(params.accountId,params.enabled):await accountCheck(params.accountId);}finally{runtime.accountActionPending=false;}
+   }
+   case 'check_enabled_accounts':{
+    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).length)throw failure('Проверка включенных аккаунтов принимает пустой объект.');
+    await ready();
+    if(runtime.accountActionPending||runtime.accountCheckTask||runtime.retryTask||runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения текущей генерации или действия с аккаунтами.');
+    runtime.accountActionPending=true;
+    try{return await runtime.checkEnabledAccounts({checkAccount:accountCheck});}finally{runtime.accountActionPending=false;}
+   }
+   case 'reset_cooldown':{
+    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).length!==1||!Number.isSafeInteger(params.accountId)||params.accountId<=0)throw failure('Укажите только положительный целый accountId.');
+    await ready();
+    if(runtime.accountActionPending||runtime.accountCheckTask||runtime.retryTask||runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения текущей генерации или действия с аккаунтами.');
+    runtime.accountActionPending=true;
+    try{return {...await runtime.clearCooldown(params.accountId),note:'Снята только локальная пауза аккаунта. Ограничения Google не изменены; генерация автоматически не запускается.'};}finally{runtime.accountActionPending=false;}
+   }
    case 'login_start':
     await ready();
     if(params.accountId!=null){
@@ -159,8 +208,8 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
    case 'login_cancel':return accountManager.cancelLogin();
    case 'cancel':{
     const job=jobById(params.jobId);
-    if(job.status==='running'){job.cancelRequested=true;runtime.aborts.get(job.id)?.abort();}
-    return {job:externalJob(job),note:'Отмена ожидания не гарантирует отмену задачи Google или возврат кредитов. Не повторяйте автоматически.'};
+    runtime.cancelGeneration(job.id);
+    return {job:serializeJob(job),note:'Отмена ожидания не гарантирует отмену задачи Google или возврат кредитов. Не повторяйте автоматически.'};
    }
    default:throw new Error('Неизвестная операция Flow Studio.');
   }

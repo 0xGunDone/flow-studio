@@ -131,7 +131,7 @@ class Omni12SubmissionTests(unittest.IsolatedAsyncioTestCase):
         identifier = "11111111-1111-1111-1111-111111111111.mp4"
         reference = {"file_id": identifier, "mime_type": "video/mp4"}
         process = AsyncMock(returncode=0)
-        process.communicate.return_value = (json.dumps({"format": {"duration": "15"}, "streams": [{"codec_type": "video"}]}).encode(), b"")
+        process.communicate.return_value = (json.dumps({"format": {"duration": "15"}, "streams": [{"codec_type": "video", "width": 1280, "height": 720}]}).encode(), b"")
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / identifier).write_bytes(b"original")
@@ -140,7 +140,7 @@ class Omni12SubmissionTests(unittest.IsolatedAsyncioTestCase):
                     await video_inputs.read_video_reference(reference)
                 result = await video_inputs.read_video_reference(reference, max_duration_seconds=15)
                 self.assertEqual((result["bytes"], result["end_frame"]), (b"original", 450))
-                process.communicate.return_value = (json.dumps({"format": {"duration": "16"}, "streams": [{"codec_type": "video"}]}).encode(), b"")
+                process.communicate.return_value = (json.dumps({"format": {"duration": "16"}, "streams": [{"codec_type": "video", "width": 1280, "height": 720}]}).encode(), b"")
                 with self.assertRaisesRegex(ValueError, "15 секунд"):
                     await video_inputs.read_video_reference(reference, max_duration_seconds=15)
 

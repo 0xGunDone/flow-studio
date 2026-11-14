@@ -182,4 +182,4 @@ function createRecoveryManager({ chromeDataDir, chromePath, listAccounts, verify
   return { begin, verify, cancel, shutdown() { stopped = true; cancel(); }, get active() { return Boolean(active); }, get state() { return lastState; } };
 }
 
-module.exports = { createRecoveryManager };
+module.exports = { createRecoveryManager, findChromeProfile };

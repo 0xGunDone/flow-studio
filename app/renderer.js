@@ -133,7 +133,7 @@ if (typeof document !== 'undefined') initialize();
 function initialize() {
   const $ = id => document.getElementById(id);
   const api = window.flowStudio;
-  const state = { retryingJobId: null, currentPage: 'create', providerSettings: null, settingsLoading: false, settingsSaving: false, ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
+  const state = { browserChecking:false, browserAccess:null,browserPreparedToken:null, retryingJobId: null, currentPage: 'create', providerSettings: null, settingsLoading: false, settingsSaving: false, ready: false, models: [], accounts: [], jobs: [], login: null, references: [], frames: [null, null], videoMethod: 'text', mode: 'image', selectedJobId: null, submitting: false, loginPending: false, loginAccountId: null, checkingAccountId: null, accountPending: null, batchCheck: null, accountChecks: new Map(), startupPending: true, refreshPending: false, importPending: false };
   const dates = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const numbers = new Intl.NumberFormat('ru-RU');
   let unsubscribe;
@@ -205,9 +205,82 @@ function initialize() {
       if (selected) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
     }
     if (name === 'history') renderHistory();
-    if (name === 'settings') void loadProviderSettings();
+    if (name === 'settings') { void loadProviderSettings(); void loadBrowserStatus(); }
+  }
+  function renderBrowserSettings() {
+    const selected=$('browser-account').value;
+    $('browser-account').replaceChildren();
+    for(const account of state.accounts.filter(a=>a.isActive)) {
+      const option=element('option','',account.email || '#'+account.id);option.value=String(account.id);$('browser-account').append(option);
+    }
+    if(state.accounts.some(a=>a.isActive&&String(a.id)===selected))$('browser-account').value=selected;
+    const blocked=state.browserChecking || Boolean(activeJob()) || state.accountPending!==null || state.batchCheck?.running || ['opening','waiting','syncing'].includes(state.login?.state);
+    $('browser-submit').disabled=blocked || !state.browserPreparedToken;
+    $('browser-cancel').disabled=blocked || !state.browserPreparedToken;
+    $('browser-account').disabled=blocked;
+    $('browser-refresh').disabled=blocked;
+    $('browser-permission').disabled=blocked || state.browserAccess?.trusted===true;
+    $('browser-screen-permission').disabled=blocked || state.browserAccess?.screenCaptureTrusted===true;
+    $('browser-prepare').disabled=blocked || !state.ready || !state.browserAccess?.trusted || !state.browserAccess?.screenCaptureTrusted || !$('browser-account').value;
+    $('browser-inspect').disabled=blocked || !state.ready || !state.browserAccess?.trusted || !$('browser-account').value;
+    $('browser-access-status').textContent=state.browserChecking?'Проверяем…':state.browserAccess?.trusted?'Управление интерфейсом разрешено':state.browserAccess?'Нужно разрешение macOS «Универсальный доступ»':'Статус доступа не проверен';
+  }
+  async function loadBrowserStatus() {
+    if(state.browserChecking || !api.browserStatus)return;
+    state.browserChecking=true;setError('browser-check-error','');renderBrowserSettings();
+    try{state.browserAccess=await api.browserStatus();}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();}
+  }
+  async function requestBrowserAccess() {
+    if(state.browserChecking || activeJob())return;
+    state.browserChecking=true;setError('browser-check-error','');renderBrowserSettings();
+    try{state.browserAccess=await api.requestBrowserAccess();$('browser-check-result').textContent='Если macOS открыла настройки, разрешите Flow Studio управлять интерфейсом, затем проверьте доступ снова.';}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();}
+  }
+  async function requestBrowserScreenAccess() {
+    if(state.browserChecking || activeJob())return;
+    state.browserChecking=true;renderBrowserSettings();setError('browser-check-error','');
+    try{state.browserAccess=await api.requestBrowserScreenAccess();$('browser-check-result').textContent='После подтверждения macOS проверьте доступ снова.';}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();}
+  }
+  async function prepareNativeBrowser() {
+    const id=Number($('browser-account').value);
+    if(state.browserChecking || activeJob() || !Number.isSafeInteger(id))return;
+    if(state.mode!=='video'||!['text','ingredients'].includes(state.videoMethod)||!/^omni-1\.2-flash(?:-|$)/.test($('model').value)){setError('browser-check-error','Выберите Omni 1.2 Flash: текст или ингредиенты. Кадры, продолжение и редактирование видео здесь не поддерживаются.');return;}
+    const references=currentReferences();
+    if(references.some(reference=>referenceKind(reference)!=='image')){setError('browser-check-error','Подготовка в Chrome поддерживает только изображения-ингредиенты. Удалите видео из вложений.');return;}
+    state.browserChecking=true;setError('browser-check-error','');$('browser-check-result').textContent='Подготавливаем запрос и вложения в Chrome; генерация не запускается…';renderBrowserSettings();
+    try{const result=await api.prepareNativeBrowser({accountId:id,model:$('model').value,prompt:$('prompt').value,images:references.map(reference=>({dataUrl:reference.dataUrl,name:reference.name}))});state.browserPreparedToken=result.readyToSubmit===true?result.token:null;updateGenerate();$('browser-check-result').textContent=result.message;}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();}
+  }
+  async function cancelNativeBrowser() {
+    if(state.browserChecking)return;
+    state.browserChecking=true;renderBrowserSettings();
+    try{await api.cancelNativeBrowser();state.browserPreparedToken=null;$('browser-check-result').textContent='Подготовка отменена. Запрос в Chrome не отправлен.';}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();updateGenerate();}
+  }
+  async function submitNativeBrowser() {
+    if(state.browserChecking || !state.browserPreparedToken || activeJob())return;
+    const token=state.browserPreparedToken;state.browserPreparedToken=null;state.browserChecking=true;renderBrowserSettings();setError('browser-check-error','');
+    try{const result=await api.submitNativeBrowser({token});$('browser-check-result').textContent=result.message;}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();}
+  }
+  async function inspectBrowser() {
+    const id=Number($('browser-account').value);
+    if(state.browserChecking || activeJob() || !Number.isSafeInteger(id) || !state.browserAccess?.trusted)return;
+    state.browserChecking=true;setError('browser-check-error','');$('browser-check-result').textContent='';renderBrowserSettings();
+    try{const result=await api.inspectBrowser(id);$('browser-check-result').textContent=(result.message || 'Окно Flow проверено. Генерация не запускалась.')+(result.diagnostics?' '+JSON.stringify(result.diagnostics):'');}
+    catch(error){setError('browser-check-error',errorMessage(error));}
+    finally{state.browserChecking=false;renderBrowserSettings();}
   }
   function renderProviderSettings() {
+    renderBrowserSettings();
     const available = state.ready && !state.startupPending;
     const pending = state.settingsLoading || state.settingsSaving;
     const blocked = !available || pending || Boolean(activeJob());
@@ -258,8 +331,9 @@ function initialize() {
   }
   function updateGenerate() {
     const running = Boolean(activeJob()) || state.submitting;
+    const browserPending=Boolean(state.browserPreparedToken);
     const available = state.accounts.some(account => account.isActive && !cooldownSeconds(account));
-    $('generate').disabled = !state.ready || !selectedModel() || running || !available || state.importPending || state.accountPending !== null || Boolean(state.batchCheck?.running) || state.retryingJobId !== null;
+    $('generate').disabled = browserPending || !state.ready || !selectedModel() || running || !available || state.importPending || state.accountPending !== null || Boolean(state.batchCheck?.running) || state.retryingJobId !== null;
     $('generate-label').textContent = running ? 'Генерация идет…' : state.mode === 'video' ? 'Создать видео' : 'Создать изображение';
     $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.batchCheck?.running ? 'Проверяем аккаунты…' : state.accountPending !== null ? 'Обновляем подключение…' : state.importPending ? 'Добавляем вложения…' : !available ? (state.accounts.some(account => account.isActive) ? 'Аккаунты на КД — дождитесь окончания или откройте «Аккаунты»' : 'Подключите активный аккаунт в разделе «Аккаунты»') : '⌘ Enter — создать';
   }
@@ -304,6 +378,7 @@ function initialize() {
   function renderSettings() {
     const catalog = state.models.filter(model => modelInfo(model).kind === state.mode).map(modelSettings);
     const selected = selectedModel() && modelSettings(selectedModel());
+    if($('generation-route-hint'))$('generation-route-hint').textContent=(selected?.info.id==='omni-1.2-flash'||/^omni-1\.2-flash-(?:(?:i2v-)?(?:[3-9]|1[0-5])s-|edit-)(?:landscape|portrait)(?:-360p)?$/.test(selected?.info.id||'')||/^(?:gemini-3\.1-flash-image|gemini-3\.0-pro-image)-(?:landscape|portrait|square|four-three|three-four)(?:-(?:2k|4k))?$/.test(selected?.info.id||'')||/^gemini-3\.1-flash-lite-image-(?:landscape|portrait|square|four-three|three-four)$/.test(selected?.info.id||'')||/^veo-3\.1-(?:lite|fast|quality)(?:-(?:i2v-)?(?:4|6|8)s-(?:landscape|portrait))?$/.test(selected?.info.id||'')||/^veo-3\.1-(?:lite|fast)-r2v-8s-(?:landscape|portrait)$/.test(selected?.info.id||''))?'Отдельный фоновый браузер Flow Studio. Вашим Chrome можно пользоваться во время генерации.':'Этот режим использует серверный движок. Выбранная модель не меняется автоматически.';
     $('video-method-field').hidden = state.mode !== 'video';
     fillSelect('video-method', Object.keys(VIDEO_METHODS).filter(method => catalog.some(entry => entry.methods.includes(method))), state.videoMethod, value => VIDEO_METHODS[value]);
     if (state.mode === 'video') state.videoMethod = $('video-method').value;
@@ -490,7 +565,8 @@ function initialize() {
       elapsed.id = 'elapsed';
       const message = element('p', '', job.progress || 'Запрос выполняется');
       message.setAttribute('role', 'status');
-      panel.append(element('h3', '', job.kind === 'video' ? 'Создаем видео' : 'Создаем изображение'), message, progress, elapsed);
+      panel.append(element('h3', '', job.recovering ? 'Проверяем прежний результат' : job.kind === 'video' ? 'Создаем видео' : 'Создаем изображение'), message, progress, elapsed);
+      if(api.cancelGeneration)panel.append(button('Остановить ожидание','secondary',async()=>{try{await api.cancelGeneration(job.id);notify('Ожидание остановлено. Перед повтором проверьте результат в Flow.');}catch(error){notify(errorMessage(error),true);}}));
       result.append(panel);
       updateElapsed();
       return;
@@ -506,6 +582,16 @@ function initialize() {
         panel.append(element('h3', '', 'Не удалось загрузить исходник'), element('p', 'inline-error', 'Локальный движок не получил подтверждение reCAPTCHA для загрузки одного из изображений. Этот файл не отправлен, генерация результата не запущена.'), button('Открыть Flow в браузере', 'primary', async () => { try { await api.openFlow(); } catch(error) { notify(errorMessage(error),true); } }), element('p', 'hint recovery-note', 'В браузере выберите тот же Google-аккаунт и попробуйте прикрепить файл без запуска генерации. Если Google покажет проверку, выполните её вручную. Это действие не отправляет запрос повторно.'), button('Редактировать запрос', 'secondary', () => reuse(job)));
         const details=element('details','error-details');details.append(element('summary','','Технические детали'),element('pre','',job.error||job.progress));panel.append(details);
       } else panel.append(element('h3', '', 'Генерация не завершилась'), element('p', 'inline-error', job.error || job.progress || 'Попробуйте повторить запрос'), button('Редактировать запрос', 'secondary', () => reuse(job)));
+      if(job.generationEngine==='isolated-browser'&&job.unknownOutcome){
+        const recover=button('Проверить результат в Flow','secondary',async()=>{
+          if(activeJob()||state.accountPending!==null||state.batchCheck?.running)return;
+          recover.disabled=true;
+          try{await api.recoverGeneration(job.id);notify('Проверяем прежнюю задачу без повторной отправки');}
+          catch(error){notify(errorMessage(error),true);recover.disabled=false;}
+        });
+        recover.disabled=!state.ready||!job.recoveryAvailable||!api.recoverGeneration||Boolean(activeJob())||state.accountPending!==null||Boolean(state.batchCheck?.running);
+        panel.append(recover,element('p','hint',job.recoveryBlockedReason||'Читаем прежнюю задачу и скачиваем подтвержденный результат. Новая генерация не запускается.'));
+      }
       appendRetry(panel,job,account);
       result.append(panel);
     } else if (job.media?.length) {
@@ -614,6 +700,12 @@ function initialize() {
     }
   }
   function renderAccounts() {
+    for(const id of ['generation-account','isolated-account']){
+      const select=$(id);if(!select)continue;const chosen=select.value;select.replaceChildren();
+      if(id==='generation-account'){const automatic=element('option','','Автоматически');automatic.value='';select.append(automatic);}
+      for(const account of state.accounts.filter(a=>a.isActive)){const option=element('option','',account.email+(account.browserReady===false?' · нужен вход в Flow Studio':''));option.value=String(account.id);select.append(option);}
+      if(state.accounts.some(a=>a.isActive&&String(a.id)===chosen))select.value=chosen;
+    }
     $('accounts-count').textContent = numbers.format(state.accounts.length);
     const active = state.accounts.filter(account => account.isActive).length;
     const countWord = { one: 'аккаунт', few: 'аккаунта', many: 'аккаунтов', other: 'аккаунта' }[new Intl.PluralRules('ru-RU').select(active)];
@@ -633,6 +725,8 @@ function initialize() {
       status.append(element('span', `badge${account.isActive ? '' : ' inactive'}`, account.isActive ? 'Включен для генерации' : 'Выключен для генерации'));
       if (account.videoEnabled === false) status.append(document.createTextNode(' · Видео недоступно'));
       identity.append(element('h3', '', account.email || `Аккаунт ${account.id}`), status);
+      if(account.isActive&&account.serverActive===false&&account.browserReady===true)identity.append(element('p','hint server-session-warning','Серверная сессия требует проверки; браузер доступен'));
+      if(account.browserReady===false)identity.append(element('p','hint','Для фоновой генерации нажмите «Войти заново» один раз. Вход сохраняется в отдельном профиле Flow Studio.'));
       if(cooldownSeconds(account)){
         const cooldown=element('p','account-cooldown cooldown-countdown',cooldownLabel(account));
         cooldown.dataset.accountId=String(account.id);identity.append(cooldown);
@@ -666,8 +760,7 @@ function initialize() {
       if(cooldownSeconds(account)){
         const reset=button('Сбросить КД','small secondary reset-cooldown',()=>changeAccount(account.id,()=>api.clearCooldown(account.id)));
         reset.dataset.accountId=String(account.id);
-        reset.disabled=account.cooldownResetAllowed===false;actions.append(reset);
-        if(account.cooldownResetAllowed===false) actions.append(element('p','hint cooldown-hold','Ограничение Google: дождитесь окончания паузы'));
+        actions.append(reset,element('p','hint cooldown-hold','Сброс снимает только локальную паузу, не ограничения Google'));
       }
       actions.append(button('Войти заново', 'small secondary reconnect', () => beginLogin(account.id)), button('Проверить подключение', 'small secondary check-account', () => checkAccount(account.id)),button('Удалить', 'small secondary delete-account', () => changeAccount(account.id,()=>api.deleteAccount(account.id),true)));
       row.append(element('div', 'avatar', (account.email || 'G').slice(0, 1)), identity, balance, actions);
@@ -675,6 +768,7 @@ function initialize() {
     }
     renderLogin();
     updateGenerate();
+    renderBrowserSettings();
   }
   function renderLogin() {
     const login = state.login;
@@ -690,7 +784,7 @@ function initialize() {
     for(const node of document.querySelectorAll('.delete-account'))node.disabled = !state.ready || working || busy || Boolean(activeJob());
     for(const node of document.querySelectorAll('.reset-cooldown')){
       const account=state.accounts.find(a=>String(a.id)===node.dataset.accountId);
-      node.disabled=!state.ready || working || busy || Boolean(activeJob()) || account?.cooldownResetAllowed===false;
+      node.disabled=!state.ready || working || busy || Boolean(activeJob());
     }
     $('add-account').disabled = busy || working || !state.ready;
     document.querySelectorAll('.reconnect').forEach(item => { item.disabled = busy || working || !state.ready; });
@@ -791,9 +885,10 @@ function initialize() {
   async function generate(event) {
     event.preventDefault();
     if (state.submitting || state.retryingJobId !== null || state.importPending || state.accountPending !== null || state.batchCheck?.running || activeJob() || !state.ready) return;
+    if (!$('generation-form').reportValidity()) return;
     setError('form-error', '');
     let request;
-    try { request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value); }
+    try { request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value);const accountId=Number($('generation-account')?.value);if(Number.isSafeInteger(accountId)&&accountId>0)request.accountId=accountId; }
     catch (error) { setError('form-error', errorMessage(error)); return; }
     state.submitting = true;
     updateGenerate();
@@ -834,8 +929,23 @@ function initialize() {
   for (const id of ['video-method','model-family','duration','aspect-ratio','resolution']) $(id).addEventListener('change', () => selectSettings(id));
   $('prompt').addEventListener('input', () => { updatePromptCount(); saveDraft(); });
   $('source-video-id').addEventListener('input', saveDraft);
-  $('prompt').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); if (!$('generate').disabled) $('generation-form').requestSubmit(); } });
-  $('generation-form').addEventListener('submit', generate);
+  $('prompt').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); if (!$('generate').disabled) $('generate').click(); } });
+  $('browser-refresh').addEventListener('click',loadBrowserStatus);
+  $('browser-permission').addEventListener('click',requestBrowserAccess);
+  $('browser-screen-permission').addEventListener('click',requestBrowserScreenAccess);
+  $('browser-inspect').addEventListener('click',inspectBrowser);
+  $('browser-prepare').addEventListener('click',prepareNativeBrowser);
+  $('browser-submit').addEventListener('click',submitNativeBrowser);
+  $('browser-cancel').addEventListener('click',cancelNativeBrowser);
+  $('isolated-inspect')?.addEventListener('click',async()=>{
+    const id=Number($('isolated-account').value);if(!Number.isSafeInteger(id)||id<=0)return;
+    $('isolated-inspect').disabled=true;$('isolated-status').textContent='Проверяем отдельный браузер без генерации…';
+    try{const result=await api.inspectIsolatedBrowser(id);$('isolated-status').textContent='Фоновый браузер готов · '+result.accountEmail;}
+    catch(error){$('isolated-status').textContent=errorMessage(error);}
+    finally{$('isolated-inspect').disabled=false;}
+  });
+  $('generation-form').addEventListener('submit', event => event.preventDefault());
+  $('generate').addEventListener('click', generate);
   $('retry-startup').addEventListener('click', () => start(true));
   $('pick-images').addEventListener('click', () => importReferences(info => api.pickImages({ allowVideos: info.supportsVideoReferences })));
   const isFileDrag = event => Array.from(event.dataTransfer?.types || []).includes('Files') || Boolean(event.dataTransfer?.files?.length);

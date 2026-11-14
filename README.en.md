@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0xGunDone/flow-studio/releases/tag/v1.2.1">Download for macOS</a> ·
+  <a href="https://github.com/0xGunDone/flow-studio/releases">Download for macOS</a> ·
   <a href="https://github.com/0xGunDone/flow-studio/releases">All releases</a> ·
   <a href="docs/mcp.md">MCP guide</a> ·
   <a href="README.md">Русский</a>
@@ -20,13 +20,21 @@
 
 - Text-to-image, editing and image references, subject to each model's limits.
 - Separate video methods for text, Frames, Ingredients, editing, and extension, with independent model, duration, aspect ratio, and available resolution controls.
-- Up to 7 image references for Omni; a separate Omni Edit model accepts a source video and up to 5 images.
+- Automatic isolated background generation for supported Nano Banana images, Omni 1.2 Flash video modes, and standard Veo 3.1 variants, leaving your regular Chrome available. Omni keeps up to seven image ingredients and explicit start/end frame roles; Edit uses one source video with optional images.
 - Dedicated start and end frame slots with Finder drag and drop or file selection; a separate ingredient list with previews, arrow controls, and individual removal.
 - Multiple Google accounts with separate managed Chrome profiles and explicit reauthentication.
 - Local previews, export, Finder integration, and the latest 100 jobs in persistent history, with submitting account identity and manual replay from cached inputs.
 - A persistent 30-minute account cooldown after attributed failures, countdown and last error, with local reset controls; Google restrictions remain in force.
-- A local MCP server exposing 14 tools for models, jobs, media, and accounts.
+- MCP API 3 with 24 tools for model discovery, local preparation, generation, files, accounts, and diagnostics.
 - Bundled Flow2API source, built into a local Docker image on first launch.
+
+Supported **Nano Banana**, **Omni 1.2 Flash**, and standard **Veo 3.1** models use Flow Studio’s own background browser. This route needs no desktop focus, Accessibility, or Screen Recording permission. Sign in through the app once; the managed profile persists. If an account reports `browserReady:false`, use **Войти заново** (Reconnect). **Настройки → Фоновая генерация** checks its login and project without generating video.
+
+On the first image upload, Google may ask for “Rights to use this image”. Flow Studio shows Google’s terms and the account in its own dialog. The user decides; cancel stops the upload. The app never accepts these terms automatically. Upload consent does not click Generate or authorize credit spend.
+
+Choose one account in the editor or leave **Автоматически** (Automatic). The chosen account stays pinned to the job; failures never rotate accounts or fall back to another engine. Omni 1.2 Edit uses the background implementation; live verification of its source-video association and actual output is still pending. Extension and unsupported variants keep their existing server route, reported as `generationEngine` in MCP.
+
+Result verification now uses one selected semantic History entry: full prompt text is compared exactly, with ordered references and output poster from that same entry. The tuple is rechecked before download, and menus must belong to the entry’s own button through aria-controls. Missing, ambiguous or changed bindings fail closed. Read-only downloads of an existing two-reference image and Veo 720p video, plus original receipt-based recovery, were verified without another generation. Edit source-video association and actual Edit output remain unverified.
 
 The interface and history run locally. Generation runs on Google's services and may spend your Google Flow credits. Prompts, input images/videos, and session data are sent to the service. A model appearing in the catalog does not guarantee access under your plan.
 
@@ -40,12 +48,14 @@ Omni 1.2 offers text, ingredients, and frames from 3 through 15 seconds, 16:9 an
 
 The current Veo catalog requires Google AI Ultra for 4- and 6-second variants; Pro users should choose an available 8-second variant. Eight-second frame models are available for Lite, Fast, and Quality. Check the current catalog and Google's [model feature table](https://support.google.com/flow/answer/16352836) and [frames and references guide](https://support.google.com/flow/answer/16353334) as availability changes.
 
+Nano Banana 2.1 and Pro use explicit Flow download upscales for 2K/4K; Lite stays standard-only. An existing Nano Banana 2.1 portrait 2K Upscaled download was verified at 1536×2752 versus standard 768×1376, without another generation. Other families, aspects, and 4K remain unverified.
+
 ## Install
 
-Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker CLI and Docker Compose**. The desktop app does not require host Node.js, Python, or FFmpeg: video validation uses `ffprobe` inside the container. MCP requires Node.js 22 or later.
+Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker CLI and Docker Compose**. The desktop app does not require host Node.js, Python, or FFmpeg: video validation uses `ffprobe` inside the container. MCP requires Node.js 22.12 or later.
 
 1. Install Chrome and start your Docker environment.
-2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases/tag/v1.2.1): `arm64` for Apple Silicon or `x64` for Intel.
+2. Download the matching asset from [Releases](https://github.com/0xGunDone/flow-studio/releases): `arm64` for Apple Silicon or `x64` for Intel.
 3. Move `Flow Studio.app` to `Applications` and open it. If macOS blocks this unsigned build, review it in **System Settings → Privacy & Security** and use the normal macOS approval flow only if you trust the download.
 4. Wait for the first Docker build. This downloads dependencies and needs internet access and free disk space.
 5. Open **Аккаунты → Войти в Google**. Sign in inside the Chrome window, open Flow, return to the app, and choose **Я вошёл**.
@@ -53,9 +63,11 @@ Prerequisites: **Google Chrome** and **Docker Desktop**, or **Colima with Docker
 
 The interface and detailed guides are currently in Russian. The app creates local server credentials automatically. The optional Chrome extension is not required for the normal sign-in flow.
 
-The local engine runs while Flow Studio is open. Closing its window with × or quitting with `⌘Q` exits the app and stops its engine. Minimizing the window keeps the app open. Google may continue an accepted generation after exit; check its result in Flow before retrying.
+The local engine runs while Flow Studio is open. Closing its window with × or quitting with `⌘Q` exits the app and stops its engine and owned background browser. Minimizing the window keeps the app open. Google may continue an accepted generation after exit; check its result in Flow before retrying.
 
 ## MCP
+
+The release MCP ZIP includes the adapter, lockfile, and complete `skills/flow-studio/` agent skill. Keep it outside a cloud-synced folder when needed; see the [MCP guide](docs/mcp.md) for connection and skill installation.
 
 ```bash
 git clone https://github.com/0xGunDone/flow-studio.git

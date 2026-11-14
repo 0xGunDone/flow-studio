@@ -45,3 +45,21 @@ test('retry and cooldown reset bridge use fixed IPC without arbitrary endpoints'
  await h.api.retryGeneration({jobId:'original',requestId:'click-id'});await h.api.clearCooldown(7,'/arbitrary');
  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:retryGeneration',{jobId:'original',requestId:'click-id'}],['studio:clearCooldown',7]]);
 });
+test('read-only result recovery forwards only existing job id through fixed IPC',async()=>{
+ const h=loadPreload(()=>{});await h.api.recoverGeneration('existing-job',{model:'override',confirmCreditSpend:true});
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:recoverGeneration','existing-job']]);
+});
+
+
+test('native browser bridge exposes only fixed actions and a known account id',async()=>{
+ const h=loadPreload(()=>{});
+ await h.api.browserStatus('/private');await h.api.requestBrowserAccess({pid:1});await h.api.inspectBrowser(7,{command:'press'});
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:browserStatus'],['studio:requestBrowserAccess'],['studio:inspectBrowser',7]]);
+});
+
+
+test('native preparation and submit use fixed IPC with no native command bridge',async()=>{
+ const h=loadPreload(()=>{});
+ await h.api.prepareNativeBrowser({accountId:1,model:'exact',prompt:'text'});await h.api.submitNativeBrowser({token:'issued'});
+ assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[['studio:prepareNativeBrowser',{accountId:1,model:'exact',prompt:'text'}],['studio:submitNativeBrowser',{token:'issued'}]]);
+});

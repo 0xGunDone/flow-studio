@@ -3,28 +3,95 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),os=require('node:os');
 const {pathToFileURL}=require('node:url');
 const {EventEmitter}=require('node:events');
-async function launch({ready=true,closing=false,pickedFiles=[],accountRuntime={},managedOverrides={}}={}){
- const events=[],windows=[],app=new EventEmitter(),handlers=new Map(),protocols=new Map(),fetches=[];let stopped=false,finishStop,stopError,choice=0,autoSyncs=0;
- const runtime={jobs:[],ready,closing,initializeHistory:async()=>{},start:async()=>{},close:()=>{events.push('stop');return stopError?Promise.reject(stopError):new Promise(resolve=>{finishStop=resolve;});}};
- app.setName=()=>{};app.requestSingleInstanceLock=()=>true;app.getPath=()=>'/unused';app.getVersion=()=>'1.1.0';
+async function launch({ready=true,closing=false,pickedFiles=[],accountRuntime={},managedOverrides={},nativeOverrides={},isolatedOverrides={},showMessageBox}={}){
+ const events=[],sent=[],windows=[],app=new EventEmitter(),signalProcess=new EventEmitter(),handlers=new Map(),protocols=new Map(),fetches=[];let stopped=false,finishStop,stopError,choice=0,autoSyncs=0,bridgeDispatch,engineOptions,now=Date.now();
+ Object.assign(signalProcess,{arch:process.arch,platform:process.platform,env:process.env});
+ const runtime={jobs:[],accounts:[],ready,closing,initializeHistory:async()=>{},start:async()=>{},refreshAccounts:async()=>runtime.accounts,publicJobs:()=>runtime.jobs,attachBrowserEngine(engine){this.browserEngine=engine;},cancelGeneration:id=>{events.push(['cancel-generation',id]);return {cancelled:true,jobId:id};},close:()=>{events.push('stop');return stopError?Promise.reject(stopError):new Promise(resolve=>{finishStop=resolve;});}};
+ app.setName=()=>{};app.requestSingleInstanceLock=()=>true;app.getPath=()=>'/unused';app.getVersion=()=>'1.1.0';app.getAppPath=()=>__dirname;
  app.whenReady=()=>Promise.resolve();
  app.quit=()=>{let prevented=false;app.emit('before-quit',{preventDefault(){prevented=true;}});if(!prevented)stopped=true;};
  class Window extends EventEmitter{
-  constructor(){super();windows.push(this);this.webContents=new EventEmitter();Object.assign(this.webContents,{send(){},setWindowOpenHandler(){},session:{setPermissionRequestHandler(){}}});}
-  loadFile(){}show(){events.push('show');}focus(){}isDestroyed(){return false;}
+  constructor(){super();windows.push(this);this.webContents=new EventEmitter();Object.assign(this.webContents,{send:(...args)=>sent.push(args),setWindowOpenHandler(){},session:{setPermissionRequestHandler(){}}});}
+  loadFile(){}show(){events.push('show');}focus(){}isDestroyed(){return this.destroyed===true;}
  }
  Object.assign(runtime,accountRuntime);
- const manager={...managedOverrides,shutdown:()=>events.push('accounts'),startAutoSync(){autoSyncs++;}};
- const electron={app,BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},protocol:{registerSchemesAsPrivileged(){},handle:(name,fn)=>protocols.set(name,fn)},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showOpenDialog:async()=>({canceled:false,filePaths:pickedFiles}),showMessageBoxSync:()=>choice,showMessageBox:async(_window,options)=>{events.push({dialog:options});return {response:choice};},showErrorBox:()=>events.push('error')},shell:{openExternal:async url=>events.push(['external',url])},net:{fetch:(url,options)=>{fetches.push({url,options});return 'preview';}},clipboard:{}};
- const replacements={electron,'node:fs/promises':{mkdir:async()=>{}},'./runtime.cjs':{Runtime:class{constructor(){return runtime;}}},'./bootstrap.cjs':{prepareEngine:async()=>({})},'./exports.cjs':{},'./agent-bridge.cjs':{createAgentActions(){},startAgentBridge:async()=>({close:async()=>events.push('bridge')})},'./accounts.cjs':{createAccountManager:()=>manager},'./recovery.cjs':{createRecoveryManager:()=>({shutdown(){}})}};
- vm.runInNewContext(fs.readFileSync(path.join(__dirname,'main.cjs'),'utf8'),{require:name=>replacements[name]??require(name),__dirname,URL,Response});
+ const manager={hasAccountProfile:async()=>true,...managedOverrides,shutdown:()=>events.push('accounts'),startAutoSync(){autoSyncs++;}};
+ const isolated={supports:()=>false,generate:async()=>assert.fail('Fixture must not generate media'),inspect:async(id,options)=>({ready:true,accountId:id,accountEmail:options.email,engine:'isolated-browser',usesDesktopFocus:false}),...isolatedOverrides};
+ const electron={app,BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},protocol:{registerSchemesAsPrivileged(){},handle:(name,fn)=>protocols.set(name,fn)},Menu:{buildFromTemplate:x=>x,setApplicationMenu(){}},dialog:{showOpenDialog:async()=>({canceled:false,filePaths:pickedFiles}),showMessageBoxSync:()=>choice,showMessageBox:async(parent,options)=>{if(options===undefined){options=parent;parent=undefined;}events.push({dialog:options,parent});return showMessageBox?showMessageBox(options):{response:choice};},showErrorBox:()=>events.push('error')},shell:{openExternal:async url=>events.push(['external',url]),openPath:async target=>{events.push(['open-path',target]);return ''; }},net:{fetch:(url,options)=>{fetches.push({url,options});return 'preview';}},clipboard:{}};
+ const replacements={electron,'node:fs/promises':{mkdir:async()=>{}},'./runtime.cjs':{Runtime:class{constructor(){return runtime;}}},'./bootstrap.cjs':{prepareEngine:async()=>({})},'./exports.cjs':{},'./agent-bridge.cjs':{createAgentActions:require('./agent-bridge.cjs').createAgentActions,startAgentBridge:async({dispatch})=>{bridgeDispatch=dispatch;return {close:async()=>events.push('bridge')};}},'./browser-engine.cjs':{createBrowserEngine:options=>{engineOptions=options;assert.equal(options.accounts,manager);assert.equal(options.dataDir,'/unused');return isolated;}},'./browser-native.cjs':{NativeBrowser:class{},createBrowserTransport:()=>({status:async()=>({trusted:false,locked:false}),requestPermission:async()=>{events.push('native-permission');return {trusted:false};},inspect:async(id,options)=>{events.push(['native-inspect',id,options.expectedEmail]);return {trusted:true,accountMatch:true};},close:async()=>events.push('native-close'),...nativeOverrides})},'./accounts.cjs':{createAccountManager:()=>manager},'./recovery.cjs':{createRecoveryManager:()=>({shutdown(){}})}};
+ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'main.cjs'),'utf8'),{require:name=>replacements[name]??require(name),__dirname,URL,Response,process:signalProcess,AbortController,AbortSignal,setTimeout,clearTimeout,Date:class extends Date{static now(){return now;}}});
  await new Promise(setImmediate);
- return {app,runtime,events,window:windows[0],handlers,protocols,fetches,get stopped(){return stopped;},get autoSyncs(){return autoSyncs;},finish:()=>finishStop(),setChoice:value=>{choice=value;},failStop:error=>{stopError=error;}};
+ return {app,signalProcess,runtime,events,sent,isolated,bridgeDispatch,engineOptions,advance:ms=>{now+=ms;},window:windows[0],handlers,protocols,fetches,get stopped(){return stopped;},get autoSyncs(){return autoSyncs;},finish:()=>finishStop(),setChoice:value=>{choice=value;},failStop:error=>{stopError=error;}};
 }
 test('automatic Google account sync starts only after successful startup',async()=>{
  const failed=await launch({ready:false});assert.equal(failed.autoSyncs,0);
  const ready=await launch();assert.equal(ready.autoSyncs,1);
  const closing=await launch({closing:true});assert.equal(closing.autoSyncs,0);
+});
+test('main attaches isolated engine once and trusted cancellation delegates shared runtime',async()=>{
+ const calls=[],h=await launch({accountRuntime:{cancelGeneration:id=>{calls.push(id);return {cancelled:true,jobId:id};}}});
+ assert.strictEqual(h.runtime.browserEngine,h.isolated);assert.equal(h.events.length,0,'Attaching engine never opens a browser or generates');
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ assert.deepEqual(h.handlers.get('studio:cancelGeneration')(event,'pending'),{cancelled:true,jobId:'pending'});assert.deepEqual(calls,['pending']);
+ for(const invalid of [{sender:{},senderFrame:event.senderFrame},{sender:event.sender,senderFrame:{url:'https://example.test'}}])assert.throws(()=>h.handlers.get('studio:cancelGeneration')(invalid,'pending'),/Недопустимый источник/);
+ assert.deepEqual(calls,['pending']);
+});
+test('internal upload-rights response is strict exact pending token one-use and preserves native cancel',async()=>{
+ let finishNative;const h=await launch({showMessageBox:()=>new Promise(resolve=>{finishNative=resolve;})}),text='Rights to use this video\nExact Google terms';
+ assert.equal((await h.bridgeDispatch('upload_rights_status',{})).pending,null);
+ for(const params of [null,[],{extra:true}])await assert.rejects(h.bridgeDispatch('upload_rights_status',params),{code:'INVALID_ARGUMENTS'});
+ await assert.rejects(h.bridgeDispatch('upload_rights_respond',{token:require('node:crypto').randomUUID(),accept:true}),{code:'UPLOAD_RIGHTS_NOT_PENDING'});
+ const pending=h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text});
+ const state=(await h.bridgeDispatch('upload_rights_status',{})).pending;assert.equal(state.text,text);assert.equal(state.accountEmail,'owner@example.test');assert.match(state.token,/^[a-f0-9-]{36}$/);assert(Number.isFinite(Date.parse(state.createdAt)));
+ for(const params of [null,[],{}, {token:state.token,accept:'true'},{token:state.token,accept:true,extra:true}])await assert.rejects(h.bridgeDispatch('upload_rights_respond',params),{code:'INVALID_ARGUMENTS'});
+ await assert.rejects(h.bridgeDispatch('upload_rights_respond',{token:require('node:crypto').randomUUID(),accept:true}),{code:'UPLOAD_RIGHTS_NOT_PENDING'});
+ assert.equal((await h.bridgeDispatch('upload_rights_respond',{token:state.token,accept:false})).accepted,false);
+ await assert.rejects(h.bridgeDispatch('upload_rights_respond',{token:state.token,accept:true}),{code:'UPLOAD_RIGHTS_NOT_PENDING'});assert.equal(await pending,false);
+ assert.equal(h.events.find(event=>event.dialog).dialog.signal.aborted,true);assert.equal((await h.bridgeDispatch('upload_rights_status',{})).pending,null);
+ const native=h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text});finishNative({response:0});assert.equal(await native,false);
+ const affirmative=h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text});const next=(await h.bridgeDispatch('upload_rights_status',{})).pending;assert.notEqual(next.token,state.token);await h.bridgeDispatch('upload_rights_respond',{token:next.token,accept:true});assert.equal(await affirmative,true);
+});
+test('upload rights abort expiry and shutdown cannot consume a stale token or accept without human result',async()=>{
+ let finishNative;const h=await launch({showMessageBox:()=>new Promise(resolve=>{finishNative=resolve;})}),text='Rights to use this video';
+ const controller=new AbortController(),pending=h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text,signal:controller.signal});
+ controller.abort(new Error('User cancelled existing upload'));await assert.rejects(pending,/User cancelled/);assert.equal((await h.bridgeDispatch('upload_rights_status',{})).pending,null);
+ const already=new AbortController();already.abort();await assert.rejects(h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text,signal:already.signal}),{name:'AbortError'});
+ const expired=h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text}),state=(await h.bridgeDispatch('upload_rights_status',{})).pending;h.advance(10*60*1000);
+ assert.equal((await h.bridgeDispatch('upload_rights_status',{})).pending,null);await assert.rejects(h.bridgeDispatch('upload_rights_respond',{token:state.token,accept:true}),{code:'UPLOAD_RIGHTS_NOT_PENDING'});finishNative({response:0});assert.equal(await expired,false);
+ const closing=h.engineOptions.confirmUploadRights({accountEmail:'owner@example.test',text});h.app.quit();assert.equal(await closing,false);await new Promise(setImmediate);h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+});
+test('result recovery uses trusted IPC and shared guard without account action or a paid request',async()=>{
+ const calls=[],h=await launch({accountRuntime:{recoverGeneration:id=>{assert.equal(h.runtime.accountActionPending,undefined);calls.push(id);return {jobId:id};}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}},recover=h.handlers.get('studio:recoverGeneration');
+ assert.deepEqual(recover(event,'unknown-original'),{jobId:'unknown-original'});assert.deepEqual(calls,['unknown-original']);
+ assert.throws(()=>recover({sender:{},senderFrame:event.senderFrame},'unknown-original'),/Недопустимый источник/);
+ h.runtime.closing=true;assert.throws(()=>recover(event,'unknown-original'),/Дождитесь/);assert.equal(calls.length,1);
+});
+test('isolated inspection pins active account and shares account lock across IPC and bridge without desktop focus',async()=>{
+ const calls=[],rows=[{id:7,email:'owner@example.test',isActive:true},{id:9,email:'disabled@example.test',isActive:false}];let finish;
+ const h=await launch({accountRuntime:{accounts:rows},managedOverrides:{hasAccountProfile:async id=>id===7},isolatedOverrides:{inspect:async(id,options)=>{calls.push([id,options.email]);await new Promise(resolve=>{finish=resolve;});return {ready:true,accountId:id,accountEmail:options.email,engine:'isolated-browser',usesDesktopFocus:false};}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}},inspect=h.handlers.get('studio:inspectIsolatedBrowser');
+ assert.throws(()=>inspect({sender:{},senderFrame:event.senderFrame},7),/Недопустимый источник/);
+ const pending=inspect(event,7);await new Promise(setImmediate);assert.equal(h.runtime.accountActionPending,true);
+ assert.throws(()=>h.handlers.get('studio:generate')(event,{}),/Дождитесь/);
+ assert.throws(()=>h.handlers.get('studio:setAccountActive')(event,7,false),/Дождитесь/);
+ await assert.rejects(h.bridgeDispatch('isolated_inspect',{accountId:7}),/Дождитесь/);
+ assert.equal(h.runtime.accounts[0].browserReady,true);assert.equal(h.runtime.accounts[1].browserReady,false);
+ finish();assert.equal((await pending).usesDesktopFocus,false);assert.equal(h.runtime.accountActionPending,false);
+ for(const params of [{},[],{accountId:7,extra:true},{accountId:0},{accountId:'7'},{accountId:1.5}])await assert.rejects(h.bridgeDispatch('isolated_inspect',params),/accountId/);
+ await assert.rejects(inspect(event,9),/недоступен/);h.runtime.jobs=[{status:'running'}];
+ await assert.rejects(inspect(event,7),/завершения генерации/);await assert.rejects(h.bridgeDispatch('isolated_inspect',{accountId:7}),/текущей генерации/);
+ h.runtime.jobs=[];const bridgePending=h.bridgeDispatch('isolated_inspect',{accountId:7});await new Promise(setImmediate);finish();
+ assert.equal((await bridgePending).accountEmail,'owner@example.test');assert.deepEqual(calls,[[7,'owner@example.test'],[7,'owner@example.test']]);
+ assert.equal(h.events.some(event=>typeof event==='string'&&event.startsWith('native-')||Array.isArray(event)&&['open-path','external','native-inspect'].includes(event[0])),false,'Background inspection never requests native access or focuses Chrome');
+});
+test('profile enrichment cannot publish a stale enabled or deleted account list',async()=>{
+ let release,profileReads=0;
+ const h=await launch({managedOverrides:{hasAccountProfile:async()=>{if(++profileReads===1)await new Promise(resolve=>{release=resolve;});return true;}}});
+ const old=[{id:7,email:'owner@example.test',isActive:true}],fresh=[{id:7,email:'owner@example.test',isActive:false}];h.runtime.accounts=old;
+ const first=h.runtime.refreshAccounts();await new Promise(setImmediate);h.runtime.accounts=fresh;await h.runtime.refreshAccounts();release();await first;
+ const events=h.sent.filter(([channel,event])=>channel==='studio:event'&&event.type==='accounts');
+ assert.equal(events.length,1);assert.strictEqual(events[0][1].accounts,fresh);assert.equal(events[0][1].accounts[0].isActive,false);
 });
 test('window close quits only after backend shutdown; repeated quit does not duplicate cleanup',async()=>{
  const h=await launch();let prevented=false;
@@ -35,6 +102,23 @@ test('window close quits only after backend shutdown; repeated quit does not dup
  h.app.quit();await new Promise(setImmediate);assert.deepEqual(h.events,['accounts','bridge','stop']);
  h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
 });
+test('accepted quit blocks renderer generation and all bridge dispatch while shutdown still drains accounts',async()=>{
+ let generated=0;const h=await launch({accountRuntime:{generate:()=>{generated++;return {jobId:'must-not-start'};}}});
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ h.app.quit();assert.equal(h.runtime.closing,false,'Account/browser draining precedes runtime close');
+ assert.throws(()=>h.handlers.get('studio:generate')(event,{model:'exact',prompt:'never paid'}),/Дождитесь/);
+ for(const method of ['generate','recover','prepare','native_prepare','isolated_inspect','status'])await assert.rejects(h.bridgeDispatch(method,{}),/закрывается/);
+ assert.equal(generated,0);await new Promise(setImmediate);h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+});
+test('SIGTERM and SIGINT drain ordinary shutdown once without interactive confirmation or early process exit',async()=>{
+ for(const signal of ['SIGTERM','SIGINT']){
+  const h=await launch();h.runtime.jobs=[{status:'running'}];
+  h.signalProcess.emit(signal);h.signalProcess.emit(signal);await new Promise(setImmediate);
+  assert.deepEqual(h.events,['accounts','bridge','stop']);assert.equal(h.stopped,false,'Signal waits for backend/history close');
+  const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};assert.throws(()=>h.handlers.get('studio:generate')(event,{}),/Дождитесь/);
+  h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+ }
+});
 test('active generation can keep the window open or explicitly close and stop, never hide',async()=>{
  const h=await launch();h.runtime.jobs=[{status:'running'}];
  h.app.quit();await new Promise(setImmediate);assert.deepEqual(h.events,[]);assert.equal(h.stopped,false);
@@ -43,8 +127,31 @@ test('active generation can keep the window open or explicitly close and stop, n
 });
 test('failed backend stop keeps app open and permits another quit attempt',async()=>{
  const h=await launch();h.failStop(new Error('Docker unavailable'));h.app.quit();await new Promise(setImmediate);
- assert.equal(h.stopped,false);assert.deepEqual(h.events,['accounts','bridge','stop','error','show']);
+ assert.equal(h.stopped,false);assert.deepEqual(h.events.filter(event=>typeof event==='string'),['accounts','bridge','stop','show']);
+ const failure=h.events.find(event=>event.dialog);assert.equal(failure.parent,h.window);assert.equal(failure.dialog.type,'error');assert.equal(failure.dialog.title,'Не удалось завершить Flow Studio');assert.equal(failure.dialog.message,'Не удалось остановить локальный движок или сохранить историю. Проверьте Docker и повторите выход из приложения.');
  h.failStop(null);h.app.quit();await new Promise(setImmediate);h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+});
+
+test('second termination signal retries cleanup while asynchronous shutdown error dialog still awaits response',async()=>{
+ let resolveDialog;
+ const h=await launch({showMessageBox:()=>new Promise(resolve=>{resolveDialog=resolve;})});
+ h.failStop(new Error('Docker timeout'));h.signalProcess.emit('SIGTERM');await new Promise(setImmediate);
+ const failure=h.events.find(event=>event.dialog);assert.ok(failure);assert.equal(failure.dialog.signal.aborted,false);
+ assert.equal(h.events.includes('error'),false,'Synchronous native error alert must never run');assert.equal(h.stopped,false);
+ let ran=false;await new Promise(resolve=>setImmediate(()=>{ran=true;resolve();}));assert.equal(ran,true,'Pending native dialog must leave Node callbacks running');
+ h.failStop(null);h.signalProcess.emit('SIGTERM');await new Promise(setImmediate);
+ assert.equal(failure.dialog.signal.aborted,true,'Retry dismisses stale error dialog');
+ assert.equal(h.events.filter(event=>event==='stop').length,2);assert.equal(h.stopped,false,'Second attempt still waits for backend/history cleanup');
+ assert.equal(h.events.filter(event=>event.dialog).length,1,'No duplicate failure dialog while retry is running');
+ h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
+ resolveDialog({response:0});await new Promise(setImmediate);assert.equal(h.events.filter(event=>event==='stop').length,2);
+});
+
+test('shutdown error uses parentless asynchronous dialog if app window was destroyed',async()=>{
+ const h=await launch();h.window.destroyed=true;h.failStop(new Error('Stop failed'));h.signalProcess.emit('SIGINT');await new Promise(setImmediate);
+ const failure=h.events.find(event=>event.dialog);assert.equal(failure.parent,undefined);assert.equal(failure.dialog.type,'error');
+ assert.equal(h.events.includes('show'),false);assert.equal(h.events.includes('error'),false);assert.equal(h.stopped,false);
+ h.failStop(null);h.signalProcess.emit('SIGINT');await new Promise(setImmediate);h.finish();await new Promise(setImmediate);assert.equal(h.stopped,true);
 });
 test('picker and drop share import validation while registered videos keep native previews',async t=>{
  const root=await fs.promises.mkdtemp(path.join(os.tmpdir(),'flow-main-import-'));t.after(()=>fs.promises.rm(root,{recursive:true,force:true}));
@@ -85,6 +192,14 @@ test('bulk check goes through managed session sync and serial account action blo
  const task=h.handlers.get('studio:checkEnabledAccounts')(event);await new Promise(setImmediate);
  assert.throws(()=>h.handlers.get('studio:setAccountActive')(event,7,false),/Дождитесь/);
  finish();assert.deepEqual(await task,{verified:1});assert.deepEqual(calls,[['sync',7],['check',7]]);
+});
+test('UI account actions honor deferred MCP mutation lock until the original action finishes',async()=>{
+ let finish;const calls=[],h=await launch({accountRuntime:{setAccountActive:async(id,enabled)=>{calls.push(['set',id,enabled]);await new Promise(resolve=>{finish=resolve;});return {accounts:[]};},clearCooldown:async()=>assert.fail('UI reset entered during MCP action'),checkAccount:async()=>assert.fail('UI check entered during MCP action')}});
+ const pending=h.bridgeDispatch('set_account_active',{accountId:7,enabled:false});await new Promise(setImmediate);assert.equal(h.runtime.accountActionPending,true);
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ assert.throws(()=>h.handlers.get('studio:clearCooldown')(event,7),/Дождитесь/);assert.throws(()=>h.handlers.get('studio:checkAccount')(event,7),/Дождитесь/);assert.equal(h.runtime.accountActionPending,true);
+ await assert.rejects(h.bridgeDispatch('reset_cooldown',{accountId:7}),/Дождитесь/);assert.equal(h.runtime.accountActionPending,true);
+ finish();await pending;assert.equal(h.runtime.accountActionPending,false);assert.deepEqual(calls,[['set',7,false]]);
 });
 
 
@@ -148,4 +263,28 @@ test('retry IPC accepts only original job id and stable request id and serialize
  finish();await pending;assert.equal(h.runtime.accountActionPending,false);
  h.runtime.retryTask=Promise.resolve();assert.throws(()=>clear(event,7),/Дождитесь/);
  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['retry',{jobId:'original',requestId:'click-id'}],['clear',7]]);
+});
+
+
+test('native browser access needs native confirmation and inspection pins active account',async()=>{
+ const h=await launch({accountRuntime:{refreshAccounts:async()=>[{id:7,email:'owner@example.test',isActive:true}]} });
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ assert.throws(()=>h.handlers.get('studio:browserStatus')({sender:{},senderFrame:event.senderFrame}),/Недопустимый источник/);
+ assert.throws(()=>h.handlers.get('studio:requestBrowserAccess')({sender:event.sender,senderFrame:{url:'https://example.test'}}),/Недопустимый источник/);
+ await assert.rejects(h.handlers.get('studio:inspectBrowser')(event,99),/отключён или удалён/);
+ assert.equal((await h.handlers.get('studio:browserStatus')(event)).trusted,false);
+ await h.handlers.get('studio:requestBrowserAccess')(event);assert(!h.events.includes('native-permission'),'Cancel never requests OS access');
+ h.setChoice(1);await h.handlers.get('studio:requestBrowserAccess')(event);assert(h.events.includes('native-permission'));
+ const result=await h.handlers.get('studio:inspectBrowser')(event,7,{pid:999});assert.equal(result.accountMatch,true);
+ assert(h.events.some(e=>Array.isArray(e)&&e[0]==='native-inspect'&&e[1]===7&&e[2]==='owner@example.test'));
+
+ h.runtime.jobs=[{status:'running'}];
+ await assert.rejects(h.handlers.get('studio:inspectBrowser')(event,7),/завершения генерации/);
+});
+
+
+test('native submit rejects unknown preparation token before any browser or generation work',async()=>{
+ const h=await launch(),event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ await assert.rejects(h.handlers.get('studio:submitNativeBrowser')(event,{token:'not-issued'}),/устарел/);
+ assert.throws(()=>h.handlers.get('studio:submitNativeBrowser')({sender:{},senderFrame:event.senderFrame},{token:'not-issued'}),/Недопустимый источник/);
 });

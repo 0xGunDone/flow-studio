@@ -1376,17 +1376,14 @@ class Database:
             await db.commit()
 
     async def clear_generation_cooldown(self, token_id: int) -> bool:
-        """Clear a local pause atomically without bypassing an active restriction."""
+        """Explicitly clear the app-local pause; preserve account and Google state."""
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
                 UPDATE tokens SET generation_cooldown_until = NULL
-                WHERE id = ? AND NOT (
-                    COALESCE(generation_last_error, '') LIKE '%PUBLIC_ERROR_UNUSUAL_ACTIVITY%'
-                    AND COALESCE(julianday(generation_cooldown_until) > julianday(?), 0)
-                )
+                WHERE id = ?
                 """,
-                (token_id, datetime.now(timezone.utc)),
+                (token_id,),
             )
             await db.commit()
             return cursor.rowcount > 0

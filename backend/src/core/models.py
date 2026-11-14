@@ -75,9 +75,7 @@ class Token(BaseModel):
 
     @property
     def generation_cooldown_reset_allowed(self) -> bool:
-        return not self.generation_cooldown_remaining_seconds or (
-            "PUBLIC_ERROR_UNUSUAL_ACTIVITY" not in self.generation_last_error
-        )
+        return True
 
 
 class Project(BaseModel):

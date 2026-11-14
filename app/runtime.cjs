@@ -13,7 +13,7 @@ const BASE = 'http://127.0.0.1:38000';
 const COMMAND_ENV = {...process.env, PATH:[process.env.PATH,'/opt/homebrew/bin','/usr/local/bin','/Applications/Docker.app/Contents/Resources/bin','/usr/bin','/bin','/usr/sbin','/sbin'].filter(Boolean).join(':')};
 const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
 function publicAccount(t) {
-  const account={id:t.id,email:t.login_account||t.email,credits:t.credits??0,isActive:!!t.is_active,videoEnabled:t.video_enabled!==false};
+  const account={id:t.id,email:t.login_account||t.email,credits:t.credits??0,isActive:!!t.is_active,serverActive:!!t.is_active,manualDisabled:t.ban_reason==='manual_disabled',videoEnabled:t.video_enabled!==false};
   const fields={generation_cooldown_until:'cooldownUntil',generation_last_error:'lastGenerationError',generation_last_error_at:'lastGenerationErrorAt',generation_cooldown_remaining_seconds:'cooldownRemainingSeconds',generation_cooldown_reset_allowed:'cooldownResetAllowed'};
   for(const [source,target] of Object.entries(fields))if(Object.hasOwn(t,source))account[target]=t[source];
   return account;
@@ -130,7 +130,12 @@ class Runtime {
     Object.assign(this,{composePath,databasePath,dataDir,onEvent});
     this.ready=false;this.message='Запускаем Flow Studio…';this.models=[];this.accounts=[];this.accountRefreshVersion=0;this.accountAppliedVersion=0;this.jobs=[];
     this.sessionCookie='';this.startTask=null;this.aborts=new Map();this.persistTask=Promise.resolve();
-    this.closing=false;this.closeTask=null;this.engineManaged=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();this.retryInputs=new Set();this.retryTask=null;
+    this.closing=false;this.closeTask=null;this.engineManaged=false;this.engineContainer=null;this.engineContainerCaptureFailed=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();this.retryInputs=new Set();this.retryTask=null;this.browserEngine=null;this.browserAccountState=new Map();this.accountParticipation=new Map();
+  }
+  attachBrowserEngine(engine){
+    if(!engine||typeof engine.supports!=='function'||typeof engine.generate!=='function')throw new Error('Неверный браузерный движок.');
+    if(this.closing||this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед подключением браузерного движка.');
+    this.browserEngine=engine;
   }
   status(message,ready=this.ready){this.message=message;this.ready=ready;this.onEvent({type:'status',message,ready});}
   initializeHistory(){
@@ -138,6 +143,14 @@ class Runtime {
     this.historyTask=(async()=>{
       await fs.mkdir(this.dataDir,{recursive:true,mode:0o700});
       try{this.jobs=JSON.parse(await fs.readFile(path.join(this.dataDir,'history.json'),'utf8')).filter(j=>j&&typeof j.id==='string');}catch{this.jobs=[];}
+      try{
+        const saved=JSON.parse(await fs.readFile(path.join(this.dataDir,'browser-account-state.json'),'utf8'));
+        if(saved.version===1&&Array.isArray(saved.accounts))for(const account of saved.accounts)if(Number.isSafeInteger(account?.id)&&account.id>0&&typeof account.email==='string'&&account.email&&typeof account.lastGenerationError==='string'&&Number.isFinite(Date.parse(account.lastGenerationErrorAt))&&(account.cooldownUntil===null||Number.isFinite(Date.parse(account.cooldownUntil))))this.browserAccountState.set(account.id,{id:account.id,email:account.email,cooldownUntil:account.cooldownUntil,lastGenerationError:account.lastGenerationError.slice(0,1200),lastGenerationErrorAt:account.lastGenerationErrorAt});
+      }catch{}
+      try{
+        const saved=JSON.parse(await fs.readFile(path.join(this.dataDir,'account-participation.json'),'utf8'));
+        if(saved.version===1&&Array.isArray(saved.accounts))for(const account of saved.accounts)if(Number.isSafeInteger(account?.id)&&account.id>0&&typeof account.email==='string'&&account.email&&typeof account.enabled==='boolean')this.accountParticipation.set(account.id,{id:account.id,email:account.email,enabled:account.enabled});
+      }catch{}
       for(const job of this.jobs)if(job.status==='running'){job.status='failed';job.error='Приложение закрылось до завершения генерации. Проверьте результат в Flow перед новым запросом.';job.unknownOutcome=true;}
       this.jobs=this.jobs.slice(0,100);
       for(const job of this.jobs){
@@ -176,6 +189,21 @@ class Runtime {
     return this.startTask;
   }
   command(command,args,options){return exec(command,args,{env:COMMAND_ENV,...options});}
+  async inspectEngineContainer(id,signal){
+    const invalid=()=>new Error('Не удалось подтвердить принадлежащий приложению контейнер движка.');
+    if(typeof id!=='string'||!/^[a-f0-9]{64}$/.test(id))throw invalid();
+    const format='{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+    const {stdout}=await this.command('docker',['inspect','--type','container','--format',format,id],{timeout:15000,maxBuffer:65536,...(signal?{signal}:{})});
+    let identity;try{identity=JSON.parse(stdout);}catch{throw invalid();}
+    if(identity?.id!==id||identity.service!=='flow2api'||typeof identity.project!=='string'||!/^[a-z0-9][a-z0-9_-]{0,127}$/.test(identity.project))throw invalid();
+    return Object.freeze({id,project:identity.project,service:identity.service});
+  }
+  async captureEngineContainer(signal){
+    this.engineContainer=null;this.engineContainerCaptureFailed=true;
+    const {stdout}=await this.command('docker',['compose','-f',this.composePath,'ps','-q','flow2api'],{timeout:15000,maxBuffer:65536,signal});
+    this.engineContainer=await this.inspectEngineContainer(typeof stdout==='string'?stdout.trim():'',signal);
+    this.engineContainerCaptureFailed=false;
+  }
   async ensureEngine(){
     const signal=this.startController.signal;
     if(await this.health()){
@@ -192,6 +220,7 @@ class Runtime {
     signal.throwIfAborted();this.engineManaged=true;
     this.status('Подготавливаем генератор. Первый запуск скачивает зависимости и может занять 10–20 минут…',false);
     await this.command('docker',['compose','-f',this.composePath,'up','-d','flow2api'],{timeout:1800000,maxBuffer:16*1024*1024,signal});
+    await this.captureEngineContainer(signal);
     for(let i=0;i<60;i++){
       signal.throwIfAborted();
       if(await this.health())return;
@@ -216,14 +245,21 @@ class Runtime {
   snapshot(){return {ready:this.ready,message:this.message,models:this.models,accounts:this.accounts,history:this.publicJobs()};}
   publicJobs(){return this.jobs.map(j=>this.publicJob(j));}
   publicJob(job){
-    const fields=['id','model','prompt','kind','createdAt','status','progress','error','needsLogin','elapsedSeconds','accountId','accountEmail','retryOf','unknownOutcome','errorCode'];
+    const fields=['id','model','prompt','kind','createdAt','status','progress','error','needsLogin','elapsedSeconds','accountId','accountEmail','retryOf','unknownOutcome','errorCode','generationEngine','recovering'];
     const result=Object.fromEntries(fields.filter(key=>Object.hasOwn(job,key)).map(key=>[key,job[key]]));
     const reason=this.retryBlockedReason(job);
-    return {...result,retryAvailable:!reason,...(reason?{retryBlockedReason:reason}:{}),media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};
+    const recoveryReason=this.recoveryBlockedReason(job);
+    return {...result,retryAvailable:!reason,...(reason?{retryBlockedReason:reason}:{}),recoveryAvailable:!recoveryReason,...(job.generationEngine==='isolated-browser'&&job.unknownOutcome&&recoveryReason?{recoveryBlockedReason:recoveryReason}:{}),media:(job.media||[]).map((m,i)=>({...m,url:m.path?'flow-media://'+job.id+'/'+i:m.url}))};
+  }
+  recoveryBlockedReason(job){
+    if(job.generationEngine!=='isolated-browser'||job.status!=='failed'||!job.unknownOutcome)return 'Проверка доступна для незавершенной задачи фонового браузера.';
+    if(typeof this.browserEngine?.recover!=='function')return 'Обновите приложение для проверки существующей задачи.';
+    if(job.errorCode==='BROWSER_RECEIPT_MISSING')return 'Запись отправки не сохранена. Проверьте прежнюю задачу в Flow вручную.';
+    return '';
   }
   retryBlockedReason(job){
     if(job.status==='running')return 'Дождитесь завершения генерации.';
-    if(job.unknownOutcome||job.errorCode==='outcome_unknown'||job.cancelRequested)return 'Результат запроса неизвестен. Проверьте задачу в Flow перед новым запросом.';
+    if(job.unknownOutcome||job.errorCode==='outcome_unknown'||job.cancelRequested&&job.unknownOutcome!==false)return 'Результат запроса неизвестен. Проверьте задачу в Flow перед новым запросом.';
     if(/\bPUBLIC_ERROR_(?:MINOR|UNSAFE_GENERATION|PROMINENT_PEOPLE_FILTER_FAILED)\b/.test([job.errorCode,job.error].join('\n')))return 'Google Flow отклонил содержимое. Измените запрос или исходные файлы перед новой генерацией.';
     if(!this.retryInputs.has(job.id))return 'Исходные файлы для повтора не сохранены. Перенесите запрос в редактор и добавьте их заново.';
     if(!Number.isSafeInteger(job.accountId)||job.accountId<=0||!job.accountEmail)return 'Аккаунт исходного запроса не определён. Перенесите запрос в редактор.';
@@ -262,7 +298,31 @@ class Runtime {
     const rows=await this.request('/api/tokens',options);
     if(version<this.accountAppliedVersion)return this.accounts;
     this.accountAppliedVersion=version;
-    this.accounts=rows.map(publicAccount);this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});return this.accounts;
+    const present=new Map(rows.map(row=>[row.id,String(row.login_account||row.email||'').toLowerCase()]));
+    for(const [id,intent] of this.accountParticipation)if(present.get(id)!==intent.email.toLowerCase())this.accountParticipation.delete(id);
+    this.accounts=rows.map(row=>this.withParticipation(this.withBrowserCooldown(publicAccount(row))));this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});return this.accounts;
+  }
+  withParticipation(account){
+    const intent=this.accountParticipation.get(account.id);
+    if(!intent||intent.email.toLowerCase()!==account.email?.toLowerCase())return account;
+    return {...account,isActive:!account.manualDisabled&&intent.enabled};
+  }
+  withBrowserCooldown(account){
+    const local=this.browserAccountState.get(account.id);
+    if(!local||local.email.toLowerCase()!==account.email?.toLowerCase())return account;
+    const now=Date.now(),localUntil=Date.parse(local.cooldownUntil)||0,serverUntil=Date.parse(account.cooldownUntil)||0,until=Math.max(localUntil,serverUntil);
+    const latest=!(Date.parse(account.lastGenerationErrorAt)>Date.parse(local.lastGenerationErrorAt))?local:account;
+    return {...account,cooldownUntil:until?new Date(until).toISOString():null,lastGenerationError:latest.lastGenerationError,lastGenerationErrorAt:latest.lastGenerationErrorAt,cooldownRemainingSeconds:Math.max(0,Math.ceil((until-now)/1000)),cooldownResetAllowed:true};
+  }
+  recordBrowserAccountFailure(job,error){
+    if(error.accountFailure!==true||error.generationTerminal!==true||!Number.isSafeInteger(job.accountId)||!job.accountEmail||/\bPUBLIC_ERROR_(?:MINOR|UNSAFE_GENERATION|PROMINENT_PEOPLE_FILTER_FAILED)\b/.test([error.code,error.publicCode,error.message].join('\n')))return;
+    const now=Date.now(),previous=this.browserAccountState.get(job.accountId),sameAccount=previous?.email.toLowerCase()===job.accountEmail.toLowerCase();
+    // Keep an active Google unusual-activity hold intact when another error arrives.
+    if(sameAccount&&Date.parse(previous.cooldownUntil)>now&&/\bPUBLIC_ERROR_UNUSUAL_ACTIVITY[A-Z0-9_]*\b/.test(previous.lastGenerationError))return;
+    const publicCode=[error.publicCode,error.code,error.message].find(value=>typeof value==='string'&&/\bPUBLIC_ERROR_[A-Z0-9_]+\b/.test(value))?.match(/\bPUBLIC_ERROR_[A-Z0-9_]+\b/)?.[0];
+    const lastGenerationError=(publicCode?publicCode+': ':'')+String(error.message||error.code||'Google Flow отклонил генерацию.');
+    this.browserAccountState.set(job.accountId,{id:job.accountId,email:job.accountEmail,cooldownUntil:new Date(now+30*60*1000).toISOString(),lastGenerationError:lastGenerationError.slice(0,1200),lastGenerationErrorAt:new Date(now).toISOString()});
+    this.accounts=this.accounts.map(account=>this.withBrowserCooldown(account));
   }
   async checkAccount(accountId,{signal}={}){
     if(!Number.isSafeInteger(accountId)||accountId<=0)throw new Error('Аккаунт не найден.');
@@ -276,21 +336,29 @@ class Runtime {
   }
   async setAccountActive(accountId,enabled){
     if(!Number.isSafeInteger(accountId)||accountId<=0||typeof enabled!=='boolean')throw new Error('Неверные параметры аккаунта.');
-    if(!(await this.refreshAccounts()).some(a=>a.id===accountId))throw new Error('Аккаунт не найден.');
+    const before=(await this.refreshAccounts()).find(a=>a.id===accountId);if(!before)throw new Error('Аккаунт не найден.');
     const result=await this.request('/api/tokens/'+accountId+(enabled?'/enable':'/disable'),{method:'POST'});
     if(result.success!==true)throw new Error('Не удалось изменить состояние аккаунта.');
     const accounts=await this.refreshAccounts();
-    if(accounts.find(a=>a.id===accountId)?.isActive!==enabled)throw new Error('Сервер не подтвердил состояние аккаунта.');
-    return {accounts};
+    const after=accounts.find(a=>a.id===accountId);
+    if(!after||after.email?.toLowerCase()!==before.email?.toLowerCase()||(after.serverActive??after.isActive)!==enabled)throw new Error('Сервер не подтвердил состояние аккаунта.');
+    const previous=this.accountParticipation.get(accountId);this.accountParticipation.set(accountId,{id:accountId,email:after.email,enabled});
+    try{await this.persist();}catch(error){if(previous)this.accountParticipation.set(accountId,previous);else this.accountParticipation.delete(accountId);throw error;}
+    this.accounts=accounts.map(account=>this.withParticipation(account));this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});
+    return {accounts:this.accounts};
   }
   async clearCooldown(accountId){
     if(!Number.isSafeInteger(accountId)||accountId<=0)throw new Error('Аккаунт не найден.');
     if(this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед сбросом паузы.');
     const account=(await this.refreshAccounts()).find(a=>a.id===accountId);
     if(!account)throw new Error('Аккаунт не найден.');
-    if(account.cooldownResetAllowed===false&&Date.parse(account.cooldownUntil)>Date.now())throw new Error('Пауза Google Flow UNUSUAL_ACTIVITY пока не допускает ручной сброс. Дождитесь её окончания.');
     const result=await this.request('/api/tokens/'+accountId+'/clear-cooldown',{method:'POST'});
     if(result.success!==true)throw new Error('Не удалось сбросить паузу аккаунта.');
+    const local=this.browserAccountState.get(accountId);
+    if(local&&local.email.toLowerCase()===account.email?.toLowerCase()){
+      this.browserAccountState.set(accountId,{...local,cooldownUntil:null});
+      try{await this.persist();}catch(error){this.browserAccountState.set(accountId,local);throw error;}
+    }
     const accounts=await this.refreshAccounts();
     const after=accounts.find(a=>a.id===accountId);
     if(!after||after.email?.toLowerCase()!==account.email?.toLowerCase()||Date.parse(after.cooldownUntil)>Date.now())throw new Error('Сервер не подтвердил сброс паузы.');
@@ -304,6 +372,8 @@ class Runtime {
     if(result.success!==true)throw new Error('Не удалось удалить подключение.');
     this.accountAppliedVersion=++this.accountRefreshVersion;
     this.accounts=this.accounts.filter(a=>a.id!==accountId);
+    const hadCooldown=this.browserAccountState.delete(accountId),hadParticipation=this.accountParticipation.delete(accountId);
+    if(hadCooldown||hadParticipation)await this.persist();
     this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});
     return {deleted:true,accounts:this.accounts};
   }
@@ -358,7 +428,11 @@ class Runtime {
   async persist(){
     const save=async()=>{
       const target=path.join(this.dataDir,'history.json'),temp=target+'.tmp';
-      await fs.writeFile(temp,JSON.stringify(this.jobs.slice(0,100)),{mode:0o600});await fs.rename(temp,target);
+      await fs.writeFile(temp,JSON.stringify(this.jobs.slice(0,100)),{mode:0o600,flush:true});await fs.rename(temp,target);
+      const state=path.join(this.dataDir,'browser-account-state.json'),stateTemp=state+'.tmp';
+      await fs.writeFile(stateTemp,JSON.stringify({version:1,accounts:[...this.browserAccountState.values()]}),{mode:0o600,flush:true});await fs.rename(stateTemp,state);
+      const participation=path.join(this.dataDir,'account-participation.json'),participationTemp=participation+'.tmp';
+      await fs.writeFile(participationTemp,JSON.stringify({version:1,accounts:[...this.accountParticipation.values()]}),{mode:0o600,flush:true});await fs.rename(participationTemp,participation);
     };
     this.persistTask=this.persistTask.catch(()=>{}).then(save);
     return this.persistTask;
@@ -426,9 +500,12 @@ class Runtime {
   }
   generate(input,{retryOf,accountId,accountEmail,videoNames}={}){
     if(this.closing)throw new Error('Приложение закрывается.');
+    if(this.nativeBrowserPending)throw new Error('Сначала завершите или отмените подготовку в обычном Chrome.');
     if(this.retryTask&&!retryOf)throw new Error('Дождитесь подготовки повтора.');
     if(!this.ready)throw new Error('Генератор ещё запускается.');
     if(!input||!this.models.some(m=>m.id===input.model))throw new Error('Выберите доступную модель.');
+    if(Object.hasOwn(input,'accountId')&&(!Number.isSafeInteger(input.accountId)||input.accountId<=0))throw new Error('Неверный аккаунт для генерации.');
+    accountId=accountId??input.accountId;
     if(typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
     const info=modelInfo(this.models.find(m=>m.id===input.model));
     if(input.images&&input.references)throw new Error('Передайте images или references.');
@@ -437,20 +514,90 @@ class Runtime {
     const images=refs.filter(r=>r.kind==='image').map(r=>r.dataUrl),videos=refs.filter(r=>r.kind==='video').map(r=>r.path);
     if(images.length>info.maxImages||images.some(s=>typeof s!=='string'||s.length>28*1024*1024||!/^data:image\/(?:png|jpeg|webp|gif);base64,/.test(s)))throw new Error('Слишком много изображений или неверный формат. Изображение: до 20 МБ.');
     if(videos.length>(info.maxVideos||0)||videos.some(p=>typeof p!=='string'||!path.isAbsolute(p)||! /\.(mp4|mov|m4v)$/i.test(p))||info.edit&&videos.length!==1)throw new Error(`Для редактирования Omni нужно одно видео MP4/MOV/M4V до ${info.maxInputDuration} секунд и до 100 МБ.`);
-    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||'',...(retryOf?{retryOf,accountId}:{})})).digest('hex');
+    const browserInput={model:input.model,prompt:input.prompt.trim(),references:refs,...(input.sourceVideoId?{sourceVideoId:input.sourceVideoId}:{})};
+    const browserEngine=this.browserEngine?.supports(browserInput)?this.browserEngine:null;
+    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||'',...(retryOf?{retryOf}:{}),...(accountId?{accountId}:{})})).digest('hex');
     if(input.requestId){
       const existing=this.jobs.find(j=>j.requestId===input.requestId);
       if(existing){if(existing.requestHash!==requestHash)throw new Error('requestId уже использован с другими параметрами.');return {jobId:existing.id};}
     }
     if(this.accountActionPending||this.accountCheckTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
-    const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{}),...(retryOf?{retryOf,accountId,accountEmail}:{})};
+    const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',generationEngine:browserEngine?'isolated-browser':'server',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{}),...(accountId?{accountId}:{}),...(retryOf?{retryOf,accountEmail}:{})};
     this.jobs.unshift(job);this.emitJob(job);
-    const task=this.runJob(job,images,input.sourceVideoId,videos,{accountId,videoNames}).catch(()=>{});
+    const task=this.runJob(job,images,input.sourceVideoId,videos,{accountId,videoNames,browserEngine}).catch(()=>{});
     this.jobTasks.add(task);task.finally(()=>this.jobTasks.delete(task));
     return {jobId:id};
   }
-  async runJob(job,images,sourceVideoId,videos=[],{accountId,videoNames=[]}={}){
+  cancelGeneration(jobId){
+    const job=this.jobs.find(job=>job.id===jobId);
+    if(!job)throw new Error('Задача не найдена.');
+    if(job.status!=='running')return {cancelled:false,jobId};
+    job.cancelRequested=true;job.progress='Отменяем ожидание…';this.emitJob(job);this.aborts.get(jobId)?.abort();
+    return {cancelled:true,jobId};
+  }
+  recoverGeneration(jobId){
+    if(typeof jobId!=='string'||!jobId||jobId.length>128)throw new Error('Неверный ID задачи.');
+    const job=this.jobs.find(job=>job.id===jobId);if(!job)throw new Error('Задача не найдена.');
+    if(this.closing||!this.ready)throw new Error(this.closing?'Приложение закрывается.':'Генератор ещё запускается.');
+    if(this.accountActionPending||this.accountCheckTask||this.retryTask||this.nativeBrowserPending)throw new Error('Дождитесь завершения текущего действия с аккаунтами или подготовкой.');
+    if(this.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь текущей генерации или проверки результата.');
+    const reason=this.recoveryBlockedReason(job);if(reason)throw new Error(reason);
+    job.status='running';job.recovering=true;job.progress='Проверяем прежний результат в Flow без новой отправки…';delete job.cancelRequested;this.emitJob(job);
+    const task=this.runRecovery(job).catch(()=>{});this.jobTasks.add(task);task.finally(()=>this.jobTasks.delete(task));
+    return {jobId};
+  }
+  async browserMedia(job,result){
+    if(result?.accountId!==undefined&&result.accountId!==job.accountId||result?.accountEmail!==undefined&&(typeof result.accountEmail!=='string'||result.accountEmail.toLowerCase()!==job.accountEmail?.toLowerCase())){const error=new Error('Браузер подтвердил другой Google-аккаунт. Проверьте подключение.');error.code='account_changed';throw error;}
+    if(!Array.isArray(result?.media)||!result.media.length)throw new Error('Генерация завершилась без изображения или видео.');
+    const media=[];
+    for(const item of result.media){
+      if(!item||!['image','video'].includes(item.kind)||!item.path&&!allowedMediaUrl(item.url))throw new Error('Браузер вернул неподдерживаемый результат.');
+      const output={kind:item.kind,...(typeof item.mediaGenerationId==='string'?{mediaGenerationId:item.mediaGenerationId}:{}),...(allowedMediaUrl(item.url)?{url:item.url}:{})};
+      if(item.path){
+        if(typeof item.path!=='string'||!path.isAbsolute(item.path)||item.path.includes('\0'))throw new Error('Браузер вернул неверный путь результата.');
+        const file=await fs.open(item.path,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
+        try{const stat=await file.stat();if(!stat.isFile()||stat.size<=0||stat.size>512*1024*1024)throw new Error('Браузер вернул пустой или слишком большой файл.');}finally{await file.close();}
+        output.path=item.path;
+      }
+      media.push(output);
+    }
+    return media;
+  }
+  async inspectBrowserVideo(file,{signal}={}){
+    signal?.throwIfAborted();
+    if(typeof this.databasePath!=='string'||!path.isAbsolute(this.databasePath)||typeof this.composePath!=='string'||!path.isAbsolute(this.composePath))throw new Error('Не настроена проверка исходного видео локальным движком.');
+    const staged=await stageVideo(file,path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs'));
+    try{
+      signal?.throwIfAborted();
+      const script="import asyncio,json,sys; from src.services.video_inputs import read_video_reference; r=asyncio.run(read_video_reference(json.loads(sys.argv[1]),max_duration_seconds=15)); print(json.dumps({'duration':r['duration_seconds'],'mimeType':r['mime_type'],'filename':r['filename'],'width':r['width'],'height':r['height']}))";
+      const {stdout}=await this.command('docker',['compose','-f',this.composePath,'exec','-T','flow2api','python','-c',script,JSON.stringify(staged.reference)],{timeout:30000,maxBuffer:65536,signal});
+      signal?.throwIfAborted();let metadata;try{metadata=JSON.parse(stdout);}catch{throw new Error('Локальный движок не подтвердил параметры видео.');}
+      if(typeof metadata?.duration!=='number'||!Number.isFinite(metadata.duration)||metadata.duration<=0||metadata.duration>15.02||metadata.mimeType!==staged.reference.mime_type||!Number.isInteger(metadata.width)||metadata.width<=0||metadata.width>32768||!Number.isInteger(metadata.height)||metadata.height<=0||metadata.height>32768)throw new Error('Omni 1.2 Edit принимает видео длительностью до 15 секунд. Проверьте исходный файл.');
+      return {duration:metadata.duration,durationSeconds:metadata.duration,mimeType:metadata.mimeType,filename:staged.reference.filename,width:metadata.width,height:metadata.height};
+    }finally{await fs.unlink(staged.target).catch(()=>{});}
+  }
+  async runRecovery(job){
+    const start=Date.now(),controller=new AbortController();this.aborts.set(job.id,controller);const timer=setTimeout(()=>controller.abort(),35*60*1000);
+    try{
+      await this.persist();controller.signal.throwIfAborted();
+      const account=(await this.refreshAccounts()).find(account=>account.id===job.accountId&&account.email?.toLowerCase()===job.accountEmail?.toLowerCase());
+      if(!account){const error=new Error('Исходный аккаунт изменился или удален. Подключите тот же аккаунт перед проверкой результата.');error.code='account_changed';throw error;}
+      const result=await this.browserEngine.recover(job.id,{signal:controller.signal,onProgress:text=>{if(typeof text==='string'&&text.trim()){job.progress=text.slice(-600);this.emitJob(job);}},expected:{accountId:job.accountId,accountEmail:job.accountEmail,model:job.model,prompt:job.prompt}});
+      const media=await this.browserMedia(job,result);job.media=media;
+      for(let i=0;i<media.length;i++)if(!media[i].path)try{media[i].path=await this.cacheMedia(job.id,i,media[i],controller.signal);}catch{}
+      job.status='succeeded';job.unknownOutcome=false;job.progress='Готово';job.needsLogin=false;delete job.error;delete job.errorCode;delete job.cancelRequested;
+    }catch(error){
+      job.status='failed';job.unknownOutcome=!(error.generationTerminal===true&&error.unknownOutcome!==true&&!job.cancelRequested&&!this.closing&&!controller.signal.aborted);
+      if(error.code)job.errorCode=error.code;
+      job.error=this.closing?'Проверка прервана при закрытии приложения. Прежняя задача не отправлялась повторно.':job.cancelRequested?'Проверка результата отменена. Прежняя задача не отправлялась повторно.':error.name==='AbortError'?'Время проверки истекло. Прежняя задача не отправлялась повторно.':error.message;
+      job.progress=job.error;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');
+      this.recordBrowserAccountFailure(job,error);
+    }finally{
+      clearTimeout(timer);this.aborts.delete(job.id);delete job.recovering;job.elapsedSeconds=(job.elapsedSeconds||0)+Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});if(!this.closing&&this.ready)await this.refreshAccounts().catch(()=>{});
+    }
+  }
+  async runJob(job,images,sourceVideoId,videos=[],{accountId,videoNames=[],browserEngine=null}={}){
     const start=Date.now(),controller=new AbortController();this.aborts.set(job.id,controller);
     const timer=setTimeout(()=>controller.abort(),35*60*1000);
     const staged=[];let submitted=false;
@@ -464,20 +611,46 @@ class Runtime {
       await this.start();
       if(!this.ready)throw new Error(this.message);
       const savedVideos=await this.saveRetryInput(job,images,sourceVideoId,videos,videoNames);
-      for(let i=0;i<savedVideos.length;i++){
-        const file=await stageVideo(savedVideos[i],path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs'));
-        file.reference.filename=videoNames[i]||path.basename(videos[i]).slice(0,256);staged.push(file);
+      const onProgress=text=>{if(typeof text==='string'&&text.trim()){job.progress=text.slice(-600);this.emitJob(job);}};
+      let media;
+      if(browserEngine){
+        const accounts=await this.refreshAccounts(),enabled=accounts.filter(account=>Number.isSafeInteger(account.id)&&account.id>0&&typeof account.email==='string'&&account.email&&account.isActive&&(job.kind==='image'||account.videoEnabled!==false)),available=enabled.filter(account=>!(Date.parse(account.cooldownUntil)>Date.now()));
+        const account=accountId?accounts.find(account=>account.id===accountId):available.find(account=>account.browserReady!==false)||available[0]||enabled[0];
+        if(!account){const error=new Error(accountId?'Исходный аккаунт недоступен для генерации.':'Нет включённого аккаунта, доступного для генерации.');error.code='account_unavailable';throw error;}
+        if(job.accountEmail&&account.email?.toLowerCase()!==job.accountEmail.toLowerCase()){const error=new Error('Исходный аккаунт изменился. Подключите его заново.');error.code='account_changed';throw error;}
+        job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);
+        if(!enabled.includes(account)){const error=new Error('Исходный аккаунт недоступен для генерации.');error.code='account_unavailable';throw error;}
+        if(Date.parse(account.cooldownUntil)>Date.now()){const error=new Error('Аккаунт на паузе после ошибки. Дождитесь окончания паузы или сбросьте её вручную.');error.code='account_cooldown';throw error;}
+        const onAccount=value=>{
+          if(value?.id!==account.id||typeof value.email!=='string'||value.email.toLowerCase()!==account.email?.toLowerCase()){const error=new Error('Браузер подтвердил другой Google-аккаунт. Проверьте подключение.');error.code='account_changed';throw error;}
+        };
+        let preparingSubmit=false;
+        const beforeSubmit=async()=>{
+          controller.signal.throwIfAborted();
+          if(preparingSubmit)throw new Error('Запрос уже отправлялся.');
+          preparingSubmit=true;job.unknownOutcome=true;await this.persist();controller.signal.throwIfAborted();submitted=true;
+        };
+        controller.signal.throwIfAborted();
+        const result=await browserEngine.generate({jobId:job.id,model:job.model,prompt:job.prompt,references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...savedVideos.map(file=>({kind:'video',path:file}))],...(sourceVideoId?{sourceVideoId}:{}),accountId:account.id,accountEmail:account.email},{signal:controller.signal,onProgress,onAccount,beforeSubmit});
+        if(!submitted)throw new Error('Браузер не подтвердил отправку запроса.');
+        media=await this.browserMedia(job,result);
+      }else{
+        for(let i=0;i<savedVideos.length;i++){
+          const file=await stageVideo(savedVideos[i],path.join(path.dirname(path.dirname(this.databasePath)),'tmp','flow-studio-inputs'));
+          file.reference.filename=videoNames[i]||path.basename(videos[i]).slice(0,256);staged.push(file);
+        }
+        this.credentials=await readCredentials(this.databasePath,this.composePath,this.command.bind(this),controller.signal);
+        controller.signal.throwIfAborted();submitted=true;
+        const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true,...(staged.length?{video_references:staged.map(x=>x.reference)}:{}),...(accountId?{flow_studio_account_id:accountId}:{})},this.credentials.apiKey,controller.signal);
+        media=await consumeGeneration(response,onProgress,account=>{job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);});
       }
-      this.credentials=await readCredentials(this.databasePath,this.composePath,this.command.bind(this),controller.signal);
-      controller.signal.throwIfAborted();submitted=true;
-      const response=await generationRequest({model:job.model,messages:[{role:'user',content}],stream:true,...(staged.length?{video_references:staged.map(x=>x.reference)}:{}),...(accountId?{flow_studio_account_id:accountId}:{})},this.credentials.apiKey,controller.signal);
-      const media=await consumeGeneration(response,text=>{job.progress=text;this.emitJob(job);},account=>{job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);});
       job.media=media;
       for(let i=0;i<media.length;i++){
+        if(media[i].path)continue;
         try{media[i].path=await this.cacheMedia(job.id,i,media[i],controller.signal);}catch{ /* Original URL remains usable; save can retry. */ }
       }
-      job.status='succeeded';job.progress='Готово';
-    }catch(e){job.status='failed';job.unknownOutcome=submitted&&(!e.generationTerminal||e.unknownOutcome||this.closing||job.cancelRequested||e.name==='AbortError');if(e.code)job.errorCode=e.code;job.error=this.closing?'Приложение закрыто. Задача Google могла продолжиться; проверьте Flow перед повтором.':job.cancelRequested?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':e.name==='AbortError'?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;}
+      job.status='succeeded';job.unknownOutcome=false;delete job.cancelRequested;job.progress='Готово';
+    }catch(e){job.status='failed';job.unknownOutcome=submitted&&(!e.generationTerminal||e.unknownOutcome||this.closing||job.cancelRequested||e.name==='AbortError');if(e.code)job.errorCode=e.code;job.error=this.closing?(submitted?'Приложение закрыто. Задача Google могла продолжиться; проверьте Flow перед повтором.':'Приложение закрыто до отправки запроса.'):job.cancelRequested?(submitted?'Ожидание отменено. Задача Google могла продолжиться; проверьте Flow перед повтором.':'Генерация отменена до отправки запроса.'):e.name==='AbortError'?(submitted?'Время ожидания истекло. Проверьте результат в Flow перед повтором.':'Время ожидания истекло до отправки запроса.'):e.message;job.needsLogin=/rpc\s*=\s*[A-Za-z0-9]+\s*,\s*code\s*=\s*401\b|Google Flow[^\n]*авторизац|Токен AT недействителен/i.test(job.error||'');job.progress=job.error;if(browserEngine)this.recordBrowserAccountFailure(job,e);}
     finally{
       for(const file of staged)await fs.unlink(file.target).catch(()=>{});
       clearTimeout(timer);this.aborts.delete(job.id);job.elapsedSeconds=Math.round((Date.now()-start)/1000);this.emitJob(job);await this.persist().catch(()=>{});if(!this.closing&&this.ready)await this.refreshAccounts().catch(()=>{});
@@ -515,8 +688,16 @@ class Runtime {
       try{await this.persist();}
       finally{
         if(this.engineManaged){
-          await this.command('docker',['compose','-f',this.composePath,'stop','--timeout','15','flow2api'],{timeout:45000,maxBuffer:1024*1024});
+          if(this.engineContainer){
+            const current=await this.inspectEngineContainer(this.engineContainer.id);
+            if(current.project!==this.engineContainer.project||current.service!==this.engineContainer.service)throw new Error('Не удалось подтвердить принадлежащий приложению контейнер движка.');
+            await this.command('docker',['stop','--timeout','15',this.engineContainer.id],{timeout:45000,maxBuffer:1024*1024});
+          }else{
+            if(this.engineContainerCaptureFailed)throw new Error('Не удалось подтвердить принадлежащий приложению контейнер движка.');
+            await this.command('docker',['compose','-f',this.composePath,'stop','--timeout','15','flow2api'],{timeout:45000,maxBuffer:1024*1024});
+          }
           this.engineManaged=false;
+          this.engineContainer=null;
         }
       }
     })().catch(error=>{this.closeTask=null;throw error;});
