@@ -81,11 +81,8 @@ async function harness(t, options = {}) {
     if (op === 'state') return { url: state.url, accountButtons: 1, projectLinks: [{ href: '/project/project-owned' }] };
     if (op === 'controls' || op === 'mode-inspection' || op === 'upload-options') return { buttons: ['Account information', 'Start generation'], radios: state.settingsOpen ? ['Video', 'Ingredients', '16:9', '720p'] : [], textboxes: ['What do you want to create?'], ranges: [] };
     if (op === 'recovery-diagnostic') return { cards: [] };
-    if (op === 'arm-video-input') { assert.equal(options.edit, true); state.videoInputNonce = arg.nonce; return true; }
     if (op === 'control-point') { assert.equal(options.edit, true); assert.equal(arg.name, 'Загрузить'); return { x: 100, y: 100 }; }
     if (op === 'control-box') { assert.equal(options.edit, true); assert.equal(arg.name,state.videoPicker?'Загрузить':'Начать генерацию'); return { x: 100, y: 100, left: 50, top: 80, width: 100, height: 40 }; }
-    if (op === 'video-input') { assert.equal(arg.nonce, state.videoInputNonce); return { type: 'object', subtype: 'node', objectId: 'file-input-owned' }; }
-    if (op === 'release-video-input') { assert.equal(arg.nonce, state.videoInputNonce); state.videoInputReleased = true; return true; }
     if (op === 'video-uploaded') {
       if (options.requireVideoRights && !state.rightsAccepted) throw failure('FLOW_UPLOAD_CONSENT_REQUIRED');
       assert.equal(state.videoUploads?.length, 1); assert.equal(arg.name, path.basename(state.videoUploads[0].file));
@@ -100,7 +97,12 @@ async function harness(t, options = {}) {
       if (arg.sourceScene?.url && arg.sourceScene.url !== state.url) throw failure('SOURCE_VIDEO_NOT_VERIFIED');
       return { url: state.url, poster: options.sourcePoster || 'https://flow.google.com/asb/source-video-poster' };
     }
-    if (op === 'edit-settings') { assert.equal(state.videoEditor, true); if (!arg.choose) assert.equal(state.model, 'Omni 1.2 Flash'); return { model: state.model, clipCount: 1, url: state.url }; }
+    if (op === 'edit-settings') {
+      assert.equal(state.videoEditor, true);
+      if(arg.choose){state.editMenuOpen=true;return true;}if(arg.close){state.editMenuOpen=false;return true;}
+      assert.equal(state.model, 'Omni 1.2 Flash');
+      return {model:state.model,clipCount:1,url:state.url,...(arg.quote?{credits:options.editCreditQuote??9}:{})};
+    }
     if (op === 'failure-state') {
       if (options.diagnosticError) throw failure('DIAGNOSTIC_FAILED', 'Diagnostic must not replace transaction failure');
       return { url: state.url, regions: [{ name: 'History', tag: 'ASIDE', chars: 32 }], buttons: [{ name: 'История', tag: 'BUTTON' }], videos: 1 };
@@ -113,6 +115,7 @@ async function harness(t, options = {}) {
       assert.equal(state.rightsAccepts, 0); state.rightsAccepts++; state.rightsAccepted = true; return true;
     }
     if (op === 'composer-mode') return { agent: false, creative: false, ready: true };
+    if (op === 'close-empty-agent-panel') return false;
     if (op === 'close-agent' || op === 'manual-mode') assert.fail('Normal composer must not switch assistant modes');
     if (op === 'click') return click(arg.name);
     if (op === 'download-option') { if (arg.click) await click(arg.resolution + ' Исходный размер'); return true; }
@@ -229,13 +232,19 @@ async function harness(t, options = {}) {
         assert.ok(options.image || options.edit, 'Ordinary video submission must use verified website DOM click');
         assert.deepEqual(params, { type: params.type, button: params.type === 'mouseMoved' ? 'none' : 'left', buttons: params.type === 'mousePressed' ? 1 : 0, ...(params.type === 'mousePressed' ? { force: 0.5 } : {}), modifiers: 0, clickCount: params.type === 'mouseMoved' ? 0 : 1, x: 100, y: 100 });
         if (params.type === 'mousePressed') { if (options.edit && state.videoPicker) state.videoTrustedUploads = (state.videoTrustedUploads || 0) + 1; else { state.submitted++; order.push('submit'); options.onSubmit?.(state); } }
+        if(params.type==='mouseReleased'&&options.edit&&state.videoPicker&&!options.noVideoChooser){assert.equal(state.intercepting,true);for(const params of options.videoChooserEvents||[{frameId:FRAME,backendNodeId:73,mode:'selectMultiple'}])emit('Page.fileChooserOpened',params);}
         return {};
       }
       if (method === 'Page.enable') return {};
       if (method === 'Page.navigate') { assert.ok(options.recover || options.recoverAfterObservation); state.url = params.url; state.videoEditor=/\/edit\//.test(state.url);state.opened = false; state.currentCandidate = null; return { frameId: FRAME }; }
       if (method === 'Page.setInterceptFileChooserDialog') { state.intercepting = params.enabled; return {}; }
+      if (method === 'DOM.resolveNode') { assert.equal(options.edit,true);assert.deepEqual(params,{backendNodeId:73});state.videoResolved=true;return {object:{type:'object',subtype:'node',objectId:'video-file-input-owned'}}; }
+      if (method === 'Runtime.callFunctionOn') {
+        assert.equal(options.edit,true);assert.equal(params.objectId,'video-file-input-owned');assert.equal(params.returnByValue,true);assert.equal(params.awaitPromise,true);assert.equal(params.userGesture,true);assert.equal(params.arguments[0].value,state.url);assert.equal(params.arguments[1].value,'.mp4');assert.ok(params.functionDeclaration.includes('this instanceof HTMLInputElement'));
+        return {result:{value:{file:true,connected:true,sameDocument:true,sameWindow:true,rootDocument:true,rootSelf:false,flowOrigin:true,acceptVideo:true,url:state.url,...(options.videoInputMetadata||{})}}};
+      }
       if (method === 'DOM.setFileInputFiles') {
-        assert.equal(params.objectId, 'file-input-owned'); assert.equal(params.files.length, 1);
+        assert.equal(params.objectId, options.edit&&/\.(mp4|mov|m4v)$/i.test(params.files[0])?'video-file-input-owned':'file-input-owned'); assert.equal(params.files.length, 1);
         const file = params.files[0], bytes = await fs.readFile(file), name = path.basename(file), stat = await fs.stat(file);
         assert.equal(stat.mode & 0o777, 0o600);
         assert.equal((await fs.stat(path.dirname(file))).mode & 0o777, 0o700);
@@ -246,7 +255,7 @@ async function harness(t, options = {}) {
         const asset = { identity: 'https://flow-content.google/image/asset-' + (uploads.length + 1), name };
         state.assets.set(name, asset); uploads.push({ file, name, bytes, identity: asset.identity }); return {};
       }
-      if (method === 'Runtime.releaseObject') { assert.equal(params.objectId, 'file-input-owned'); return {}; }
+      if (method === 'Runtime.releaseObject') { assert.ok(['file-input-owned','video-file-input-owned'].includes(params.objectId));if(params.objectId==='video-file-input-owned')state.videoInputReleased=true;return {}; }
       if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: FRAME } } };
       if (method === 'Page.captureScreenshot') {
         assert.deepEqual(params, { format: 'png', captureBeyondViewport: false });
@@ -476,6 +485,90 @@ test('Edit transaction privately stages one video, accepts exact legal confirmat
   for (const file of [...h.uploads.map(upload => upload.file), h.state.videoUploads[0].file]) await assert.rejects(fs.access(file), { code: 'ENOENT' });
 });
 
+test('Edit source upload uses one main-frame native chooser event and releases remote input interception and listener',async t=>{
+ const folder=await temporary(t),file=path.join(folder,'source.mp4');await fs.writeFile(file,MP4);
+ const h=await harness(t,{edit:true,inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720})});
+ const prepared=await h.engine.prepare(input({model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:file}]}));
+ assert.equal(h.state.videoUploads.length,1);assert.equal(h.state.videoTrustedUploads,1);assert.equal(h.state.videoResolved,true);assert.equal(h.state.videoInputReleased,true);assert.equal(h.state.intercepting,false);assert.equal(h.listeners.size,0);assert.equal(h.ops.some(op=>['arm-video-input','video-input','release-video-input'].includes(op.op)),false);
+ assert.deepEqual(h.commands.filter(command=>command.method==='Page.setInterceptFileChooserDialog').map(command=>command.params.enabled),[true,false]);await h.engine.release(prepared);
+});
+
+test('Edit source chooser accepts its exact native-event input in a removed overlay subtree of the same document and window',async t=>{
+ const folder=await temporary(t),file=path.join(folder,'source.mp4');await fs.writeFile(file,MP4);
+ const h=await harness(t,{edit:true,videoInputMetadata:{connected:false,rootDocument:false,rootSelf:false},inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720})});
+ const prepared=await h.engine.prepare(input({model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:file}]}));
+ assert.equal(h.state.videoUploads.length,1);assert.equal(h.state.videoTrustedUploads,1);assert.equal(h.state.intercepting,false);assert.equal(h.listeners.size,0);await h.engine.release(prepared);
+});
+
+test('Edit source chooser rejects wrong frame invalid node repeated events and wrong input before assigning any files',async t=>{
+ const folder=await temporary(t),file=path.join(folder,'source.mp4');await fs.writeFile(file,MP4);
+ for(const patch of [
+  {videoChooserEvents:[{frameId:'foreign-frame',backendNodeId:73,mode:'selectMultiple'}]},
+  {videoChooserEvents:[{frameId:FRAME,backendNodeId:0,mode:'selectMultiple'}]},
+  {videoChooserEvents:[{frameId:FRAME,backendNodeId:73,mode:'other'}]},
+  {videoChooserEvents:[{frameId:FRAME,backendNodeId:73,mode:'selectMultiple'},{frameId:FRAME,backendNodeId:74,mode:'selectMultiple'}]},
+  {videoInputMetadata:{connected:false,rootDocument:false,rootSelf:true,sameDocument:false}},
+  {videoInputMetadata:{connected:false,rootDocument:false,rootSelf:true,sameWindow:false}},
+  {videoInputMetadata:{flowOrigin:false}},
+  {videoInputMetadata:{acceptVideo:false}},
+ ]){
+  const h=await harness(t,{edit:true,...patch,inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720})});
+  await assert.rejects(h.engine.prepare(input({model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:file}]})),error=>['FILE_INPUT_AMBIGUOUS','SOURCE_VIDEO_NOT_VERIFIED'].includes(error.code));
+  assert.equal(h.state.videoUploads,undefined);assert.equal(h.state.videoTrustedUploads,1);assert.equal(h.state.intercepting,false);assert.equal(h.listeners.size,0);assert.equal(h.state.releases,1);assert.equal(h.commands.some(command=>command.method==='DOM.setFileInputFiles'),false);
+ }
+});
+
+test('Edit source chooser timeout or attachment failure never retries and always disables interception',async()=>{
+ for(const stage of ['timeout','inspect','assign']){
+  const commands=[],listeners=new Set();let clicks=0,assigned=0,inspectedFunction;
+  const page=new FlowPage({onEvent:listener=>{listeners.add(listener);return()=>listeners.delete(listener);},send:async(method,params={})=>{
+   commands.push({method,params});
+   if(method==='Page.getFrameTree')return {frameTree:{frame:{id:FRAME}}};
+   if(method==='DOM.resolveNode')return {object:{subtype:'node',objectId:'owned-input'}};
+   if(method==='Runtime.callFunctionOn'){inspectedFunction=params.functionDeclaration;if(stage==='inspect')return {exceptionDetails:{}};return {result:{value:{file:true,connected:true,sameDocument:true,sameWindow:true,rootDocument:true,rootSelf:false,flowOrigin:true,acceptVideo:true,url:'https://flow.google.com/project/owned'}}};}
+   if(method==='DOM.setFileInputFiles'){assigned++;throw failure('ATTACHMENT_FAILED');}
+   return {};
+  }});
+  page.run=async()=>({url:'https://flow.google.com/project/owned'});
+  page.trustedControlClick=async()=>{clicks++;if(stage!=='timeout')for(const listener of listeners)listener({method:'Page.fileChooserOpened',params:{frameId:FRAME,backendNodeId:73,mode:'selectMultiple'}});};
+  page.until=async fn=>{const value=await fn();if(!value)throw failure('FLOW_UI_TIMEOUT');return value;};
+  await assert.rejects(page.uploadSourceVideo('/fixture/source.mp4'),{code:stage==='timeout'?'FLOW_UI_TIMEOUT':stage==='inspect'?'SOURCE_VIDEO_NOT_VERIFIED':'ATTACHMENT_FAILED'});
+  assert.equal(clicks,1);assert.equal(assigned,stage==='assign'?1:0);assert.equal(listeners.size,0);assert.deepEqual(commands.filter(command=>command.method==='Page.setInterceptFileChooserDialog').map(command=>command.params.enabled),[true,false]);
+  assert.equal(commands.filter(command=>command.method==='Runtime.releaseObject').length,stage==='timeout'?0:1);
+  if(inspectedFunction){class Input{}const element=new Input(),document={},context={HTMLInputElement:Input,document,location:{origin:'https://flow.google.com',href:'https://flow.google.com/project/owned'}};Object.assign(element,{type:'file',isConnected:true,ownerDocument:document,getRootNode:()=>document,getAttribute:()=>'.png,.mp4,.mov'});const inspect=vm.runInNewContext('document.defaultView=globalThis;('+inspectedFunction+')',context);assert.equal(inspect.call(element,'https://flow.google.com/project/owned','.mp4').acceptVideo,true);element.isConnected=false;element.getRootNode=()=>element;const detached=inspect.call(element,'https://flow.google.com/project/owned','.mp4');assert.equal(detached.sameDocument,true);assert.equal(detached.sameWindow,true);assert.equal(detached.rootSelf,true);assert.equal(detached.rootDocument,false);element.getRootNode=()=>({host:{}});assert.equal(inspect.call(element,'https://flow.google.com/project/owned','.mp4').rootSelf,false);element.getAttribute=()=>'.png';assert.equal(inspect.call(element,'https://flow.google.com/project/owned','.mp4').acceptVideo,false);element.type='text';assert.equal(inspect.call(element,'https://flow.google.com/project/owned','.mp4').file,false);}
+ }
+});
+
+test('Edit credit quote mismatch stops before prompt references receipt or paid callback and closes its menu',async t=>{
+ const folder=await temporary(t),file=path.join(folder,'source.mp4');await fs.writeFile(file,MP4);
+ const h=await harness(t,{edit:true,editCreditQuote:9,inspectVideo:async()=>({durationSeconds:3.029333,mimeType:'video/mp4',width:360,height:640})});
+ await assert.rejects(h.engine.generate(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-portrait-360p',references:[{kind:'video',path:file},{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Mismatched quote reached paid boundary')}),error=>error.code==='MODEL_SETTINGS_NOT_VERIFIED'&&/360p/.test(error.message)&&/9/.test(error.message));
+ assert.equal(h.state.submitted,0);assert.equal(h.state.editMenuOpen,false);assert.equal(h.uploads.length,0);assert.equal(h.ops.some(op=>op.op==='focus-prompt'||op.op==='submit'),false);assert.equal(h.state.releases,1);
+ await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts')),{code:'ENOENT'});
+});
+
+test('Edit rechecks the quote before durable submission and keeps published extended-duration rates fail closed',async t=>{
+ const folder=await temporary(t),file=path.join(folder,'source.mp4');await fs.writeFile(file,MP4);let credits=3;
+ const h=await harness(t,{edit:true,inspectVideo:async()=>({durationSeconds:3.029333,mimeType:'video/mp4',width:360,height:640}),operation(op,arg,state){if(op==='edit-settings'&&arg.quote)return {model:'Omni 1.2 Flash',clipCount:1,url:state.url,credits};}});
+ const prepared=await h.engine.prepare(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-portrait-360p',references:[{kind:'video',path:file}]}));credits=9;
+ await assert.rejects(h.engine.submit(prepared,{beforeSubmit:()=>assert.fail('Changed quote reached durable callback')}),{code:'MODEL_SETTINGS_NOT_VERIFIED'});assert.equal(h.state.submitted,0);assert.equal(h.state.editMenuOpen,false);await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts')),{code:'ENOENT'});await h.engine.release(prepared);
+ for(const [resolution,durationSeconds,quote] of [['360p',12,14],['720p',12,42],['720p',10.026667,30]]){
+  const calls=[],page=new FlowPage({});page.run=async(op,arg)=>{calls.push({op,arg});return arg?.quote?{model:'Omni 1.2 Flash',url:'source',credits:quote}:true;};page.until=async fn=>fn();
+  await page.verifyEditSettings({resolution},{url:'source',durationSeconds});assert.equal(calls.at(-1).arg.close,true);
+ }
+});
+
+test('Edit quote reads only the model control owned menu and rejects malformed or ambiguous costs',()=>{
+ let expanded=true,costText='9 credits',costCount=1,menusAvailable=true;
+ const model={innerText:'Omni 1.2 Flash arrow_drop_down',getClientRects:()=>[1],getAttribute:key=>key==='aria-label'?'Select model family':key==='aria-expanded'?String(expanded):key==='aria-controls'?'own-edit-menu':null,click:()=>{expanded=!expanded;}};
+ const cost={getClientRects:()=>[1],getAttribute:()=>null,get innerText(){return costText;}};
+ const menu={getClientRects:()=>[1],getAttribute:key=>key==='id'?'own-edit-menu':key==='role'?'menu':null,querySelectorAll:selector=>selector==='flow-credit-cost-label .credit-cost-link'?Array(costCount).fill(cost):[]};
+ const context={location:{origin:'https://flow.google.com',href:'exact-scene'},getComputedStyle:()=>({visibility:'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector==='button,[role="button"]'?[model]:selector==='flow-scene-timeline .clip'?[{}]:selector==='[id]'&&menusAvailable?[menu]:[]}};
+ const run=arg=>vm.runInNewContext('('+flowDOM.toString()+')('+'"edit-settings",'+JSON.stringify(arg)+')',context);
+ assert.equal(run({quote:true}).credits,9);costText='9 credits extra';assert.throws(()=>run({quote:true}),/MODEL_SETTINGS_NOT_VERIFIED/);costText='9 credits';costCount=2;assert.throws(()=>run({quote:true}),/MODEL_SETTINGS_NOT_VERIFIED/);
+ costCount=1;menusAvailable=false;assert.equal(run({quote:true}),false);menusAvailable=true;assert.equal(run({close:true}),true);assert.equal(expanded,false);assert.equal(run({quote:true}),false);
+});
+
 test('Edit uses one stable trusted Generate press after durable receipt and input verification without a DOM paid click',async t=>{
  const folder=await temporary(t),file=path.join(folder,'source.mp4');await fs.writeFile(file,MP4);let durable=false;
  const jobId=crypto.randomUUID(),h=await harness(t,{edit:true,inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),onSubmit(){assert.equal(durable,true);},operation(op,arg){if(op==='submit'){assert.equal(durable,true);assert.equal(arg.trusted,true);}}});
@@ -532,7 +625,7 @@ test('Edit output must match typed geometry and source duration before success w
  const source={durationSeconds:3.029333,mimeType:'video/mp4',width:360,height:640};
  for(const changed of [{width:720,height:1280},{durationSeconds:3.3},{durationSeconds:0},{durationSeconds:NaN},{durationSeconds:'3'},{durationSeconds:15.021},null]){
   let inspections=0;const progress=[];
-  const h=await harness(t,{edit:true,inspectVideo:async({path:current,signal})=>{
+  const h=await harness(t,{edit:true,editCreditQuote:3,inspectVideo:async({path:current,signal})=>{
    inspections++;if(current===file)return source;
    assert.equal(path.basename(current),'result.mp4');assert.deepEqual(await fs.readFile(current),MP4);assert.equal(signal,h.lease.signal);
    return changed===null?null:{...source,durationSeconds:3,...changed};
@@ -876,6 +969,29 @@ test('assistant mode exits only empty agent draft and switches empty creative co
   assert.throws(() => run('manual-mode'), /BROWSER_DRAFT_PRESENT/); assert.equal(agentClicks, 0);
   draft = ''; assert.equal(run('manual-mode'), true); assert.equal(agentClicks, 1);
   assert.equal(run('composer-mode').creative, false);
+});
+
+test('expanded empty Agent panel closes without a main composer and preserves message drafts refs and ambiguous panels',()=>{
+ let value='\n',chip=false,panels=1,closed=0,unknownEditor=false;
+ const element=(attributes={},extra={})=>({getAttribute:key=>attributes[key]??null,getClientRects:()=>[1],closest:()=>null,querySelectorAll:()=>[],...extra});
+ const panel=element({},{}),root=element({},{}),editor=element({role:'textbox','aria-label':'What do you want to create?'},{closest:selector=>selector==='flow-agent-panel'?panel:selector==='flow-base-prompt-box'?root:null});Object.defineProperty(editor,'innerText',{get:()=>value});
+ const title=element({'aria-label':'Editable text'},{value:'Untitled session'}),close=element({'aria-label':'Close'},{closest:selector=>selector==='flow-agent-panel'?panel:null,getBoundingClientRect:()=>({left:1586,top:24,width:32,height:32,right:1618,bottom:56}),click:()=>closed++}),foreignClose=element({'aria-label':'Close'},{click:()=>assert.fail('Foreign close button must never receive click')});
+ root.closest=selector=>selector==='flow-agent-panel'?panel:null;
+ root.querySelectorAll=selector=>selector==='flow-rich-text-editor [role="textbox"],textarea'?[editor]:selector==='[role="textbox"],textarea,[contenteditable="true"],input[type="text"]'?[editor,...(unknownEditor?[{...editor}]:[])]:selector==='flow-ingredient-chip,flow-image-ingredient-chip,flow-video-ingredient-chip,button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]'?chip?[element()]:[]:[];
+ panel.querySelectorAll=selector=>selector==='flow-base-prompt-box'?[root]:selector==='flow-image-ingredient-chip,flow-video-ingredient-chip,button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]'?chip?[element()]:[]:selector==='button,[role="button"]'?[close]:selector.includes('input')?[title]:[];
+ const context={innerWidth:1280,innerHeight:900,location:{origin:'https://flow.google.com'},getComputedStyle:()=>({visibility:'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector==='flow-agent-panel'?Array(panels).fill(panel):selector==='button,[role="button"]'?[foreignClose]:[]}};
+ const run=()=>vm.runInNewContext('('+flowDOM.toString()+')("close-empty-agent-panel")',context);
+ assert.equal(run(),true);assert.equal(closed,1);
+ value='Exact foreign draft';assert.throws(run,/BROWSER_DRAFT_PRESENT/);assert.equal(closed,1);assert.equal(value,'Exact foreign draft');
+ value='';chip=true;assert.throws(run,/BROWSER_DRAFT_PRESENT/);assert.equal(closed,1);
+ chip=false;unknownEditor=true;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);unknownEditor=false;panels=2;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);panels=0;assert.equal(run(),false);
+});
+
+test('project closes expanded empty Agent before it waits for a standard composer and never types or submits',async()=>{
+ const ops=[],url='https://flow.google.com/project/'+SOURCE_PROJECT;let open=true;
+ const page=new FlowPage({send:()=>assert.fail('No raw mutations needed')},undefined,{pollMs:1});page.ready=async()=>{};page.verifyAccount=async()=>{};
+ page.run=async op=>{ops.push(op);if(op==='state')return{url};if(op==='close-empty-agent-panel'){open=false;return true;}if(op==='composer-mode'){assert.equal(open,false,'Panel must close before prompt()-based composer inspection');return{agent:false,creative:false,ready:true};}assert.fail('Unexpected '+op);};
+ assert.equal(await page.project(EMAIL),url);assert.equal(ops.filter(op=>op==='close-empty-agent-panel').length,1);assert.equal(ops.indexOf('close-empty-agent-panel')<ops.indexOf('composer-mode'),true);assert.equal(ops.some(op=>['submit','focus-prompt','clear-owned','manual-mode'].includes(op)),false);
 });
 
 test('English generated thumbnail supports baseline, result binding, completion, and exact poster identity', () => {

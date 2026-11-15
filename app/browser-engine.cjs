@@ -141,12 +141,29 @@ function flowDOM(op,arg={}){
  if(op==='edit-settings'){
   const model=one('button','Выбрать семейство моделей');
   if(arg.choose){click(model);return true;}
+  if(arg.close){if(model.getAttribute('aria-expanded')==='true')click(model);return true;}
   const selected=text(model).replace(/arrow_drop_down/g,'').trim();
   if(selected!=='Omni 1.2 Flash')error('SETTINGS_CHANGED','Модель редактирования видео изменилась.');
   const clips=[...document.querySelectorAll('flow-scene-timeline .clip')];if(clips.length!==1)error('SOURCE_VIDEO_AMBIGUOUS','В сцене должно быть одно исходное видео.');
+  if(arg.quote){
+   const id=model.getAttribute('aria-controls'),menus=typeof id==='string'&&/^[A-Za-z0-9_-]{1,160}$/.test(id)?[...document.querySelectorAll('[id]')].filter(el=>el.getAttribute('id')===id&&el.getAttribute('role')==='menu'&&visible(el)):[];
+   if(menus.length>1)error('MODEL_SETTINGS_NOT_VERIFIED','Меню стоимости Edit выбрано неоднозначно.');if(model.getAttribute('aria-expanded')!=='true'||menus.length===0)return false;
+   const costs=[...menus[0].querySelectorAll('flow-credit-cost-label .credit-cost-link')].filter(visible);if(costs.length===0)return false;
+   const cost=costs.length===1?/^([1-9]\d{0,4})\s+(?:credits?|кредит[а-я]*)$/i.exec(text(costs[0])):null;if(!cost)error('MODEL_SETTINGS_NOT_VERIFIED','Не удалось однозначно проверить стоимость Edit.');
+   return {model:selected,clipCount:clips.length,url:location.href,credits:Number(cost[1])};
+  }
   return {model:selected,clipCount:clips.length,url:location.href};
  }
  if(op==='composer-mode')return {agent:Boolean(prompt().closest('flow-agent-panel')),creative:Boolean(prompt().closest('flow-creative-agent-prompt-box')),ready:true};
+ if(op==='close-empty-agent-panel'){
+  const panels=[...document.querySelectorAll('flow-agent-panel')].filter(visible);if(!panels.length)return false;if(panels.length!==1)error('CONTROL_AMBIGUOUS','Найдено несколько панелей помощника Flow.');
+  const panel=panels[0],roots=[...panel.querySelectorAll('flow-base-prompt-box')].filter(root=>root.closest('flow-agent-panel')===panel);
+  if(roots.length!==1)error('CONTROL_AMBIGUOUS','Не удалось однозначно проверить редактор помощника Flow.');
+  const root=roots[0],editors=[...root.querySelectorAll('flow-rich-text-editor [role="textbox"],textarea')].filter(node=>node.closest('flow-agent-panel')===panel&&node.closest('flow-base-prompt-box')===root),editable=[...root.querySelectorAll('[role="textbox"],textarea,[contenteditable="true"],input[type="text"]')].filter(node=>node.closest('flow-agent-panel')===panel&&node.closest('flow-base-prompt-box')===root);
+  if(editors.length!==1||editable.some(node=>!editors.includes(node)))error('CONTROL_AMBIGUOUS','Не удалось проверить поле сообщения помощника Flow.');
+  if(editors.some(node=>String(node.value??node.innerText??'').trim())||root.querySelectorAll('flow-ingredient-chip,flow-image-ingredient-chip,flow-video-ingredient-chip,button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]').length)error('BROWSER_DRAFT_PRESENT','В помощнике Flow остался запрос или вложения. Они сохранены без изменений.');
+  const buttons=[...panel.querySelectorAll('button,[role="button"]')].filter(node=>node.closest('flow-agent-panel')===panel&&node.getClientRects().length&&getComputedStyle(node).visibility!=='hidden'&&!node.closest('[aria-hidden="true"],[inert]')&&['Close','Закрыть'].includes(node.getAttribute('aria-label')));if(buttons.length!==1)error('CONTROL_AMBIGUOUS','Не удалось однозначно закрыть пустую панель помощника Flow.');click(buttons[0]);return true;
+ }
  if(op==='manual-mode'){
   const editor=prompt();if(!editor.closest('flow-creative-agent-prompt-box'))return false;
   if(editor.innerText.trim())error('BROWSER_DRAFT_PRESENT','В помощнике Flow остался незавершённый запрос. Он сохранён без изменений.');
@@ -162,15 +179,6 @@ function flowDOM(op,arg={}){
  if(op==='click'){click(one(arg.role||'button',arg.name));return true;}
  if(op==='control-point')return point(one(arg.role||'button',arg.name));
  if(op==='control-box'){const element=one(arg.role||'button',arg.name),position=point(element),rect=element.getBoundingClientRect();return {...position,left:rect.left,top:rect.top,width:rect.width,height:rect.height};}
- if(op==='arm-video-input'){
-  if(document.querySelector('[data-flow-studio-video-input-host]'))error('UPLOAD_BUSY','Загрузчик видео уже открыт.');
-  const host=document.createElement('div');host.setAttribute('data-flow-studio-video-input-host',arg.nonce);host.hidden=true;document.body.append(host);
-  const original=HTMLInputElement.prototype.click;
-  HTMLInputElement.prototype.click=function(...args){if(this.type==='file'){HTMLInputElement.prototype.click=original;this.setAttribute('data-flow-studio-video-input',arg.nonce);if(!this.isConnected)host.append(this);return;}return original.apply(this,args);};
-  host.addEventListener('flow-studio-release',()=>{HTMLInputElement.prototype.click=original;host.remove();},{once:true});return true;
- }
- if(op==='video-input'){const xs=[...document.querySelectorAll('[data-flow-studio-video-input]')].filter(el=>el.getAttribute('data-flow-studio-video-input')===arg.nonce);if(xs.length!==1)error('FILE_INPUT_AMBIGUOUS','Видео-загрузчик ещё не появился.');return xs[0];}
- if(op==='release-video-input'){const host=[...document.querySelectorAll('[data-flow-studio-video-input-host]')].find(el=>el.getAttribute('data-flow-studio-video-input-host')===arg.nonce);host?.dispatchEvent(new Event('flow-studio-release'));return true;}
  if(op==='focus-control'){const el=one(arg.role||'button',arg.name);el.focus();return document.activeElement===el;}
  if(op==='hover-control'){const el=one(arg.role||'button',arg.name);el.dispatchEvent(new MouseEvent('mouseenter',{bubbles:false}));el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return true;}
  function downloadOptions(){
@@ -441,7 +449,7 @@ class FlowPage{
   if(actual!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Окно Flow открыто под другим аккаунтом.');
   await this.click('Закрыть панель аккаунта');await this.until(async()=>!(await this.run('account')));
  }
- async project(email){await this.ready();await this.verifyAccount(email);if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url)){await this.until(async()=>(await this.run('state')).projectLinks.length>0,20000,'project-links');await this.run('project');await this.until(async()=>/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url),20000,'project-navigation');}await this.verifyAccount(email);const mode=await this.until(async()=>{try{return await this.run('composer-mode');}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},20000,'composer-ready');if(mode.agent){await this.run('close-agent');await this.until(async()=>{try{return !(await this.run('composer-mode')).agent;}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},15000,'generation-composer');}if((await this.run('composer-mode')).creative){await this.run('manual-mode');await this.until(async()=>!(await this.run('composer-mode')).creative,15000,'manual-composer');}return (await this.run('state')).url;}
+ async project(email){await this.ready();await this.verifyAccount(email);if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url)){await this.until(async()=>(await this.run('state')).projectLinks.length>0,20000,'project-links');await this.run('project');await this.until(async()=>/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url),20000,'project-navigation');}await this.verifyAccount(email);await this.run('close-empty-agent-panel');const mode=await this.until(async()=>{try{return await this.run('composer-mode');}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},20000,'composer-ready');if(mode.agent){await this.run('close-agent');await this.until(async()=>{try{return !(await this.run('composer-mode')).agent;}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},15000,'generation-composer');}if((await this.run('composer-mode')).creative){await this.run('manual-mode');await this.until(async()=>!(await this.run('composer-mode')).creative,15000,'manual-composer');}return (await this.run('state')).url;}
  async radio(name){await this.run('radio',{name,set:true});await this.until(()=>this.run('radio',{name}));}
  async settings(plan){
   await this.click('Триггер настроек');await this.until(()=>this.run('exists',{role:'radio',name:'Видео'}));
@@ -462,7 +470,44 @@ class FlowPage{
   const duration=await this.run('duration',{seconds:plan.seconds});if(duration.value!==plan.seconds-3||!duration.text||!/^Omni 1\.2 Flash$/.test((await this.run('model')).trim()))throw fail('SETTINGS_CHANGED','Модель или длительность Flow изменилась.');
   await this.click('Триггер настроек');await this.until(async()=>!(await this.run('exists',{role:'radio',name:'Видео'})));
  }
+ async verifyEditSettings(plan,sourceScene){
+  const seconds=Math.round(sourceScene.durationSeconds),rate=plan.resolution==='360p'?1:plan.resolution==='720p'?3:null;
+  if(!rate||!Number.isFinite(sourceScene.durationSeconds)||sourceScene.durationSeconds<=0||sourceScene.durationSeconds>15.02||seconds<1||seconds>15)throw fail('MODEL_SETTINGS_NOT_VERIFIED','Не удалось проверить стоимость выбранного режима Edit.');
+  // Fail closed if Flow's quote differs from Google's published Omni 1.2 schedule (2026-11-15).
+  // https://support.google.com/flow/answer/16526234?hl=en
+  const expected=(Math.min(seconds,10)+Math.max(0,seconds-10)*2)*rate;
+  await this.run('edit-settings');await this.run('edit-settings',{choose:true});let quote;
+  try{quote=await this.until(()=>this.run('edit-settings',{quote:true}),10000,'edit-credit-quote');}
+  catch(error){if(error.code==='FLOW_UI_TIMEOUT')throw fail('MODEL_SETTINGS_NOT_VERIFIED','Flow не показал подтверждённую стоимость режима '+plan.resolution+'. Генерация не запускалась.');throw error;}
+  finally{await this.run('edit-settings',{close:true});}
+  if(quote.url!==sourceScene.url||quote.credits!==expected)throw fail('MODEL_SETTINGS_NOT_VERIFIED','Flow не подтвердил режим '+plan.resolution+': меню показывает '+quote.credits+' кредитов для '+seconds+' с, ожидается '+expected+'. Генерация не запускалась.');
+ }
  async fillPrompt(prompt){if(!await this.run('focus-prompt'))throw fail('PROMPT_FOCUS_FAILED','Не удалось выбрать поле запроса.');await this.client.send('Input.insertText',{text:prompt});try{await this.until(async()=>samePrompt((await this.run('composer')).prompt,prompt),15000,'prompt-value');}catch(error){try{error.message+=' '+JSON.stringify(await this.run('prompt-state',{expected:prompt}));}catch{}throw error;}}
+ async uploadSourceVideo(file){
+  const expectedURL=(await this.run('state')).url,frame=await this.client.send('Page.getFrameTree'),frameId=frame.frameTree?.frame?.id;
+  if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test(expectedURL||'')||typeof frameId!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(frameId))throw fail('SOURCE_VIDEO_NOT_VERIFIED','Не удалось подтвердить вкладку загрузки исходного видео.');
+  await this.client.send('Page.enable');let chooser,chooserError,object,intercept=false,clicked=false;
+  const off=this.client.onEvent(event=>{
+   if(event.method!=='Page.fileChooserOpened')return;const value=event.params;
+   if(!clicked||chooser||!value||value.frameId!==frameId||!Number.isSafeInteger(value.backendNodeId)||value.backendNodeId<=0||!['selectSingle','selectMultiple'].includes(value.mode)){chooserError=fail('FILE_INPUT_AMBIGUOUS','Flow не подтвердил единственное поле загрузки исходного видео.');return;}
+   chooser=value;
+  });
+  try{
+   intercept=true;await this.client.send('Page.setInterceptFileChooserDialog',{enabled:true});clicked=true;await this.trustedControlClick('Загрузить');
+   await this.until(()=>{if(chooserError)throw chooserError;return chooser;},15000,'video-file-chooser');
+   const node=await this.client.send('DOM.resolveNode',{backendNodeId:chooser.backendNodeId});object=node.object;
+   if(!object?.objectId||object.subtype!=='node')throw fail('SOURCE_VIDEO_NOT_VERIFIED','Flow не подтвердил узел загрузки исходного видео.');
+   const verified=await this.client.send('Runtime.callFunctionOn',{objectId:object.objectId,functionDeclaration:function(expectedURL,ext){
+    const file=this instanceof HTMLInputElement&&this.type==='file',tokens=String(this.getAttribute?.('accept')||'').toLowerCase().split(',').map(value=>value.trim()),mime=ext==='.mp4'?'video/mp4':ext==='.mov'?'video/quicktime':'video/x-m4v';
+    const root=this.getRootNode();
+    return {file,connected:this.isConnected===true,sameDocument:this.ownerDocument===document,sameWindow:this.ownerDocument?.defaultView===globalThis,rootDocument:root===document,rootSelf:root===this,flowOrigin:location.origin==='https://flow.google.com',acceptVideo:tokens.includes(ext)||tokens.includes('video/*')||tokens.includes(mime),url:location.href};
+   }.toString(),arguments:[{value:expectedURL},{value:path.extname(file).toLowerCase()}],returnByValue:true,awaitPromise:true,userGesture:true});
+   const input=verified.result?.value;if(verified.exceptionDetails||!input?.file||!input.sameDocument||!input.sameWindow||!input.flowOrigin||!input.acceptVideo||input.url!==expectedURL)throw fail('SOURCE_VIDEO_NOT_VERIFIED','Поле загрузки исходного видео изменилось или не принимает этот формат.');
+   if(chooserError)throw chooserError;await this.client.send('DOM.setFileInputFiles',{files:[file],objectId:object.objectId});
+  }finally{
+   off();if(object?.objectId)await this.client.send('Runtime.releaseObject',{objectId:object.objectId}).catch(()=>{});if(intercept)await this.client.send('Page.setInterceptFileChooserDialog',{enabled:false}).catch(()=>{});
+  }
+ }
  async upload(file,expected,frameRole){
   await this.click(frameRole||'Добавить ингредиенты в окно запроса');await this.until(()=>this.run('exists',{name:'Загрузить'}),15000,'upload-menu');
   await this.client.send('Page.enable');await this.client.send('Page.setInterceptFileChooserDialog',{enabled:true});
@@ -509,12 +554,11 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
     const sourceHash=crypto.createHash('sha256'),sourceFile=await fs.open(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
     try{for await(const chunk of sourceFile.createReadStream({autoClose:false}))sourceHash.update(chunk);}finally{await sourceFile.close();}
     const sha256=sourceHash.digest('hex');
-    await page.click('Добавить медиа');const nonce=crypto.randomUUID();await page.run('arm-video-input',{nonce});let object;
-    try{await page.trustedControlClick('Загрузить');object=await page.until(async()=>{try{return await page.run('video-input',{nonce},false);}catch(error){if(error.code==='FILE_INPUT_AMBIGUOUS')return false;throw error;}},15000,'video-file-input');await page.client.send('DOM.setFileInputFiles',{files:[file],objectId:object.objectId});}finally{if(object?.objectId)await page.client.send('Runtime.releaseObject',{objectId:object.objectId}).catch(()=>{});await page.run('release-video-input',{nonce}).catch(()=>{});}
+    await page.click('Добавить медиа');await page.uploadSourceVideo(file);
     const uploaded=()=>page.until(()=>page.run('video-uploaded',{name}),120000,'source-video-upload');let source;try{source=await uploaded();}catch(error){if(error.code!=='FLOW_UPLOAD_CONSENT_REQUIRED'||typeof page.confirmUploadRights!=='function')throw error;const rights=await page.run('upload-rights');if(await abortable(()=>page.confirmUploadRights({text:rights.text,signal:page.signal}),page.signal)!==true)throw error;await page.run('accept-upload-rights',{text:rights.text});await page.until(async()=>!(await page.run('upload-rights-pending')),10000,'video-rights-close');source=await uploaded();}await page.until(()=>page.run('video-uploaded',{name,open:true}),15000,'source-video-visible');await page.until(async()=>/\/edit\//.test((await page.run('state')).url),30000,'source-video-editor');
     const scene=await waitForSourceScene(page,{poster:source.poster,durationSeconds:videoMetadata.durationSeconds},projectURL);
     sourceScene=Object.freeze({...scene,sha256,durationSeconds:videoMetadata.durationSeconds,width:videoMetadata.width,height:videoMetadata.height});
-    page.settings=async()=>{await page.run('edit-settings',{choose:true});await page.run('model-option');await page.run('edit-settings');};page.verifySettings=async()=>page.run('edit-settings');
+    page.settings=async value=>{await page.run('edit-settings',{choose:true});await page.run('model-option');await page.verifyEditSettings(value,sourceScene);};page.verifySettings=value=>page.verifyEditSettings(value,sourceScene);
    }
    const original=await page.run('composer');if(original.prompt.trim()||original.ingredients.length){let detail;try{detail=await page.run('prompt-state',{expected:plan.prompt});}catch{}throw fail('BROWSER_DRAFT_PRESENT','В профиле остался незавершённый запрос. Откройте Flow через подключение аккаунта и сохраните или очистите черновик.'+(detail?' '+JSON.stringify(detail):''));}
    if(plan.kind==='image'){page.settings=value=>prepareImagePage(page,value);page.verifySettings=value=>verifyImagePage(page,value);}
