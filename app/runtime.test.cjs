@@ -39,7 +39,7 @@ test('split SSE returns actual video and progress',async()=>{
 });
 test('no output is failure',async()=>assert.rejects(consumeGeneration(sse(['data: [DONE]\n\n']),()=>{}),/без изображения/));
 test('media and public accounts never expose credentials',()=>{
- assert.deepEqual(publicAccount({id:7,email:'test@example.test',credits:42,is_active:1,google_cookies:'secret',st:'secret',login_password:'secret'}),{id:7,email:'test@example.test',credits:42,isActive:true,videoEnabled:true});
+ assert.deepEqual(publicAccount({id:7,email:'test@example.test',credits:42,is_active:1,google_cookies:'secret',st:'secret',login_password:'secret'}),{id:7,email:'test@example.test',credits:42,isActive:true,serverActive:true,manualDisabled:false,videoEnabled:true});
  assert.equal(extractMedia('![ok](data:image/png;base64,aGVsbG8=)')[0].kind,'image');
  assert(allowedMediaUrl('https://lh3.googleusercontent.com/video.mp4'));
  assert(!allowedMediaUrl('http://192.168.1.1/private'));
@@ -172,12 +172,14 @@ test('parallel history updates serialize without losing exported path',async t=>
 test('engine startup reconciles its own healthy service and refuses a different server',async()=>{
  const r=new Runtime({composePath:'/own/compose.json'}),calls=[];
  r.health=async()=>true;
- r.command=async(command,args,options)=>{calls.push({command,args,options});};
+ r.command=async(command,args,options)=>{calls.push({command,args,options});return {stdout:args.includes('ps')?OWNED_ENGINE_ID:args[0]==='inspect'?JSON.stringify(OWNED_ENGINE):''};};
  await r.ensureEngine();
- assert.deepEqual(calls.map(c=>c.args.slice(3)),[
+ assert.deepEqual(calls.slice(0,3).map(c=>c.args.slice(3)),[
   ['exec','-T','flow2api','python','-c','import sys; sys.exit(0)'],
   ['up','-d','flow2api'],
+  ['ps','-q','flow2api'],
  ]);
+ assert.equal(calls[3].args[0],'inspect');assert.deepEqual(r.engineContainer,OWNED_ENGINE);
  assert.equal(r.engineManaged,true);
  const other=new Runtime({composePath:'/own/compose.json'});
  other.health=async()=>true;let attempts=0;
@@ -201,6 +203,49 @@ test('closing waits for startup and jobs, stops only its service, and blocks new
  finishJob();await closing;
  assert.deepEqual(events,['persist',['docker',['compose','-f','/own/compose.json','stop','--timeout','15','flow2api']]]);
  assert.equal(r.engineManaged,false);
+});
+
+const OWNED_ENGINE_ID='a'.repeat(64),OWNED_ENGINE={id:OWNED_ENGINE_ID,project:'flow-studio-test',service:'flow2api'};
+test('managed startup pins one container identity and shutdown survives an unavailable compose file after draining jobs',async()=>{
+ const r=new Runtime({composePath:'/cloud/compose.yaml'}),events=[],controller=new AbortController();let unavailable=false,finishJob;
+ r.health=async()=>true;
+ r.command=async(command,args)=>{
+  assert.equal(command,'docker');events.push(args);
+  if(args[0]==='compose'){
+   assert.equal(unavailable,false,'Shutdown reread unavailable compose file');
+   if(args.includes('ps'))return {stdout:OWNED_ENGINE_ID+'\n'};
+   return {stdout:''};
+  }
+  if(args[0]==='inspect'){assert.equal(args.at(-1),OWNED_ENGINE_ID);return {stdout:JSON.stringify(OWNED_ENGINE)};}
+  assert.deepEqual(args,['stop','--timeout','15',OWNED_ENGINE_ID]);return {stdout:OWNED_ENGINE_ID};
+ };
+ await r.ensureEngine();assert.deepEqual(r.engineContainer,OWNED_ENGINE);assert.equal(Object.isFrozen(r.engineContainer),true);
+ unavailable=true;events.length=0;r.aborts.set('job',controller);
+ r.jobTasks.add(new Promise(resolve=>{finishJob=resolve;}));r.persist=async()=>events.push('persist');
+ const closing=r.close();assert.equal(controller.signal.aborted,true);await new Promise(setImmediate);assert.deepEqual(events,[]);
+ finishJob();await closing;
+ assert.equal(events[0],'persist');assert.equal(events[1][0],'inspect');assert.deepEqual(events[2],['stop','--timeout','15',OWNED_ENGINE_ID]);
+ assert.equal(r.engineManaged,false);assert.equal(r.engineContainer,null);
+});
+test('invalid or multiple startup container IDs and mismatched ownership never reach docker stop',async()=>{
+ for(const stdout of ['', 'short-id',OWNED_ENGINE_ID+'\n'+'b'.repeat(64),OWNED_ENGINE_ID+'; unwanted']){
+  const r=new Runtime({composePath:'/own/compose.yaml'}),calls=[];r.health=async()=>true;r.persist=async()=>{};
+  r.command=async(command,args)=>{calls.push(args);if(args.includes('ps'))return {stdout};return {stdout:''};};
+  await assert.rejects(r.ensureEngine(),/подтвердить.*контейнер/i);await assert.rejects(r.close(),/подтвердить.*контейнер/i);
+  assert.equal(calls.some(args=>args[0]==='stop'||args.includes('inspect')||args.includes('stop')),false);
+ }
+ for(const changed of [{id:'b'.repeat(64)},{project:'other-project'},{service:'unrelated'}]){
+  const r=new Runtime({composePath:'/own/compose.yaml'}),calls=[];r.engineManaged=true;r.engineContainer=Object.freeze({...OWNED_ENGINE});r.persist=async()=>{};
+  r.command=async(command,args)=>{calls.push(args);assert.equal(args[0],'inspect');return {stdout:JSON.stringify({...OWNED_ENGINE,...changed})};};
+  await assert.rejects(r.close(),/подтвердить.*контейнер/i);
+  assert.equal(calls.length,1);assert.equal(r.engineManaged,true);
+ }
+});
+test('pinned container shutdown retains identity across a failed stop and retries only that exact container',async()=>{
+ const r=new Runtime({composePath:'/missing/compose.yaml'}),events=[];r.engineManaged=true;r.engineContainer=Object.freeze({...OWNED_ENGINE});r.persist=async()=>events.push('persist');let stops=0;
+ r.command=async(command,args)=>{events.push(args);if(args[0]==='inspect')return {stdout:JSON.stringify(OWNED_ENGINE)};assert.deepEqual(args,['stop','--timeout','15',OWNED_ENGINE_ID]);if(++stops===1)throw new Error('Docker unavailable');return {stdout:OWNED_ENGINE_ID};};
+ await assert.rejects(r.close(),/Docker unavailable/);assert.equal(r.engineManaged,true);assert.deepEqual(r.engineContainer,OWNED_ENGINE);
+ await r.close();assert.equal(stops,2);assert.equal(r.engineManaged,false);assert.equal(r.engineContainer,null);assert.equal(events.some(args=>Array.isArray(args)&&args[0]==='compose'),false);
 });
 
 test('close cancels startup commands and permits retry after an engine stop failure',async()=>{
@@ -288,6 +333,7 @@ test('startup loads accounts without waiting on itself, including a local login 
 
 test('account switch and delete use exact account and refresh confirmed state without touching history',async()=>{
  const r=new Runtime({dataDir:'/unused'}),calls=[];
+ r.persist=async()=>{};
  let rows=[{id:7,email:'owner@example.test',isActive:true}];
  r.jobs=[{id:'history',status:'succeeded'}];
  r.refreshAccounts=async()=>{r.accounts=rows;return rows;};
@@ -348,14 +394,14 @@ test('cooldown metadata exposes only public fields and manual reset verifies bac
  const until=new Date(Date.now()+1800000).toISOString(),at=new Date().toISOString();
  const row={id:7,email:'owner@example.test',is_active:true,generation_cooldown_until:until,generation_last_error:'rpc=MZZa6b, code=401',generation_last_error_at:at,generation_cooldown_remaining_seconds:1800,generation_cooldown_reset_allowed:true,google_cookies:'private-secret'};
  const account=publicAccount(row);
- assert.deepEqual(account,{id:7,email:row.email,credits:0,isActive:true,videoEnabled:true,cooldownUntil:until,lastGenerationError:row.generation_last_error,lastGenerationErrorAt:at,cooldownRemainingSeconds:1800,cooldownResetAllowed:true});
+ assert.deepEqual(account,{id:7,email:row.email,credits:0,isActive:true,serverActive:true,manualDisabled:false,videoEnabled:true,cooldownUntil:until,lastGenerationError:row.generation_last_error,lastGenerationErrorAt:at,cooldownRemainingSeconds:1800,cooldownResetAllowed:true});
  const r=new Runtime({}),calls=[];r.refreshAccounts=async()=>{r.accounts=[publicAccount(row)];return r.accounts;};
  r.request=async(endpoint,options)=>{calls.push([endpoint,options.method]);row.generation_cooldown_until=null;row.generation_cooldown_remaining_seconds=0;return {success:true};};
  assert.equal((await r.clearCooldown(7)).cleared,true);assert.deepEqual(calls,[['/api/tokens/7/clear-cooldown','POST']]);
  assert.equal(r.accounts[0].cooldownUntil,null);assert.equal(r.accounts[0].lastGenerationError,'rpc=MZZa6b, code=401');
  await assert.rejects(r.clearCooldown(0),/не найден/);
  row.generation_cooldown_until=until;row.generation_cooldown_reset_allowed=false;
- await assert.rejects(r.clearCooldown(7),/UNUSUAL_ACTIVITY/);assert.equal(calls.length,1);
+ assert.equal((await r.clearCooldown(7)).cleared,true);assert.equal(calls.length,2,'Explicit reset clears local cooldown for any error');
  r.jobs=[{status:'running'}];await assert.rejects(r.clearCooldown(7),/завершения генерации/);
 });
 
@@ -472,4 +518,10 @@ test('account refresh and deletion send freshly derived retry availability with 
  rows=[{...rows[0],is_active:false}];await r.refreshAccounts();assert.equal(events.at(-1).history[0].retryAvailable,false);
  rows=[{...rows[0],is_active:true}];await r.refreshAccounts();assert.equal(events.at(-1).history[0].retryAvailable,true);
  await r.deleteAccount(7);assert.equal(events.at(-1).accounts.length,0);assert.equal(events.at(-1).history[0].retryAvailable,false);
+});
+
+
+test('prepared native browser prevents parallel backend generation',()=>{
+ const r=new Runtime({dataDir:'/unused'});r.ready=true;r.nativeBrowserPending=true;r.models=[{id:'omni-1.2-flash-8s-landscape'}];
+ assert.throws(()=>r.generate({model:r.models[0].id,prompt:'text'}),/обычном Chrome/);assert.equal(r.jobs.length,0);
 });

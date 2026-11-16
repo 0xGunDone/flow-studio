@@ -8,7 +8,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { setTimeout: delay } = require('node:timers/promises');
 
-const METHODS = new Set(['status', 'models', 'prepare', 'generate', 'job', 'wait', 'history', 'save', 'open_folder', 'accounts', 'login_start', 'login_complete', 'login_cancel', 'cancel']);
+const METHODS = new Set(['status', 'models', 'prepare', 'generate', 'job', 'recover', 'wait', 'history', 'save', 'open_folder', 'accounts', 'set_account_active', 'check_account', 'check_enabled_accounts', 'reset_cooldown', 'upload_rights_status', 'upload_rights_respond', 'login_start', 'login_complete', 'login_cancel', 'cancel', 'native_inspect', 'native_prepare', 'native_submit', 'native_cancel', 'isolated_inspect']);
 const RETRYABLE_METHODS = new Set(['status', 'models', 'prepare', 'job', 'wait', 'history', 'accounts', 'generate']);
 const defaultBridgePath = path.join(os.homedir(), 'Library', 'Application Support', 'Flow Studio', 'agent-bridge.json');
 const appPaths = ['/Applications/Flow Studio.app',path.join(os.homedir(), 'Applications', 'Flow Studio.app')];
@@ -137,9 +137,12 @@ class BridgeClient {
     if (method === 'generate' && (params?.confirmCreditSpend !== true || typeof params.requestId !== 'string' || !params.requestId.trim())) {
       throw new BridgeError('INVALID_ARGUMENTS', 'Generation requires confirmCreditSpend: true and a stable requestId.');
     }
+    if (method === 'native_submit' && (params?.confirmCreditSpend !== true || typeof params.token !== 'string' || !params.token || params.token.length > 128)) {
+      throw new BridgeError('INVALID_ARGUMENTS', 'Native submission requires confirmCreditSpend: true and the prepared one-use token.');
+    }
     const body = JSON.stringify({ method, params });
     if (Buffer.byteLength(body, 'utf8') > 512 * 1024) throw new BridgeError('REQUEST_TOO_LARGE', 'Bridge request exceeds 512 KiB; pass local paths, not image data.');
-    const timeoutMs = method === 'wait' ? 65000 : ['status', 'models', 'prepare', 'generate', 'accounts', 'login_start', 'login_complete'].includes(method) ? 120000 : 60000;
+    const timeoutMs = method === 'check_enabled_accounts' || method === 'prepare' && params?.checkBrowser === true ? 600000 : method === 'wait' ? 65000 : ['status', 'models', 'prepare', 'generate', 'recover', 'accounts', 'check_account', 'login_start', 'login_complete', 'native_inspect', 'native_prepare', 'native_submit', 'native_cancel','isolated_inspect'].includes(method) ? 120000 : 60000;
     for (let attempt = 0; attempt < 2; attempt++) {
       if (signal?.aborted) throw new BridgeError('REQUEST_CANCELLED', 'Bridge request cancelled.');
       const bridge = await this.connect();
@@ -148,7 +151,7 @@ class BridgeClient {
         if (!response || !Object.prototype.hasOwnProperty.call(response, 'result')) throw new BridgeError('BRIDGE_PROTOCOL', 'Flow Studio response has no result.');
         return response.result;
       } catch (error) {
-        if (attempt || !RETRYABLE_METHODS.has(method) || !['BRIDGE_TRANSPORT', 'BRIDGE_TIMEOUT'].includes(error.code)) throw error;
+        if (attempt || method === 'prepare' && params?.checkBrowser === true || !RETRYABLE_METHODS.has(method) || !['BRIDGE_TRANSPORT', 'BRIDGE_TIMEOUT'].includes(error.code)) throw error;
         // Reuse the exact serialized request: durable requestId deduplication prevents a second paid job.
       }
     }

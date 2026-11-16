@@ -61,18 +61,28 @@ class GenerationCooldownTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.generation_last_error, "HTTP 401: session rejected")
         self.assertEqual((await self.db.get_token_stats(self.token_id)).error_count, 1)
 
-    async def test_unusual_activity_hold_cannot_be_cleared_or_hidden_by_later_error(self):
+    async def test_unusual_activity_cooldown_stays_automatic_but_explicit_reset_preserves_disable_and_error(self):
         await self.manager.record_generation_error(self.token_id, "PUBLIC_ERROR_UNUSUAL_ACTIVITY")
         await self.manager.record_generation_error(self.token_id, "HTTP 500: upstream error")
         token = await self.db.get_token(self.token_id)
-        self.assertFalse(token.generation_cooldown_reset_allowed)
+        self.assertTrue(token.generation_cooldown_reset_allowed)
         self.assertIn("PUBLIC_ERROR_UNUSUAL_ACTIVITY", token.generation_last_error)
+        self.assertGreater(token.generation_cooldown_remaining_seconds, 0)
+        await self.manager.disable_token(self.token_id, manual=True)
+        with patch.object(admin, "db", self.db):
+            result = await admin.clear_token_cooldown(self.token_id, token="synthetic-admin")
+        self.assertTrue(result["success"])
+        account = await self.db.get_token(self.token_id)
+        self.assertIsNone(account.generation_cooldown_until)
+        self.assertFalse(account.is_active)
+        self.assertEqual(account.ban_reason, "manual_disabled")
+        self.assertIn("PUBLIC_ERROR_UNUSUAL_ACTIVITY", account.generation_last_error)
+
+    async def test_explicit_reset_missing_account_returns_404(self):
         with patch.object(admin, "db", self.db):
             with self.assertRaises(HTTPException) as error:
-                await admin.clear_token_cooldown(self.token_id, token="synthetic-admin")
-        self.assertEqual(error.exception.status_code, 409)
-        self.assertIn("PUBLIC_ERROR_UNUSUAL_ACTIVITY", str(error.exception.detail))
-        self.assertGreater((await self.db.get_token(self.token_id)).generation_cooldown_remaining_seconds, 0)
+                await admin.clear_token_cooldown(999999, token="synthetic-admin")
+        self.assertEqual(error.exception.status_code, 404)
 
     async def test_expired_hold_allows_local_reset_without_enabling_account(self):
         await self.manager.record_generation_error(self.token_id, "PUBLIC_ERROR_UNUSUAL_ACTIVITY")

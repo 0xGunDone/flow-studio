@@ -2,8 +2,10 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { findChromeProfile } = require('./recovery.cjs');
 
 const FLOW_URL = 'https://flow.google.com/';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -81,6 +83,7 @@ async function connectCDP(url, signal, WebSocketImpl) {
   checkSignal(signal);
   const socket = new WebSocketImpl(url);
   const pending = new Map();
+  const listeners = new Set();
   let nextId = 0;
   let closed = false;
   let rejectOpening;
@@ -92,22 +95,30 @@ async function connectCDP(url, signal, WebSocketImpl) {
     rejectOpening?.(error);
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error); }
     pending.clear();
+    listeners.clear();
     try { socket.close(); } catch {}
   };
   const abort = () => close();
   const client = {
     close,
-    send(method, params = {}) {
+    onEvent(listener) {
+      if (typeof listener !== 'function') throw new TypeError('CDP event listener is required.');
+      if (closed) throw failure('CDP_CLOSED', 'Соединение с Chrome закрыто.');
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    send(method, params = {}, sessionId) {
       checkSignal(signal);
       if (closed) return Promise.reject(failure('CDP_CLOSED', 'Соединение с Chrome закрыто.'));
       return new Promise((resolve, reject) => {
         const id = ++nextId;
+        const cdpMethod = typeof method === 'string' && /^[A-Z][A-Za-z0-9]{0,63}\.[a-z][A-Za-z0-9]{0,63}$/.test(method) ? method : 'CDP';
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(failure('CDP_TIMEOUT', 'Chrome не отвечает.'));
+          reject(failure('CDP_TIMEOUT', 'Chrome не отвечает ('+cdpMethod+').'));
         }, 8000);
-        pending.set(id, { resolve, reject, timer });
-        try { socket.send(JSON.stringify({ id, method, params })); }
+        pending.set(id, { resolve, reject, timer, sessionId, cdpMethod });
+        try { socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })); }
         catch { clearTimeout(timer); pending.delete(id); reject(failure('CDP_CLOSED', 'Соединение с Chrome закрыто.')); }
       });
     },
@@ -115,11 +126,29 @@ async function connectCDP(url, signal, WebSocketImpl) {
   socket.addEventListener('message', event => {
     let message;
     try { message = JSON.parse(String(event.data)); } catch { return; }
+    if (!message || typeof message !== 'object') return;
+    if (typeof message?.method === 'string' && message.id === undefined) {
+      for (const listener of listeners) { try { listener(message); } catch {} }
+      return;
+    }
     const request = pending.get(message.id);
-    if (!request) return;
+    if (!request || message.sessionId !== request.sessionId) return;
     clearTimeout(request.timer);
     pending.delete(message.id);
-    if (message.error) request.reject(failure('CDP_COMMAND', 'Chrome не выполнил запрос.'));
+    if (message.error) {
+      const cdpCode = Number.isSafeInteger(message.error.code) ? message.error.code : undefined;
+      const error = failure('CDP_COMMAND', `Chrome не выполнил запрос (${request.cdpMethod}${cdpCode === undefined ? '' : `; code=${cdpCode}`}).`);
+      error.cdpMethod = request.cdpMethod;
+      if (cdpCode !== undefined) error.cdpCode = cdpCode;
+      error.hiddenNeedsSeed = request.cdpMethod === 'Target.createTarget' && cdpCode === -32000 &&
+        message.error.message === 'Hidden target can be created only when remote debugging is enabled';
+      if (error.hiddenNeedsSeed) error.message = error.message.replace(').', '; hidden=requires-initial-page).');
+      // Keep raw protocol messages internal: they may contain page or account data.
+      const detail = [message.error.message, message.error.data].filter(value => typeof value === 'string').join(' ');
+      error.hiddenUnsupported = request.cdpMethod === 'Target.createTarget' && (/\b(?:unknown|unrecognized|unrecognised|unsupported|unexpected)\s+(?:(?:field|parameter|option|property)\s*[:=]?\s*)?['"]?hidden\b/i.test(detail) ||
+        /\bhidden\b['"]?(?:\s+(?:targets?|flag|option|parameter))?\s+(?:is\s+|are\s+)?(?:unsupported|not supported)\b/i.test(detail));
+      request.reject(error);
+    }
     else request.resolve(message.result || {});
   });
   socket.addEventListener('close', close);
@@ -134,16 +163,46 @@ async function connectCDP(url, signal, WebSocketImpl) {
   return client;
 }
 
-/** Chrome profiles belong only to this app. Credentials never pass through its UI.
+async function createBackgroundTarget(client) {
+  const targetId = created => {
+    if (typeof created.targetId !== 'string' || !/^[A-Za-z0-9-]+$/.test(created.targetId)) throw failure('CDP_TARGET', 'Chrome не создал вкладку Flow.');
+    return created.targetId;
+  };
+  let created;
+  try { created = await client.send('Target.createTarget', { url: FLOW_URL, background: true, hidden: true }); }
+  catch (error) {
+    if (error.hiddenNeedsSeed) {
+      // Chrome 157 requires one frame target before hidden targets, even with CDP enabled.
+      const seed = targetId(await client.send('Target.createTarget', { url: 'about:blank', background: true, newWindow: true, windowState: 'minimized' }));
+      try { return targetId(await client.send('Target.createTarget', { url: FLOW_URL, background: true, hidden: true })); }
+      finally { await client.send('Target.closeTarget', { targetId: seed }); }
+    }
+    if (!error.hiddenUnsupported) throw error;
+    created = await client.send('Target.createTarget', { url: FLOW_URL, background: true });
+  }
+  return targetId(created);
+}
+
+/** Managed Chrome profiles belong only to this app. Credentials never pass through its UI.
  * syncAccount receives {email,cookies,expectedAccountId?,signal}; it must verify
  * backend identity before saving, and honor signal before any backend mutation.
+ * Optional getAccount(id) returns {id,email} for regular Chrome metadata lookup.
+ * External leases require visible Flow identity verification and never own Chrome.
  * Second argument supplies stdlib substitutes and shorter intervals for tests.
  */
-function createAccountManager({ dataDir, chromePath, syncAccount, onState = () => {}, onAccountsChanged = async () => {} }, deps = {}) {
+function createAccountManager({ dataDir, chromePath, chromeDataDir, getAccount, syncAccount, onState = () => {}, onAccountsChanged = async () => {} }, deps = {}) {
   if (!path.isAbsolute(dataDir || '') || !path.isAbsolute(chromePath || '') || typeof syncAccount !== 'function') {
     throw new TypeError('Absolute dataDir, chromePath and syncAccount are required.');
   }
+  if ((chromeDataDir !== undefined && !path.isAbsolute(chromeDataDir || '')) || (getAccount !== undefined && typeof getAccount !== 'function')) {
+    throw new TypeError('Absolute chromeDataDir and getAccount callback are required for Chrome profiles.');
+  }
   const launch = deps.spawn || spawn;
+  const hostname = (deps.hostname || os.hostname)().toLowerCase().replace(/\.$/, '');
+  const isProcessAlive = deps.isProcessAlive || (pid => {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  });
   const fetchImpl = deps.fetch || globalThis.fetch;
   const WebSocketImpl = deps.WebSocket || globalThis.WebSocket;
   const pollMs = deps.pollMs ?? 1500;
@@ -151,6 +210,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   const loginTimeoutMs = deps.loginTimeoutMs ?? 15 * 60 * 1000;
   const backgroundTimeoutMs = deps.backgroundTimeoutMs ?? 45000;
   const syncIntervalMs = deps.syncIntervalMs ?? 10 * 60 * 1000;
+  const generationStartupMs = deps.generationStartupMs ?? 250;
   const profilesDir = path.join(dataDir, 'chrome-profiles');
   const mappingFile = path.join(dataDir, 'google-accounts.json');
   let profiles = [];
@@ -161,8 +221,11 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   let backgroundController;
   let backgroundWork;
   let removingAccount = false;
+  let generation = null;
+  let shutdownWork;
   const pendingSyncs = new Map();
   const browsers = new Map();
+  const generationHandles = new WeakMap();
 
   const emit = (session, state, message, extra = {}) => {
     const value = { state, message, ...extra };
@@ -243,7 +306,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
     return { port, browserURL: `ws://127.0.0.1:${port}${socketPath}` };
   }
   function stopBrowser(handle) {
-    if (handle?.alive) {
+    if (handle?.alive && !handle.intentionalExit) {
       // Never process-kill by name or PID from disk: only our ChildProcess handle.
       handle.intentionalExit = true;
       try { handle.child.kill('SIGTERM'); } catch {}
@@ -251,7 +314,6 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   }
   async function stopBrowserAndWait(handle, signal) {
     if (!handle?.alive) return;
-    handle.intentionalExit = true;
     stopBrowser(handle);
     let timer;
     try {
@@ -266,23 +328,56 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
     const existing = browsers.get(record.profileId);
     if (existing?.alive) {
       if (debugging && existing.debugging && !existing.intentionalExit) return existing;
+      if (session.generation && !debugging && !existing.debugging && !existing.intentionalExit) {
+        session.browser = existing;
+        return existing;
+      }
+      session.browser = existing;
       await stopBrowserAndWait(existing, session.controller.signal);
     }
     const profileDir = path.join(profilesDir, record.dir);
     const real = await directory(profileDir);
     if (path.dirname(real) !== await fs.realpath(profilesDir)) throw failure('PROFILE_PATH', 'Небезопасная папка профиля Chrome.');
-    // A crash may have left an app profile open. Do not adopt or kill an unknown process.
-    try {
-      const old = await endpoint(profileDir);
-      let running = false;
-      try { running = Boolean(await jsonAt(old.port, '/json/version', session.controller.signal)); } catch {}
-      if (running) throw failure('PROFILE_IN_USE', 'Этот профиль Chrome уже открыт. Закройте его и повторите вход.');
-    } catch (error) {
-      if (error.code === 'PROFILE_IN_USE' || error.code === 'CDP_ENDPOINT') throw error;
-      if (error.code !== 'ENOENT') checkSignal(session.controller.signal);
+    if (session.generation) {
+      // An unowned Chrome may forward our launch to its process. Never adopt it.
+      let lock, markers = false;
+      for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+        try {
+          const stat = await fs.lstat(path.join(profileDir, name));
+          markers = true;
+          if (name === 'SingletonLock') lock = stat;
+        }
+        catch (error) { if (error.code === 'ENOENT') continue; throw failure('PROFILE_PATH', 'Не удалось проверить профиль Chrome.'); }
+      }
+      if (markers) {
+        let dead = false;
+        try {
+          const target = lock?.isSymbolicLink() && await fs.readlink(path.join(profileDir, 'SingletonLock'));
+          const match = typeof target === 'string' && /^(.+)-([1-9]\d*)$/.exec(target);
+          const pid = match && Number(match[2]);
+          if (match && match[1].toLowerCase().replace(/\.$/, '') === hostname && Number.isSafeInteger(pid) && pid <= 0x7fffffff) {
+            dead = await isProcessAlive(pid) === false;
+          }
+        } catch {}
+        // Only ESRCH proves a local stale lock. Let Chrome clean its own artifacts.
+        if (!dead) throw failure('PROFILE_IN_USE', 'Этот профиль Chrome уже открыт. Закройте его и повторите генерацию.');
+      }
+      // Fresh endpoint must come from this launch, never an old or unowned Chrome.
+      if (debugging) await fs.unlink(path.join(profileDir, 'DevToolsActivePort')).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    } else {
+      // A crash may have left an app profile open. Do not adopt or kill an unknown process.
+      try {
+        const old = await endpoint(profileDir);
+        let running = false;
+        try { running = Boolean(await jsonAt(old.port, '/json/version', session.controller.signal)); } catch {}
+        if (running) throw failure('PROFILE_IN_USE', 'Этот профиль Chrome уже открыт. Закройте его и повторите вход.');
+      } catch (error) {
+        if (error.code === 'PROFILE_IN_USE' || error.code === 'CDP_ENDPOINT') throw error;
+        if (error.code !== 'ENOENT') checkSignal(session.controller.signal);
+      }
+      await fs.unlink(path.join(profileDir, 'DevToolsActivePort')).catch(error => { if (error.code !== 'ENOENT') throw error; });
     }
     checkSignal(session.controller.signal);
-    await fs.unlink(path.join(profileDir, 'DevToolsActivePort')).catch(error => { if (error.code !== 'ENOENT') throw error; });
     const args = [`--user-data-dir=${profileDir}`, '--no-first-run', '--no-default-browser-check'];
     if (debugging) args.push('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0');
     if (session.background) args.push('--no-startup-window');
@@ -412,15 +507,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
       if (session.background || alreadyOpen) {
         browserClient = await connectCDP(handle.browserURL, signal, WebSocketImpl);
         if (session.background) {
-          let created;
-          try {
-            created = await browserClient.send('Target.createTarget', { url: FLOW_URL, background: true, hidden: true });
-          } catch (error) {
-            if (error.code !== 'CDP_COMMAND') throw error;
-            created = await browserClient.send('Target.createTarget', { url: FLOW_URL, background: true });
-          }
-          if (typeof created.targetId !== 'string' || !/^[A-Za-z0-9-]+$/.test(created.targetId)) throw failure('CDP_TARGET', 'Chrome не создал вкладку Flow.');
-          hiddenTarget = created.targetId;
+          hiddenTarget = await createBackgroundTarget(browserClient);
         } else {
           await browserClient.send('Target.createTarget', { url: FLOW_URL, newWindow: true, background: false });
         }
@@ -466,6 +553,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   }
   function begin(expectedAccountId) {
     if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (generation) throw failure('GENERATION_BUSY', 'Дождитесь завершения генерации в Chrome.');
     if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
     if (active) return active.state;
     if (expectedAccountId != null && (!Number.isSafeInteger(expectedAccountId) || expectedAccountId <= 0)) throw new TypeError('Invalid account ID.');
@@ -473,17 +561,17 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
     const session = { controller: new AbortController(), expectedAccountId, background: false };
     active = session;
     const state = emit(session, 'opening', 'Открываем Google Chrome для входа…');
-    void run(session);
+    session.work = run(session);
     return state;
   }
   async function autoSync() {
-    if (stopped || active || backgroundWork || removingAccount) return;
+    if (stopped || active || backgroundWork || removingAccount || generation) return;
     backgroundController = new AbortController();
     backgroundWork = (async () => {
       await ready();
       // ponytail: one browser at a time; no concurrent foreground profile launches.
       for (const record of profiles.filter(profile => profile.accountId != null)) {
-        if (stopped || active || removingAccount || backgroundController.signal.aborted) break;
+        if (stopped || active || removingAccount || generation || backgroundController.signal.aborted) break;
         if (!profiles.includes(record)) continue;
         await run({ controller: backgroundController, background: true, record });
       }
@@ -493,6 +581,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
   async function syncAccountNow(accountId) {
     if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new TypeError('Invalid account ID.');
     if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (generation) throw failure('GENERATION_BUSY', 'Дождитесь завершения генерации в Chrome.');
     if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
     if (active) throw failure('LOGIN_BUSY', 'Сначала завершите или отмените текущий вход в Google, затем повторите проверку аккаунта.');
     if (pendingSyncs.has(accountId)) return pendingSyncs.get(accountId);
@@ -527,6 +616,7 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
     if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new TypeError('Invalid account ID.');
     if (typeof removeCallback !== 'function') throw new TypeError('removeCallback is required.');
     if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (generation) throw failure('GENERATION_BUSY', 'Дождитесь завершения генерации в Chrome.');
     if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
     if (active) throw failure('LOGIN_BUSY', 'Сначала завершите или отмените текущий вход в Google, затем повторите удаление аккаунта.');
     if (pendingSyncs.size) throw failure('SYNC_BUSY', 'Дождитесь завершения проверки аккаунта.');
@@ -542,10 +632,250 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
       return result;
     } finally { removingAccount = false; }
   }
+  async function openExternalGeneration(session, accountId, reuseExternal) {
+    if (!chromeDataDir || !getAccount) throw failure('PROFILE_REQUIRED', 'Переподключите этот аккаунт через Google Chrome перед генерацией.');
+    const signal = session.controller.signal;
+    const accountEmail = async () => {
+      const account = await withSignal(Promise.resolve().then(() => getAccount(accountId)), signal);
+      const email = normalizedEmail(account?.email);
+      if ((account?.id ?? account?.accountId) !== accountId || !email) throw failure('ACCOUNT_CHANGED', 'Аккаунт изменился или удалён. Выберите его заново.');
+      return email;
+    };
+    const email = await accountEmail();
+    const directory = await withSignal(findChromeProfile(chromeDataDir, email), signal);
+    if (await accountEmail() !== email) throw failure('ACCOUNT_CHANGED', 'Аккаунт изменился или удалён. Выберите его заново.');
+    if (!directory) throw failure('PROFILE_REQUIRED', 'Переподключите этот аккаунт через Google Chrome перед генерацией.');
+    checkSignal(signal);
+    if (!reuseExternal) try {
+      // Regular Chrome and its new window remain user-owned, including after cancellation.
+      const child = launch(chromePath, [`--profile-directory=${directory}`, '--new-window', FLOW_URL], { stdio: 'ignore', detached: true });
+      child.unref?.();
+      await withSignal(new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', () => reject(failure('CHROME_START', 'Не удалось открыть Google Chrome. Проверьте установку Chrome.')));
+      }), signal);
+    } catch (error) {
+      checkSignal(signal);
+      throw failure('CHROME_START', 'Не удалось открыть Google Chrome. Проверьте установку Chrome.');
+    }
+    checkSignal(signal);
+    // Native UI must locate one Flow window and verify its visible email before actions.
+    return Object.freeze({ external: true, accountId, email });
+  }
+  function reserveGeneration(accountId, signal, background) {
+    if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new TypeError('Invalid account ID.');
+    if (stopped) throw failure('SHUTDOWN', 'Flow Studio закрывается.');
+    if (generation) throw failure('GENERATION_BUSY', 'Дождитесь завершения генерации в Chrome.');
+    if (removingAccount) throw failure('ACCOUNT_BUSY', 'Дождитесь завершения удаления аккаунта.');
+    if (active) throw failure('LOGIN_BUSY', 'Сначала завершите или отмените текущий вход в Google.');
+    if (pendingSyncs.size) throw failure('SYNC_BUSY', 'Дождитесь завершения проверки аккаунта.');
+    if (signal && (typeof signal.aborted !== 'boolean' || typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function')) throw new TypeError('Invalid abort signal.');
+    // ponytail: one generation lease across profiles; parallel work needs separate profile locks.
+    const session = { controller: new AbortController(), generation: true, background };
+    generation = session;
+    const abort = () => session.controller.abort(signal.reason || cancelled());
+    session.detachSignal = () => signal?.removeEventListener('abort', abort);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    session.controller.signal.addEventListener('abort', () => stopBrowser(session.browser), { once: true });
+    return session;
+  }
+  async function acquireGenerationBrowser(accountId, { signal, reuseExternal = false, resolveReuseExternal } = {}) {
+    if (typeof reuseExternal !== 'boolean') throw new TypeError('Invalid external Chrome reuse option.');
+    if (resolveReuseExternal !== undefined && typeof resolveReuseExternal !== 'function') throw new TypeError('Invalid external Chrome reuse resolver.');
+    const session = reserveGeneration(accountId, signal, false);
+    session.work = (async () => {
+      try {
+        const ownSignal = session.controller.signal;
+        checkSignal(ownSignal);
+        backgroundController?.abort(cancelled());
+        while (backgroundWork) await withSignal(backgroundWork.catch(() => {}), ownSignal);
+        await withSignal(ready(), ownSignal);
+        checkSignal(ownSignal);
+        if (resolveReuseExternal) {
+          reuseExternal = await withSignal(resolveReuseExternal({ signal: ownSignal }), ownSignal);
+          checkSignal(ownSignal);
+          if (typeof reuseExternal !== 'boolean') throw new TypeError('Invalid resolved external Chrome reuse option.');
+        }
+        const record = profiles.find(profile => profile.accountId === accountId);
+        let handle;
+        if (!record) handle = await openExternalGeneration(session, accountId, reuseExternal);
+        else {
+          const browser = await openBrowser(record, session, false);
+          // Chrome forwarding a launch to an existing process exits immediately.
+          await delay(generationStartupMs, ownSignal);
+          if (!browser.alive || browser.child.exitCode != null || browser.child.signalCode != null) {
+            throw failure('PROFILE_IN_USE', 'Chrome не открыл отдельный процесс профиля. Закройте окно этого профиля и повторите генерацию.');
+          }
+          if (!Number.isSafeInteger(browser.child.pid) || browser.child.pid <= 0) throw failure('CHROME_START', 'Не удалось определить окно Google Chrome.');
+          handle = Object.freeze({ pid: browser.child.pid, accountId: record.accountId, email: record.email });
+        }
+        generationHandles.set(handle, session);
+        return handle;
+      } catch (error) {
+        await stopBrowserAndWait(session.browser, new AbortController().signal).catch(() => {});
+        session.detachSignal();
+        if (generation === session) generation = null;
+        throw error;
+      }
+    })();
+    return session.work;
+  }
+  async function releaseGenerationBrowser(handle, { close = true } = {}) {
+    const session = handle && generationHandles.get(handle);
+    if (!session || session.isolated) throw new TypeError('Invalid generation browser handle.');
+    if (!session.releaseWork) session.releaseWork = (async () => {
+      try {
+        if (close) await stopBrowserAndWait(session.browser, new AbortController().signal);
+      } finally {
+        session.detachSignal();
+        if (generation === session) generation = null;
+      }
+    })();
+    return session.releaseWork;
+  }
+  function finishIsolatedGeneration(session) {
+    if (!session.releaseWork) {
+      session.releasing = true;
+      session.releaseWork = (async () => {
+        try {
+          if (session.verificationWork) await session.verificationWork.catch(() => {});
+          if (session.targetId && session.client && !session.controller.signal.aborted) {
+            await session.client.send('Target.closeTarget', { targetId: session.targetId }).catch(() => {});
+          }
+        } finally {
+          session.client?.close();
+          try { await stopBrowserAndWait(session.browser, new AbortController().signal); }
+          finally {
+            session.detachSignal();
+            if (generation === session) generation = null;
+          }
+        }
+      })();
+    }
+    return session.releaseWork;
+  }
+  async function acquireIsolatedGenerationBrowser(accountId, { signal, windowMode } = {}) {
+    if (windowMode !== undefined && windowMode !== 'offscreen') throw new TypeError('Invalid isolated browser window mode.');
+    const session = reserveGeneration(accountId, signal, true);
+    session.isolated = true;
+    const ownSignal = session.controller.signal;
+    ownSignal.addEventListener('abort', () => {
+      session.client?.close();
+      if (session.lease) void finishIsolatedGeneration(session).catch(() => {});
+    }, { once: true });
+    session.work = (async () => {
+      let drainingBackground;
+      try {
+        checkSignal(ownSignal);
+        drainingBackground = backgroundWork;
+        backgroundController?.abort(cancelled());
+        while (backgroundWork) await withSignal(backgroundWork.catch(() => {}), ownSignal);
+        await withSignal(ready(), ownSignal);
+        checkSignal(ownSignal);
+        const record = profiles.find(profile => profile.accountId === accountId);
+        if (!record) throw failure('PROFILE_REQUIRED', 'Подключите этот аккаунт через «Войти в Google» в Flow Studio перед фоновой генерацией.');
+        session.browser = await openBrowser(record, session, true);
+        await delay(generationStartupMs, ownSignal);
+        const browser = session.browser;
+        if (!browser.alive || browser.child.exitCode != null || browser.child.signalCode != null) {
+          throw failure('PROFILE_IN_USE', 'Chrome не открыл отдельный процесс профиля. Закройте его и повторите генерацию.');
+        }
+        if (!Number.isSafeInteger(browser.child.pid) || browser.child.pid <= 0) throw failure('CHROME_START', 'Не удалось определить процесс Google Chrome.');
+        session.client = await connectCDP(browser.browserURL, ownSignal, WebSocketImpl);
+        if (windowMode === 'offscreen') {
+          const created = await session.client.send('Target.createTarget', { url: FLOW_URL, newWindow: true, background: true });
+          if (typeof created.targetId !== 'string' || !/^[A-Za-z0-9-]+$/.test(created.targetId)) throw failure('CDP_TARGET', 'Chrome не создал вкладку Flow.');
+          session.targetId = created.targetId;
+          const window = await session.client.send('Browser.getWindowForTarget', { targetId: session.targetId });
+          if (!Number.isSafeInteger(window.windowId) || window.windowId < 0) throw failure('CDP_TARGET', 'Chrome не подтвердил окно Flow.');
+          await session.client.send('Browser.setWindowBounds', { windowId: window.windowId, bounds: { left: -10000, top: 0, width: 1280, height: 900, windowState: 'normal' } });
+        } else session.targetId = await createBackgroundTarget(session.client);
+        const attached = await session.client.send('Target.attachToTarget', { targetId: session.targetId, flatten: true });
+        if (typeof attached.sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(attached.sessionId)) throw failure('CDP_TARGET', 'Chrome не подключился к вкладке Flow.');
+        session.sessionId = attached.sessionId;
+        checkSignal(ownSignal);
+        const client = Object.freeze({
+          send(method, params = {}) {
+            if (session.releasing) return Promise.reject(failure('CDP_CLOSED', 'Соединение с Chrome закрыто.'));
+            return session.client.send(method, params, session.sessionId);
+          },
+          withVerificationPage(callback) {
+            if (typeof callback !== 'function') return Promise.reject(new TypeError('Verification callback is required.'));
+            if (session.releasing || generation !== session) return Promise.reject(failure('CDP_CLOSED', 'Соединение с Chrome закрыто.'));
+            if (session.verificationWork) return Promise.reject(failure('VERIFICATION_BUSY', 'Дождитесь завершения проверки аккаунта.'));
+            const work = (async () => {
+              let targetId, sessionId, active = true;
+              try {
+                checkSignal(ownSignal);
+                const created = await createBackgroundTarget(session.client);
+                if (created === session.targetId) throw failure('CDP_TARGET', 'Chrome не создал отдельную вкладку проверки аккаунта.');
+                targetId = created;
+                checkSignal(ownSignal);
+                if (session.releasing) throw failure('CDP_CLOSED', 'Соединение с Chrome закрыто.');
+                const attached = await session.client.send('Target.attachToTarget', { targetId, flatten: true });
+                if (typeof attached.sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(attached.sessionId) || attached.sessionId === session.sessionId) throw failure('CDP_TARGET', 'Chrome не подключился к отдельной вкладке проверки аккаунта.');
+                sessionId = attached.sessionId;
+                checkSignal(ownSignal);
+                const verificationClient = Object.freeze({
+                  send(method, params = {}) {
+                    if (!['Runtime.evaluate', 'Emulation.setDeviceMetricsOverride'].includes(method)) return Promise.reject(new TypeError('Unsupported verification page command.'));
+                    if (!active) return Promise.reject(failure('CDP_CLOSED', 'Вкладка проверки аккаунта закрыта.'));
+                    return session.client.send(method, params, sessionId);
+                  },
+                });
+                return await withSignal(Promise.resolve().then(() => callback(verificationClient)), ownSignal);
+              } finally {
+                active = false;
+                if (!ownSignal.aborted) {
+                  if (sessionId) { try { await session.client.send('Target.detachFromTarget', { sessionId }); } catch {} }
+                  if (targetId) { try { await session.client.send('Target.closeTarget', { targetId }); } catch {} }
+                }
+              }
+            })();
+            session.verificationWork = work;
+            return work.finally(() => { if (session.verificationWork === work) session.verificationWork = null; });
+          },
+          browserSend(method, params = {}) {
+            if (!['Browser.setDownloadBehavior', 'Browser.cancelDownload'].includes(method)) return Promise.reject(new TypeError('Unsupported browser command.'));
+            if (session.releasing) return Promise.reject(failure('CDP_CLOSED', 'Соединение с Chrome закрыто.'));
+            return session.client.send(method, params);
+          },
+          onEvent(listener) {
+            if (typeof listener !== 'function') throw new TypeError('CDP event listener is required.');
+            if (session.releasing) throw failure('CDP_CLOSED', 'Соединение с Chrome закрыто.');
+            return session.client.onEvent(event => {
+              if (event.sessionId === session.sessionId || (!event.sessionId && ['Browser.downloadWillBegin', 'Browser.downloadProgress'].includes(event.method))) {
+                listener({ method: event.method, params: event.params || {} });
+              }
+            });
+          },
+        });
+        session.lease = Object.freeze({ accountId: record.accountId, email: record.email, targetId: session.targetId, sessionId: session.sessionId, signal: ownSignal, client });
+        generationHandles.set(session.lease, session);
+        return session.lease;
+      } catch (error) {
+        // An aborted sync owns its browser until cleanup ends, even if this acquire was cancelled.
+        if (drainingBackground) await drainingBackground.catch(() => {});
+        await finishIsolatedGeneration(session).catch(() => {});
+        throw error;
+      }
+    })();
+    return session.work;
+  }
+  async function releaseIsolatedGenerationBrowser(lease) {
+    const session = lease && generationHandles.get(lease);
+    if (!session?.isolated) throw new TypeError('Invalid isolated generation browser lease.');
+    return finishIsolatedGeneration(session);
+  }
   return {
     async hasAccountProfile(id) { await ready(); return profiles.some(profile => profile.accountId === id); },
     syncAccountNow,
     removeAccount,
+    acquireGenerationBrowser,
+    releaseGenerationBrowser,
+    acquireIsolatedGenerationBrowser,
+    releaseIsolatedGenerationBrowser,
     addAccount: () => begin(),
     reconnectAccount: id => begin(id),
     completeLogin() {
@@ -565,11 +895,17 @@ function createAccountManager({ dataDir, chromePath, syncAccount, onState = () =
       return { cancelled: true };
     },
     shutdown() {
+      if (shutdownWork) return shutdownWork;
       stopped = true;
       clearInterval(autoTimer);
       active?.controller.abort(cancelled());
       backgroundController?.abort(cancelled());
-      for (const browser of browsers.values()) stopBrowser(browser);
+      generation?.controller.abort(cancelled());
+      shutdownWork = Promise.allSettled([
+        active?.work, backgroundWork, generation?.work, generation?.releaseWork,
+        ...[...browsers.values()].map(browser => stopBrowserAndWait(browser, new AbortController().signal)),
+      ]).then(() => { generation?.detachSignal(); generation = null; });
+      return shutdownWork;
     },
     startAutoSync() {
       if (autoTimer || stopped) return;

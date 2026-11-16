@@ -140,6 +140,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     scrollIntoView() { this.scrolled = true; }
     querySelector() { return null; }
     requestSubmit() { return this.dispatch('submit'); }
+    reportValidity() { return true; }
   }
   let tick;
   const html = fs.readFileSync(require.resolve('./index.html'), 'utf8');
@@ -171,6 +172,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   let completionCall = 0;
   const reconnected = [];
   const checked = [];
+  const isolatedChecks = [],cancelledJobs=[];
   const pickerOptions = [];
   let saved = 0;
   const copied = [];
@@ -202,6 +204,8 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     completeLogin: async () => { completionCall++; assert.equal(byId('complete-login').disabled, true); return { state: 'syncing', message: 'Проверяем вход' }; },
     cancelLogin: async () => ({ cancelled: true }), refreshAccounts: async () => { accountRefreshes++; return refresh; },
     copyHelpText: async text => { copied.push(text); return {copied:true}; },
+    inspectIsolatedBrowser:async id=>{isolatedChecks.push(id);return {ready:true,accountId:id,accountEmail:'user@example.com',usesDesktopFocus:false};},
+    cancelGeneration:async id=>{cancelledJobs.push(id);return {cancelled:true,jobId:id};},
     saveMedia: async () => { saved++; return saveResult; }, revealFile: async file => { revealed.push(file); },
     generate: async request => { generated.push(request); const id = `job-${generated.length}`; eventHandler({ type: 'job', job: { id, model: request.model, kind: 'image', prompt: request.prompt, createdAt: new Date().toISOString(), status: 'running', progress: 'В работе', media: [] } }); return { jobId: id }; }
   };
@@ -258,6 +262,11 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     assert.equal(byId(helpSection.dataset.helpTarget).scrolled, true);
   }
   assert.equal(generated.length, 0, 'Reading/copying help never creates jobs');
+  await byId('generation-form').dispatch('submit');
+  assert.equal(generated.length, 0, 'Programmatic form submit never spends credits; explicit Generate click starts generation');
+  byId('isolated-account').value='9';await byId('isolated-inspect').dispatch('click');
+  assert.deepEqual(isolatedChecks,[9]);assert.match(byId('isolated-status').textContent,/Фоновый браузер готов.*user@example.com/);
+  assert.equal(generated.length,0,'Background inspection never creates a generation');
   await nodes.find(node => node.dataset.page === 'create').dispatch('click');
 
   assert.equal(byId('model').value, snapshot.models[2].id, 'Restore saved valid model instead of default');
@@ -267,12 +276,17 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   await nodes.find(node => node.name === 'mode' && node.value === 'image').dispatch('change');
   byId('source-video-id').value = '';
   byId('prompt').value = 'Test scene';
+  byId('generation-account').value='9';
   await byId('prompt').dispatch('input');
   await byId('pick-images').dispatch('click');
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 1);
+  assert.equal(generated[0].accountId,9,'Exact account selection reaches the shared generation request');byId('generation-account').value='';
   assert.equal(generated[0].images.length, 1);
   assert.equal(byId('generate').disabled, true);
+  const firstResultNodes=node=>[node,...node.children.flatMap(firstResultNodes)];
+  await firstResultNodes(byId('result')).find(node=>node.tagName==='BUTTON'&&node.textContent==='Остановить ожидание').dispatch('click');
+  assert.deepEqual(cancelledJobs,['job-1']);assert.equal(byId('generate').disabled,true,'Cancellation keeps generation locked until runtime reports completion');
   eventHandler({ type: 'job', job: { id: 'job-1', model: snapshot.models[0].id, kind: 'image', prompt: 'Test scene', status: 'failed', error: 'UPSTREAM_ERROR: test', media: [] } });
   assert.equal(byId('generate').disabled, false);
   assert.equal(byId('result-tag').textContent, 'Не получилось');
@@ -280,13 +294,13 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   await videoMode.dispatch('change');
   byId('model').value = snapshot.models[2].id;
   await byId('model').dispatch('change');
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 1, 'Invalid extend cannot submit');
   assert.match(byId('form-error').textContent, /ID исходного видео/);
   byId('source-video-id').value = 'source-id';
   await byId('source-video-id').dispatch('input');
   assert.deepEqual(JSON.parse(stored.get('flowStudio.draft')), { mode: 'video', model: snapshot.models[2].id, videoMethod: 'extend', prompt: 'Test scene', sourceVideoId: 'source-id' });
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated[1].sourceVideoId, 'source-id');
   assert.equal(generated[1].images.length, 0, 'Hidden image references cannot leak into extend request');
   eventHandler({ type: 'job', job: { id: 'job-2', model: snapshot.models[2].id, kind: 'video', prompt: 'Test scene', status: 'succeeded', media: [{ url: 'flow-media://job-2/0', kind: 'video', path: '/saved.mp4' }] } });
@@ -412,7 +426,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.deepEqual(byId('references').children.map(node => descendants(node).find(child => child.className === 'reference-name').textContent), ['source.mov', 'input.png', 'third.png', 'second.png']);
   await referenceButton('Удалить third.png').dispatch('click');
   assert.equal(byId('references-count').textContent, '2 / 5 фото · 1 / 1 видео');
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 3);
   assert.deepEqual(JSON.parse(JSON.stringify(generated[2])), { model: snapshot.models[3].id, prompt: 'Current editor draft', references: [{ kind: 'video', path: '/chosen/source.mov' }, { kind: 'image', dataUrl: 'data:image/png;base64,aGVsbG8=' }, { kind: 'image', dataUrl: 'data:image/png;base64,c2Vjb25k' }] });
   assert.equal(Object.hasOwn(generated[2], 'images'), false, 'Mixed request never also sends images');
@@ -422,7 +436,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(byId('references').children.length, 3, 'Switching models preserves every selected file');
   assert.match(byId('form-error').textContent, /не принимает видео/);
   assert.equal(byId('pick-images-label').textContent, 'Добавить изображения');
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 3, 'Veo cannot silently drop source video and submit images');
   byId('model').value = snapshot.models[5].id;
   await byId('model').dispatch('change');
@@ -449,7 +463,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(byId('pick-images').disabled, true); assert.equal(byId('generate').disabled, true);
   assert.equal(zone.attributes['aria-busy'], 'true');
   await zone.dispatch('drop', { dataTransfer: transfer });
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(dropCalls.length, 1); assert.equal(generated.length, 3, 'Dropping files never generates or submits incomplete references');
   finishDrop([photo1, photo2]); await importing;
   assert.equal(byId('references-count').textContent, '2 / 7');
@@ -487,11 +501,11 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   const startFile = { kind: 'image', name: 'start.png', dataUrl: 'data:image/png;base64,c3RhcnQ=' };
   const endFile = { kind: 'image', name: 'end.png', dataUrl: 'data:image/png;base64,ZW5k' };
   dropped = [endFile]; await byId('end-frame').dispatch('drop', { dataTransfer: { types: ['Files'], files: [{ name: 'end.png' }] } });
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 3); assert.match(byId('form-error').textContent, /начальный кадр/);
   assert(slotNodes('end-frame').some(node => node.tagName === 'IMG' && node.alt === 'end.png'));
   picked = [startFile]; await slotNodes('start-frame').find(node => node.className.includes('frame-pick')).dispatch('click');
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 4);
   assert.equal(generated[3].model, 'veo-3.1-fast-i2v-8s-portrait');
   assert.deepEqual(Array.from(generated[3].images), [startFile.dataUrl, endFile.dataUrl], 'Frame roles determine order, even when end was added first');
@@ -517,14 +531,15 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   byId('model-family').value = 'Veo 3.1 Fast'; await byId('model-family').dispatch('change');
   byId('source-video-id').value = 'source-existing';
   assert.equal(byId('references-field').hidden, true);
-  await byId('generation-form').dispatch('submit');
+  await byId('generate').dispatch('click');
   assert.equal(generated.length, 5); assert.equal(generated[4].sourceVideoId,'source-existing');
   assert.equal(generated[4].images.length,0); assert.equal(generated[4].references,undefined,'Hidden edit video never blocks or leaks into extension');
   eventHandler({type:'job',job:{id:'job-5',model:generated[4].model,kind:'video',status:'failed',error:'TEST_DONE',media:[]}});
   {
-  let managed=[{id:9,email:'enabled@example.test',isActive:true,credits:50},{id:10,email:'disabled@example.test',isActive:false,credits:25}];
+    let managed=[{id:9,email:'enabled@example.test',isActive:true,serverActive:false,browserReady:true,credits:50},{id:10,email:'disabled@example.test',isActive:false,credits:25}];
   eventHandler({type:'accounts',accounts:managed});
   const accountNodes=()=>descendants(byId('accounts-list'));
+    assert(accountNodes().some(node=>node.textContent==='Серверная сессия требует проверки; браузер доступен'));
   const toggles=()=>accountNodes().filter(node=>node.className==='account-toggle');
   assert.deepEqual(toggles().map(node=>node.checked),[true,false]);
   assert.equal(toggles()[0].attributes.role,'switch');
@@ -558,12 +573,14 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(byId('check-enabled-accounts').disabled,false);
   }
   {
+    bridge.browserStatus=async()=>({trusted:false,locked:false});
     const settingsTab=nodes.find(node=>node.dataset.page==='settings');
     let reads=0,writes=0,finishSettings,finishSave;
     bridge.getProviderSettings=async()=>{reads++;return new Promise(resolve=>{finishSettings=resolve;});};
     assert.equal(reads,0,'Startup does not fetch provider secrets or settings');
     await settingsTab.dispatch('click');
     assert.equal(byId('page-settings').hidden,false);assert.equal(byId('twocaptcha-api-key').value,'');
+    await new Promise(setImmediate);assert.equal(byId('browser-inspect').disabled,true);assert.match(byId('browser-access-status').textContent,/Универсальный доступ/);
     assert.equal(byId('twocaptcha-api-key').disabled,true);
     await byId('refresh-provider-settings').dispatch('click');assert.equal(reads,1,'Only one settings read at a time');
     finishSettings({twoCaptchaKeyConfigured:true,captchaMethod:'browser'});await new Promise(setImmediate);
@@ -598,7 +615,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     assert(accountTree().some(node=>node.textContent?.startsWith('Остывает · 29:')||node.textContent==='Остывает · 30:00'));
     assert(accountTree().some(node=>node.tagName==='PRE'&&node.textContent==='PUBLIC_ERROR_UNUSUAL_ACTIVITY'));
     const resets=accountTree().filter(node=>node.className.includes('reset-cooldown'));
-    assert.equal(resets.length,2);assert.equal(resets[0].disabled,false);assert.equal(resets[1].disabled,true,'Google hold cannot be lifted through local reset');
+    assert.equal(resets.length,2);assert.equal(resets[0].disabled,false);assert.equal(resets[1].disabled,false,'Explicit local reset remains available for any error and does not lift Google limits');
     let clears=0;bridge.clearCooldown=async id=>{clears++;assert.equal(id,9);accounts=accounts.map(a=>a.id===id?{...a,cooldownUntil:null}:a);return {accounts};};
     await resets[0].dispatch('click');assert.equal(clears,1);
     let retryCalls=0,finishRetry;const retryArgs=[];
@@ -615,6 +632,14 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     assert.equal(generated.length,5,'Retry calls only dedicated bridge, not edited composer inputs');
     eventHandler({type:'job',job:{...failed,id:'held-job',accountId:10,accountEmail:'held@example.test'}});await byId('history').children[0].dispatch('click');
     assert.equal(resultButton('Повторить генерацию').disabled,true);
+    const recovered=[],unknown={...failed,id:'unknown-browser',generationEngine:'isolated-browser',unknownOutcome:true,recoveryAvailable:true,retryAvailable:false};
+    bridge.recoverGeneration=async id=>{recovered.push(id);eventHandler({type:'job',job:{...unknown,status:'running',recovering:true,progress:'Проверяем прежнюю задачу'}});return {jobId:id};};
+    eventHandler({type:'job',job:unknown});await byId('history').children[0].dispatch('click');
+    const recover=resultButton('Проверить результат в Flow');assert(recover);assert.equal(recover.disabled,false);
+    await recover.dispatch('click');assert.deepEqual(recovered,['unknown-browser']);assert.equal(generated.length,5,'Result recovery never calls generate or edits inputs');
+    assert.equal(byId('generate').disabled,true);assert(descendants(byId('result')).some(node=>node.textContent==='Проверяем прежний результат'));
+    eventHandler({type:'job',job:{...unknown,status:'failed',recoveryAvailable:false,recoveryBlockedReason:'Запись отправки не сохранена',errorCode:'BROWSER_RECEIPT_MISSING'}});
+    assert.equal(resultButton('Проверить результат в Flow').disabled,true);
     eventHandler({type:'job',job:{...failed,id:'legacy-job',retryAvailable:false,retryBlockedReason:'Нет сохранённых исходников'}});await byId('history').children[0].dispatch('click');
     assert.equal(resultButton('Повторить генерацию').disabled,true);
     assert(descendants(byId('result')).some(node=>node.textContent==='Нет сохранённых исходников'));

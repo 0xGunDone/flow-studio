@@ -22,6 +22,7 @@ const output = path.join(root, 'dist');
 fs.mkdirSync(output, { recursive: true });
 try {
   for (const arch of architectures) {
+    run(path.join(__dirname,'build-native.cjs'), [arch]);
     run(path.join(root, 'app/node_modules/electron-builder/cli.js'), ['--config', '../electron-builder.cjs', `--config.directories.output=${staging}`, '--mac', `--${arch}`, '--publish', 'never']);
     const folder = arch === 'x64' ? 'mac' : 'mac-arm64';
     run(path.join(__dirname, 'check-release.cjs'), ['--app', path.join(staging, folder, 'Flow Studio.app'), '--arch', arch]);

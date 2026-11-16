@@ -28,6 +28,7 @@ module.exports = {
     'node_modules/**/*',
   ],
   extraResources: [
+    { from: 'native/bin', to: 'native', filter: ['flow-browser-*'] },
     {
       from: '../backend', to: 'backend',
       filter: [

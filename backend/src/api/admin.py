@@ -1201,11 +1201,8 @@ async def clear_token_cooldown(token_id: int, token: str = Depends(verify_admin_
         raise HTTPException(status_code=404, detail="Аккаунт не найден")
     if not await db.clear_generation_cooldown(token_id):
         raise HTTPException(
-            status_code=409,
-            detail=(
-                "PUBLIC_ERROR_UNUSUAL_ACTIVITY: локальный cooldown нельзя снять до истечения 30 минут. "
-                "Сброс не снимает ограничение Google; проверьте аккаунт в веб-версии Flow."
-            ),
+            status_code=404,
+            detail="Аккаунт не найден",
         )
     return {"success": True, "message": "Локальный cooldown сброшен. Ограничения Google не изменены."}
 

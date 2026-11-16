@@ -31,8 +31,8 @@ jobs:
         run: node --test extension/tests/*.test.cjs
       - name: Check release sources
         run: node scripts/check-release.cjs
-      - name: Test release secret detection
-        run: node --test scripts/secret-patterns.test.cjs
+      - name: Test release scripts and secret detection
+        run: node --test scripts/*.test.cjs
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
@@ -43,7 +43,7 @@ jobs:
       - name: Test backend session, transport and generation behavior
         working-directory: backend
         run: |
-          for suite in test_flow_cookie_continuity test_generation_cooldown test_flow_public_errors test_flow_client_upload test_omni_1_2_support test_current_video_catalog test_session_check test_plugin_session_import test_unavailable_accounts test_flow_frontend_transport test_video_asset_resolution test_video_poll_credentials test_flow_image_generation_args; do
+          for suite in test_flow_cookie_continuity test_generation_cooldown test_flow_public_errors test_flow_client_upload test_omni_1_2_support test_current_video_catalog test_session_check test_plugin_session_import test_unavailable_accounts test_flow_frontend_transport test_video_asset_resolution test_video_inputs test_video_poll_credentials test_flow_image_generation_args; do
             python -m unittest discover -s tests -p "${suite}.py" -v
           done
       - name: Test backend model UI

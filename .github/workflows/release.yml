@@ -36,6 +36,8 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
         working-directory: app
+      - name: Build native browser helper
+        run: node scripts/build-native.cjs ${{ matrix.arch }}
       - name: Build and inspect app bundle
         run: npm run dist:${{ matrix.arch }}
         working-directory: app
@@ -73,5 +75,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           test "$RELEASE_TAG" = "v$(node -p 'require("./app/package.json").version')"
+          RELEASE_NOTES="docs/release-${RELEASE_TAG#v}.md"
+          test -s "$RELEASE_NOTES"
           gh release create "$RELEASE_TAG" dist/*.zip dist/*.dmg dist/SHA256SUMS.txt \
-            --verify-tag --prerelease --title "Flow Studio $RELEASE_TAG" --generate-notes
+            --verify-tag --prerelease --title "Flow Studio $RELEASE_TAG" --notes-file "$RELEASE_NOTES"

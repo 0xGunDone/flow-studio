@@ -66,14 +66,23 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   assert.equal(generate.inputSchema.properties.confirmCreditSpend.const, true);
   assert.equal(generate.inputSchema.properties.referencePaths.maxItems, 7);
   assert.equal(generate.inputSchema.properties.videoPaths.maxItems, 1);
+  assert.match(generate.inputSchema.properties.videoPaths.description,/fileLimits\.video\.maxDurationSeconds/);
+  assert.match(generate.inputSchema.properties.videoPaths.description,/Omni 1\.2 Edit allows 15s; Omni 1\.1 Edit allows 10s/);
+  assert.equal(generate.inputSchema.properties.accountId.minimum, 1);
+  assert.equal(generate.inputSchema.properties.accountId.maximum, Number.MAX_SAFE_INTEGER);
+  assert.equal(generate.inputSchema.required.includes('accountId'), false);
   assert.ok(tools.find(tool => tool.name === 'flow_studio_list_models').inputSchema.properties.mode.enum.includes('edit'));
   assert.ok(generate.inputSchema.required.includes('requestId'));
   assert.equal(generate.inputSchema.required.includes('model'),false);
   assert.equal(generate.inputSchema.properties.settings.additionalProperties,false);
   const prepare=tools.find(tool=>tool.name==='flow_studio_prepare_generation');
-  assert.equal(prepare.annotations.readOnlyHint,true);assert.equal(prepare.annotations.destructiveHint,false);
+  assert.equal(prepare.annotations.readOnlyHint,false);assert.equal(prepare.annotations.destructiveHint,false);assert.equal(prepare.annotations.idempotentHint,false);
   assert.equal(prepare.inputSchema.properties.confirmCreditSpend,undefined);
   assert.equal(prepare.inputSchema.properties.requestId,undefined);
+  assert.equal(prepare.inputSchema.properties.accountId.minimum,1);
+  assert.equal(prepare.inputSchema.properties.checkBrowser.type,'boolean');assert.equal(generate.inputSchema.properties.checkBrowser,undefined);
+  assert.match(generate.description,/isolated background browser/);
+  assert.match(tools.find(tool=>tool.name==='flow_studio_prepare_browser').description,/Legacy diagnostic/);
   assert.equal(generate.annotations.idempotentHint, true);
   const status = await client.callTool({ name: 'flow_studio_status', arguments: {} });
   assert.equal(status.isError, undefined, JSON.stringify(status));
@@ -94,7 +103,8 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
     { ...valid, method:'frames' },
     { ...valid, method:'extend',referencePaths:['/tmp/image.png'],sourceVideoId:'video-id' },
     { ...valid, confirmCreditSpend: false },
-    { ...valid, requestId: '' },
+    { ...valid, requestId: '' },{...valid,checkBrowser:true},{...valid,checkBrowser:false},
+    ...[null,0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'7'].map(accountId=>({...valid,accountId})),
     { ...valid, referencePaths: ['/tmp/reference.png'], startFramePath: '/tmp/start.png' },
     { ...valid, endFramePath: '/tmp/end.png' },
     { ...valid, referencePaths: ['https://example.com/image.png'] },
@@ -116,19 +126,19 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   const started = await client.callTool({ name: 'flow_studio_generate', arguments: valid });
   assert.equal(started.structuredContent.jobId, 'fake-job');
   assert.deepEqual(bridge.calls[1], { method: 'generate', params: valid });
-  const mixed = { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.MOV'], referencePaths: Array(5).fill('/tmp/image.png'), requestId: 'fake-edit-id' };
+  const mixed = { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.MOV'], referencePaths: Array(5).fill('/tmp/image.png'), accountId:7, requestId: 'fake-edit-id' };
   assert.equal((await client.callTool({ name: 'flow_studio_generate', arguments: mixed })).isError, undefined);
   assert.deepEqual(bridge.calls[2], { method: 'generate', params: mixed });
   const images = { ...valid, model: 'omni-1.1-flash-8s-landscape', referencePaths: Array(7).fill('/tmp/image.png'), requestId: 'fake-seven-id' };
   assert.equal((await client.callTool({ name: 'flow_studio_generate', arguments: images })).isError, undefined);
   assert.deepEqual(bridge.calls[3], { method: 'generate', params: images });
-  const plan={settings,prompt:'prepare only',startFramePath:'/tmp/start.png',endFramePath:'/tmp/end.png'};
+  const plan={settings,prompt:'prepare only',startFramePath:'/tmp/start.png',endFramePath:'/tmp/end.png',accountId:7};
   assert.equal((await client.callTool({name:'flow_studio_prepare_generation',arguments:plan})).isError,undefined);
   assert.deepEqual(bridge.calls[4],{method:'prepare',params:plan});
   const selected={...plan,requestId:'settings-stable',confirmCreditSpend:true};
   assert.equal((await client.callTool({name:'flow_studio_generate',arguments:selected})).isError,undefined);
   assert.deepEqual(bridge.calls[5],{method:'generate',params:selected});
-  for(const bad of [{...plan,confirmCreditSpend:true},{...plan,requestId:'not-for-prepare'},{...plan,settings:{...settings,unexpected:true}}])assert.equal((await client.callTool({name:'flow_studio_prepare_generation',arguments:bad})).isError,true);
+  for(const bad of [{...plan,confirmCreditSpend:true},{...plan,requestId:'not-for-prepare'},{...plan,settings:{...settings,unexpected:true}},...[null,0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'7'].map(accountId=>({...plan,accountId}))])assert.equal((await client.callTool({name:'flow_studio_prepare_generation',arguments:bad})).isError,true);
   assert.equal(bridge.calls.length,6,'Invalid preparation never reaches the bridge');
   const filters={kind:'video',method:'ingredients',family:'Omni 1.1 Flash',durationSeconds:8,aspectRatio:'9:16',resolution:'standard'};
   assert.equal((await client.callTool({name:'flow_studio_list_models',arguments:filters})).isError,undefined);
@@ -150,11 +160,89 @@ test('CLI --call uses same bridge validation; --list-tools works offline', async
     return true;
   });
   const listed = await run(process.execPath, [...args, '--list-tools'], { env: { ...env, FLOW_STUDIO_BRIDGE_FILE: '/missing/bridge.json' } });
-  assert.equal(JSON.parse(listed.stdout).tools.length, 14);
+  assert.equal(JSON.parse(listed.stdout).tools.length, definitions.length);
   const plan={settings:{kind:'image',method:'image',family:'Nano Banana 2.1',aspectRatio:'1:1'},prompt:'plan only',referencePaths:['/tmp/image.png']};
   const prepared=await run(process.execPath,[...args,'--call','prepare',JSON.stringify(plan)],{env});
   assert.deepEqual(JSON.parse(prepared.stdout),{result:{method:'prepare',params:plan}});
   assert.equal(bridge.calls.length, 2);
+});
+
+test('isolated inspection accepts one exact account and keeps cancellation on shared bridge operation',async()=>{
+  const calls=[],client={call:async(...args)=>{calls.push(args);return args[0]==='isolated_inspect'?{ready:true,accountId:7,accountEmail:'owner@example.test',projectURL:'https://flow.google.com/project/fixture',engine:'isolated-browser',usesDesktopFocus:false}:{job:{id:'pending',status:'running',unknownOutcome:true}};}};
+  for(const params of [undefined,null,[],{},1,{accountId:7,extra:true},{accountId:0},{accountId:-1},{accountId:1.5},{accountId:Number.MAX_SAFE_INTEGER+1},{accountId:'7'}])await assert.rejects(dispatch(client,'isolated_inspect',params),{code:'INVALID_ARGUMENTS'});
+  assert.equal(calls.length,0);
+  const signal=new AbortController().signal,result=await dispatch(client,'isolated_inspect',{accountId:7},{signal});
+  assert.equal(result.ready,true);assert.equal(result.usesDesktopFocus,false);assert.deepEqual(calls[0],['isolated_inspect',{accountId:7},{signal}]);
+  const definition=definitions.find(item=>item.method==='isolated_inspect');assert.equal(definition.name,'flow_studio_inspect_isolated_browser');
+  assert.equal(definition.annotations.readOnlyHint,true);assert.equal(definition.annotations.destructiveHint,false);assert.equal(definition.annotations.idempotentHint,false);
+  assert.match(definition.description,/without desktop focus/);assert.match(definition.description,/Does not upload/);assert.match(definition.description,/spend generation credits/);
+  const cancelled=await dispatch(client,'cancel',{jobId:'pending'});assert.equal(cancelled.job.status,'running');assert.equal(cancelled.job.unknownOutcome,true);assert.deepEqual(calls[1].slice(0,2),['cancel',{jobId:'pending'}]);
+});
+test('optional browser prepare is strict and strips no paid fields into ordinary generate schema',async()=>{
+ const calls=[],client={call:async(...args)=>{calls.push(args);return {valid:true,checks:{browser:'passed',upload:'passed'}};}};
+ const input={model:'omni-1.2-flash-8s-landscape',method:'ingredients',prompt:'test',referencePaths:['/tmp/reference.png'],accountId:7,checkBrowser:true};
+ for(const patch of [{accountId:undefined},{checkBrowser:'true'},{checkBrowser:1},{confirmCreditSpend:true},{requestId:'not-for-prepare'}])await assert.rejects(dispatch(client,'prepare',{...input,...patch}),{code:'INVALID_ARGUMENTS'});
+ assert.equal(calls.length,0);await dispatch(client,'prepare',input);assert.deepEqual(calls[0].slice(0,2),['prepare',input]);
+ await dispatch(client,'prepare',{...input,checkBrowser:false,accountId:undefined});assert.equal(calls.length,2);
+ const definition=definitions.find(item=>item.method==='prepare');assert.equal(definition.annotations.readOnlyHint,false);assert.equal(definition.annotations.idempotentHint,false);assert.match(definition.description,/uploads requested images/);assert.match(definition.description,/Never clicks Generate/);
+});
+test('browser upload preparation uses one 600s bridge call and never retries transport errors',async()=>{
+ const input={model:'omni-1.2-flash-8s-landscape',prompt:'test',accountId:7,checkBrowser:true};
+ for(const code of ['BRIDGE_TRANSPORT','BRIDGE_TIMEOUT']){
+  const client=new BridgeClient(),calls=[];client.connect=async()=>({});client.request=async(...args)=>{calls.push(args);throw Object.assign(new Error('Synthetic transport failure'),{code});};
+  await assert.rejects(client.call('prepare',input),{code});assert.equal(calls.length,1);assert.equal(calls[0][3],600000);
+ }
+ for(const local of [{model:input.model,prompt:input.prompt},{...input,checkBrowser:false}]){
+  const client=new BridgeClient();let calls=0;client.connect=async()=>({});client.request=async(...args)=>{assert.equal(args[3],120000);if(++calls===1)throw Object.assign(new Error('Lost local preview'),{code:'BRIDGE_TRANSPORT'});return {result:{valid:true}};};
+  assert.deepEqual(await client.call('prepare',local),{valid:true});assert.equal(calls,2,'Local-only preparation preserves safe retry behavior');
+ }
+});
+test('browser preparation can finish after consent crosses the old 120s transport deadline',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ let finish,requestSignal,calls=0;
+ const client=new BridgeClient({fetch:async(_url,options)=>{calls++;requestSignal=options.signal;return new Promise((resolve,reject)=>{
+  finish=()=>resolve({ok:true,text:async()=>JSON.stringify({result:{valid:true,checks:{browser:'passed'}}})});
+  requestSignal.addEventListener('abort',()=>reject(requestSignal.reason),{once:true});
+ });}});client.connect=async()=>({port:12345,token:'fixture'});
+ const pending=client.call('prepare',{model:'omni-1.2-flash-8s-landscape',prompt:'test',accountId:7,checkBrowser:true}).then(value=>({value}),error=>({error}));
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(calls,1);
+ t.mock.timers.tick(120001);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(requestSignal.aborted,false);finish();
+ assert.deepEqual(await pending,{value:{valid:true,checks:{browser:'passed'}}});assert.equal(calls,1);
+});
+test('recover existing job schema rejects paid selectors and transport never retries read-only browser recovery',async()=>{
+ const calls=[],client={call:async(...args)=>{calls.push(args);return {jobId:'original',job:{id:'original',status:'running',recovering:true}};}};
+ for(const params of [{},{jobId:''},{jobId:'original',requestId:'new'},{jobId:'original',confirmCreditSpend:true},{jobId:'original',model:'override'}])await assert.rejects(dispatch(client,'recover',params),{code:'INVALID_ARGUMENTS'});
+ assert.equal(calls.length,0);assert.equal((await dispatch(client,'recover',{jobId:'original'})).jobId,'original');assert.deepEqual(calls[0].slice(0,2),['recover',{jobId:'original'}]);
+ const definition=definitions.find(item=>item.method==='recover');assert.equal(definition.name,'flow_studio_recover_job');assert.equal(definition.annotations.readOnlyHint,false);assert.equal(definition.annotations.idempotentHint,false);assert.match(definition.description,/Never uploads/);
+ for(const code of ['BRIDGE_TIMEOUT','BRIDGE_TRANSPORT']){const bridge=new BridgeClient();let count=0;bridge.connect=async()=>({});bridge.request=async(...args)=>{count++;assert.equal(args[3],120000);throw Object.assign(new Error('Synthetic recovery failure'),{code});};await assert.rejects(bridge.call('recover',{jobId:'original'}),{code});assert.equal(count,1);}
+});
+test('manual cooldown reset has one strict account selector and never retries transport failure',async()=>{
+ const calls=[],client={call:async(...args)=>{calls.push(args);return {cleared:true,accounts:[]};}};
+ for(const params of [{},{accountId:0},{accountId:-1},{accountId:1.5},{accountId:'7'},{accountId:7,requestId:'extra'}])await assert.rejects(dispatch(client,'reset_cooldown',params),{code:'INVALID_ARGUMENTS'});
+ await dispatch(client,'reset_cooldown',{accountId:7});assert.deepEqual(calls[0].slice(0,2),['reset_cooldown',{accountId:7}]);
+ const tool=definitions.find(item=>item.method==='reset_cooldown');assert.equal(tool.name,'flow_studio_reset_account_cooldown');assert.equal(tool.annotations.readOnlyHint,false);assert.equal(tool.annotations.idempotentHint,false);
+ const bridge=new BridgeClient();let count=0;bridge.connect=async()=>({});bridge.request=async()=>{count++;throw Object.assign(new Error('Synthetic transport failure'),{code:'BRIDGE_TRANSPORT'});};await assert.rejects(bridge.call('reset_cooldown',{accountId:7}),{code:'BRIDGE_TRANSPORT'});assert.equal(count,1);
+});
+test('explicit account participation and connection checks are strict and never transport-retry',async()=>{
+ const calls=[],client={call:async(...args)=>{calls.push(args);return {ok:true};}};
+ for(const [method,params] of [['set_account_active',{accountId:7,enabled:'false'}],['set_account_active',{accountId:7}],['check_account',{accountId:7,enabled:true}],['check_account',{accountId:-1}]])await assert.rejects(dispatch(client,method,params),{code:'INVALID_ARGUMENTS'});
+ await dispatch(client,'set_account_active',{accountId:7,enabled:true});await dispatch(client,'check_account',{accountId:7});assert.deepEqual(calls.map(call=>call.slice(0,2)),[['set_account_active',{accountId:7,enabled:true}],['check_account',{accountId:7}]]);
+ for(const method of ['set_account_active','check_account']){const bridge=new BridgeClient();let count=0;bridge.connect=async()=>({});bridge.request=async()=>{count++;throw Object.assign(new Error('Synthetic transport failure'),{code:'BRIDGE_TRANSPORT'});};await assert.rejects(bridge.call(method,method==='set_account_active'?{accountId:7,enabled:true}:{accountId:7}),{code:'BRIDGE_TRANSPORT'});assert.equal(count,1);}
+});
+test('internal consent handoff uses one 60s bridge call and is absent from MCP tools',async()=>{
+ assert.equal(definitions.some(tool=>tool.method.startsWith('upload_rights_')),false);
+ for(const method of ['upload_rights_status','upload_rights_respond']){
+  const bridge=new BridgeClient();let calls=0;bridge.connect=async()=>({});bridge.request=async(...args)=>{calls++;assert.equal(args[3],60000);throw Object.assign(new Error('Synthetic transport failure'),{code:'BRIDGE_TRANSPORT'});};
+  await assert.rejects(bridge.call(method,method==='upload_rights_status'?{}:{token:'00000000-0000-4000-8000-000000000001',accept:false}),{code:'BRIDGE_TRANSPORT'});assert.equal(calls,1);
+ }
+});
+test('batch account check accepts empty input only and never retries its long managed check',async()=>{
+ const calls=[],client={call:async(...args)=>{calls.push(args);return {total:2,checked:2,verified:1,failed:1,skipped:0,results:[]};}};
+ for(const params of [null,[],{accountId:7},{enabled:true}])await assert.rejects(dispatch(client,'check_enabled_accounts',params),{code:'INVALID_ARGUMENTS'});
+ assert.equal((await dispatch(client,'check_enabled_accounts',{})).checked,2);assert.deepEqual(calls[0].slice(0,2),['check_enabled_accounts',{}]);
+ const tool=definitions.find(item=>item.method==='check_enabled_accounts');assert.equal(tool.name,'flow_studio_check_enabled_accounts');assert.equal(tool.annotations.idempotentHint,false);
+ const bridge=new BridgeClient();let count=0;bridge.connect=async()=>({});bridge.request=async(...args)=>{count++;assert.equal(args[3],600000);throw Object.assign(new Error('Synthetic batch timeout'),{code:'BRIDGE_TIMEOUT'});};await assert.rejects(bridge.call('check_enabled_accounts',{}),{code:'BRIDGE_TIMEOUT'});assert.equal(count,1);
 });
 
 test('private bridge file rejects unsafe mode, symlink, and remote host', async t => {
@@ -216,18 +304,20 @@ test('MCP prepare resolves UI settings without generation and pins a deduplicate
   const actions=createAgentActions({runtime});
   const bridge=await fakeBridge(t,async(body,_req,res)=>{try{return await actions(body.method,body.params);}catch(error){res.statusCode=400;res.end(JSON.stringify({error:{code:error.code||'request_failed',message:error.message}}));}});
   const client=new BridgeClient({bridgePath:bridge.bridgePath,launch:async()=>{throw Error('Unexpected launch');}});
-  const status=await dispatch(client,'status',{});assert.equal(status.apiVersion,2);assert(status.features.includes('prepare-generation'));
+  const status=await dispatch(client,'status',{});assert.equal(status.apiVersion,3);assert(status.features.includes('prepare-generation'));assert(status.features.includes('isolated-browser-generation'));
   const settings={kind:'video',method:'frames',family:'Veo 3.1 Fast',durationSeconds:8,aspectRatio:'16:9'};
-  const plan=await dispatch(client,'prepare',{settings,prompt:'Local test only',startFramePath:start,endFramePath:end});
+  const plan=await dispatch(client,'prepare',{settings,prompt:'Local test only',startFramePath:start,endFramePath:end,accountId:7});
   assert.equal(plan.valid,true);assert.equal(plan.model.id,'veo-3.1-fast-i2v-8s-landscape');assert.equal(plan.method,'frames');
   assert.equal(plan.inputs.startFrame,true);assert.equal(plan.inputs.endFrame,true);assert.equal(plan.checks.accountAccess,'not_checked');
   assert.equal(plan.generateArguments.settings,undefined);assert.equal(plan.generateArguments.model,plan.model.id);assert.equal(plan.generateArguments.method,'frames');
+  assert.equal(plan.generateArguments.accountId,7);assert.equal(plan.model.generationEngine,'isolated-browser');
   assert.equal(JSON.stringify(plan).includes('base64'),false);assert.equal(plan.generateArguments.confirmCreditSpend,undefined);assert.equal(plan.generateArguments.requestId,undefined);
   assert.equal(generations,0);assert.equal(persists,0);assert.equal(runtime.jobs.length,0);
   const args={...plan.generateArguments,confirmCreditSpend:true,requestId:'prepared-stable'};
   const first=await dispatch(client,'generate',args),again=await dispatch(client,'generate',args);
   assert.equal(first.jobId,again.jobId);assert.equal(generations,1);assert.equal(runtime.jobs.length,1);
   await assert.rejects(dispatch(client,'generate',{...args,prompt:'Changed prompt'}),/requestId/);
+  await assert.rejects(dispatch(client,'generate',{...args,accountId:8}),/requestId/);
   assert.equal(generations,1);
   const textPlan=await dispatch(client,'prepare',{settings:{...settings,method:'text'},prompt:'Text only'});
   assert.equal(textPlan.model.id,'veo-3.1-fast-8s-landscape','Only known alias resolves to the canonical variant');

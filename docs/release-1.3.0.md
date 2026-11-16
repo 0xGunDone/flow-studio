@@ -1,0 +1,49 @@
+# Flow Studio 1.3.0 — Alpha / Pre-release
+
+Candidate for review: `releaseReady: false`, `published: false`. The complete portrait 720p Agent Edit pipeline with two ordered image references is verified through one proposal/Approve, bound result verification, download and save; receipt recovery is separately verified. Final source/package checks are still required. Final source tests and archives remain pending the new code gate.
+
+## Changes
+
+- Supported Nano Banana image models, Omni 1.2 Flash video modes and standard Veo 3.1 variants now use an app-owned browser through normal generation. Exact model IDs, prompt, reference order, frame roles and selected account stay fixed. Unsupported combinations fail without model/account/engine substitution.
+- Up to seven Omni image ingredients, explicit start/end Frames, image references, one source video for Omni 1.2 Edit with model-specific validation, and original-size downloads share normal history and save controls. The complete source-bound Agent Edit pipeline with two ordered image references is verified for portrait 720p; separate receipt recovery is also verified.
+- History verification binds exact full prompt, ordered image references, selected output poster and the owning download-control/menu chain to one observed selected entry. Existing image and video downloads and receipt-based recovery passed without another generation. Agent Edit recovery uses the typed source IMAGE preview and scene binding instead of inventing a source video ID.
+- Private submission receipts are persisted before the single guarded submission. Unknown jobs can be checked and downloaded into the same history item without a new upload or paid request.
+- Account participation is an explicit user choice, separate from backend session availability. Local cooldowns persist for 30 minutes; explicit manual reset changes only the local timer and preserves the last error and manual disabled state. It does not change Google restrictions or start generation.
+- MCP API 3 exposes 24 tools, including local preparation, opt-in no-spend browser upload checks, existing-job recovery, account participation, connection/batch checks and local cooldown reset. The adapter can run outside a cloud-synced source folder; reconnect the MCP client for the current schema.
+- Shutdown blocks new actions, drains owned browser/bridge/history/backend work, handles SIGTERM/SIGINT, and allows retry after failure. Managed startup pins one full container ID and Compose ownership labels; shutdown rechecks that identity and stops only that container without rereading a cloud-backed Compose file.
+- CI now includes `test_video_inputs.py` in the backend suite list; the prerelease workflow reuses that CI job.
+
+## Verified scope
+
+Installed-app checks include Omni 1.2 text-only video; one- and two-distinct-image ingredients; separate start/end Frames; Veo 3.1 Lite Ingredients/R2V at 8 seconds with one reference; standard image generation with two references; original receipt-based recovery; native Save As and Open Folder; explicit cooldown reset; and serial account checks with attributed per-account failures.
+
+Existing Nano Banana 2.1 portrait image was downloaded through its bound 2K Upscaled option without generating another image. The output measured 1536×2752 versus its standard 768×1376 version. This verifies that existing-result upscale case, not every family, aspect or 4K output.
+
+Omni 1.2 Edit uses Flow Agent in the same app-owned browser, preserving the exact account, model, prompt, source video and image order. Agent prepares one proposal for one video. Before one Approve action, the app verifies the proposal, persists its private receipt and crosses the same authorized-spend boundary; there is no automatic reapproval, account rotation or paid fallback.
+
+The owned Agent proposal must quote the exact amount calculated for the selected mode using the source duration rounded up to whole seconds; Omni 1.2 seconds above ten count double. The direct-editor precheck follows its menu rounding, while Agent uses ceil duration: the observed 10.026667-second source quoted 36 credits in Agent versus 30 in the direct editor. This is not a doubled budget or permission to change models. Matching cost does not prove output resolution; exact dimensions and duration are checked before success.
+
+The installed-app Omni 1.2 Edit pipeline through Flow Agent is verified with a source video and two distinct images in exact order: original prompt, one proposal, one Approve for 36 credits, waiting, bound-History verification, download and save without manual recovery. The job completed in 279 seconds; the MP4 is 720×1280, 9:16, H.264/AAC, 10.026667 seconds. Separate no-image-reference and two-image jobs also passed receipt recovery without another generation. These checks cover the stated portrait 720p case; other aspects/durations and successful 360p Edit are not claimed verified.
+
+For Edit with image references, the app first sends a separate attachment-free control instruction in a new empty Agent session: use all images as ordered ingredients, preserve the next creative prompt verbatim, make one video, and do not generate or request approval until the next message. It then sends the source video, images and unchanged creative prompt in a separate turn. This transport context is visible in Agent; it is not prepended to the creative prompt or substituted into History. Exactly one completed control turn followed by the owned request/proposal is required; extra messages, premature permission or changed inputs fail closed. The single paid boundary remains Approve after the durable receipt.
+
+Agent recovery saves a typed IMAGE preview of the source video and binds its resource to the original scene, exact prompt and ordered images in the selected History entry. The IMAGE preview is not a Google video ID; the app does not invent a /video/ identifier. Recovery reads the existing result without uploading inputs, creating another proposal or clicking Approve.
+
+Requested 360p Edit still fails before Agent when the direct editor quote does not match: the observed 9-versus-3 credit guard returned `MODEL_SETTINGS_NOT_VERIFIED`, `submitted:false`, without Generate. This is a mode-fidelity stop, not successful 360p generation.
+
+Final automated test counts for this Agent source are recorded with the complete source gate; earlier checkpoint counts do not establish the current build. Backend evidence remains 14 suites / 104 tests only while its tested hashes match. Installed-app SIGTERM confirmed owned backend shutdown. New Agent code and bundled skill/help require fresh arm64/x64 package verification and SHA256 manifests before publication.
+
+## Requirements and limits
+
+- macOS, Google Chrome, and Docker Desktop or Colima with Docker CLI/Compose. MCP needs Node.js 22.12 or newer.
+- Builds use ad-hoc signatures; no Apple Developer ID signature or notarization.
+- A model in the catalog does not establish account entitlement, available credits or Google acceptance. Google can reject a request, including `PUBLIC_ERROR_UNUSUAL_ACTIVITY`; the app reports that result without automatic paid retry or account rotation.
+- Veo 4/6-second variants require Ultra. The currently observed Pro editor provides 8 seconds/720p; an unavailable requested duration fails before submission instead of becoming an 8-second request.
+- Nano Banana 2 Lite remains standard-only. Nano Banana 2.1/Pro 2K/4K use explicit Flow download upscales; 4K and other families/aspects are not claimed live-verified.
+- Current Omni 1.2 Edit source geometry must exactly match the requested mode: portrait 360×640 or landscape 640×360 at 360p; portrait 720×1280 or landscape 1280×720 at standard 720p. The app does not silently resize or replace the selected model. Downloaded Edit media must match the source dimensions and duration (within 0.15 seconds) before completion. A result above 100 MiB or unavailable probe reports `OUTPUT_METADATA_UNAVAILABLE`; mismatch reports `MODEL_SETTINGS_NOT_VERIFIED`, retaining unknown outcome without retry. Google video-rights terms are a separate user choice. Final source tests, current package verification and publication approval remain gates for this draft. The verified Edit scope is portrait 720p with the observed approximately 10-second source and two ordered images. Source geometry validation and a matching website quote alone do not prove the generated output resolution.
+- Closing the app stops local waiting and its owned browser/backend. Google may continue an accepted job; checking an existing receipt is not a new submission.
+- Intel packages can be built on Apple Silicon; that does not replace a physical Intel-Mac test.
+
+## Assets
+
+The candidate asset set is arm64/x64 ZIP and DMG files, MCP and extension source ZIPs, and `SHA256SUMS.txt`. The MCP ZIP includes the complete `skills/flow-studio/` skill and install instructions. Publication remains a separate decision; preserve the verified scope and current Edit limit in any Alpha pre-release.

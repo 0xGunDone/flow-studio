@@ -18,7 +18,7 @@ class VideoInputTests(unittest.IsolatedAsyncioTestCase):
         self.reference = {"file_id": FILE_ID, "mime_type": "video/mp4", "filename": "clip.mp4"}
         self.process = AsyncMock()
         self.process.returncode = 0
-        self.process.communicate.return_value = (json.dumps({"format": {"duration": "3"}, "streams": [{"codec_type": "video"}]}).encode(), b"")
+        self.process.communicate.return_value = (json.dumps({"format": {"duration": "3"}, "streams": [{"codec_type": "video", "width": 360, "height": 640}]}).encode(), b"")
         self.folder = patch.object(video_inputs, "INPUT_DIR", self.root)
         self.factory = patch.object(video_inputs.asyncio, "create_subprocess_exec", AsyncMock(return_value=self.process))
         self.folder.start()
@@ -30,6 +30,8 @@ class VideoInputTests(unittest.IsolatedAsyncioTestCase):
         result = await video_inputs.read_video_reference(self.reference)
         self.assertEqual(result["bytes"], b"original-video")
         self.assertEqual(result["end_frame"], 90)
+        self.assertEqual((result["width"], result["height"]), (360, 640))
+        self.assertIn("format=duration:stream=codec_type,duration,width,height", self.spawn.call_args.args)
         self.assertIn("file,pipe", self.spawn.call_args.args)
         self.assertIn("pass_fds", self.spawn.call_args.kwargs)
 
@@ -37,6 +39,13 @@ class VideoInputTests(unittest.IsolatedAsyncioTestCase):
         for data in ({"format": {"duration": "11"}, "streams": [{"codec_type": "video"}]}, {"format": {"duration": "3"}, "streams": [{"codec_type": "audio"}]}):
             self.process.communicate.return_value = (json.dumps(data).encode(), b"")
             with self.assertRaisesRegex(ValueError, "10 секунд"):
+                await video_inputs.read_video_reference(self.reference)
+
+    async def test_missing_or_invalid_dimensions_are_rejected_before_upload(self):
+        for values in ({}, {"width": 0, "height": 640}, {"width": True, "height": 640}, {"width": "360", "height": 640}):
+            data = {"format": {"duration": "3"}, "streams": [{"codec_type": "video", **values}]}
+            self.process.communicate.return_value = (json.dumps(data).encode(), b"")
+            with self.assertRaisesRegex(ValueError, "ширину и высоту"):
                 await video_inputs.read_video_reference(self.reference)
 
     async def test_path_traversal_remote_file_and_symlink_never_read(self):

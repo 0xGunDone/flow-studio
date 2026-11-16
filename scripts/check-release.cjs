@@ -14,8 +14,8 @@ const bundle = value('--app');
 const arch = value('--arch');
 const packageJson = require('../app/package.json');
 const config = require('../electron-builder.cjs');
-const required = ['main.cjs', 'runtime.cjs', 'bootstrap.cjs', 'input-files.cjs', 'preload.cjs', 'accounts.cjs', 'recovery.cjs', 'agent-bridge.cjs', 'mcp-server.cjs', 'bridge-client.cjs', 'exports.cjs', 'index.html', 'help-content.html', 'renderer.js', 'styles.css', 'package.json'];
-const forbidden = /(?:^|\/)(?:machine\.json|\.env(?:\..*)?|\.git|\.DS_Store|__pycache__|\.venv|history\.json|agent-bridge\.json|managed-accounts\.json|setting\.toml|data|tmp|logs|browser_data|browser_profiles|node_modules\/electron)(?:\/|$)|\.(?:sqlite3?|db|pyc)$/i;
+const required = ['main.cjs', 'runtime.cjs', 'bootstrap.cjs', 'input-files.cjs', 'preload.cjs', 'accounts.cjs', 'recovery.cjs', 'agent-bridge.cjs', 'mcp-server.cjs', 'bridge-client.cjs', 'exports.cjs', 'index.html', 'help-content.html', 'renderer.js', 'styles.css', 'browser-native.cjs', 'browser-engine.cjs', 'browser-agent-edit.cjs', 'browser-images.cjs', 'browser-video-models.cjs', 'browser-receipts.cjs', 'package.json'];
+const forbidden = /(?:^|\/)(?:machine\.json|\.env(?:\..*)?|\.git|\.DS_Store|__pycache__|\.venv|history\.json|agent-bridge\.json|managed-accounts\.json|setting\.toml|browser-account-state\.json|account-participation\.json|last-image-markup\.json|last-download-diagnostic\.json|data|tmp|logs|browser_data|browser_profiles|browser-receipts|browser-diagnostics|node_modules\/electron)(?:\/|$)|\.(?:sqlite3?|db|pyc)$/i;
 
 function checkText(name, bytes) {
   if (/\.(?:cjs|js|json|html|css|md|py|toml|txt|sh)$/.test(name)) {
@@ -34,6 +34,13 @@ function walk(folder, relative = '') {
 }
 
 function checkResources(resources) {
+  const extension = path.join(resources, 'extension');
+  const manifest = JSON.parse(fs.readFileSync(path.join(extension, 'manifest.json'), 'utf8'));
+  for (const name of [manifest.background?.service_worker, manifest.action?.default_popup, 'popup.js', 'popup.css']) {
+    assert(typeof name === 'string' && name === name.trim() && /^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*(?:\.[A-Za-z0-9_-]+)+$/.test(name), 'Extension asset must be a local relative path');
+    const full = path.join(extension, name);
+    assert(fs.existsSync(full) && fs.lstatSync(full).isFile(), 'Missing extension asset: ' + name);
+  }
   for (const name of ['backend/main.py', 'backend/requirements.txt', 'backend/Dockerfile.headed', 'backend/.dockerignore', 'backend/docker/entrypoint.headed.sh', 'backend/config/setting_example.toml', 'backend/LICENSE', 'extension/manifest.json', 'skills/flow-studio/SKILL.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
     assert(fs.existsSync(path.join(resources, name)), `Missing resource: ${name}`);
   }
@@ -66,11 +73,13 @@ if (bundle) {
   for (const name of required) assert(files.includes(name), `Missing app file: ${name}`);
   for (const name of ['node_modules/@modelcontextprotocol/sdk/package.json', 'node_modules/zod/package.json']) assert(files.includes(name), `Missing production dependency: ${name}`);
   for (const name of files) {
-    assert(!/(^|\/)(?:machine\.json|[^/]*\.test\.cjs|\.env(?:\.[^/]*)?)$/.test(name), `Private/test app file: ${name}`);
+    assert(!/(^|\/)(?:machine\.json|history\.json|agent-bridge\.json|managed-accounts\.json|browser-account-state\.json|account-participation\.json|last-image-markup\.json|last-download-diagnostic\.json|[^/]*\.test\.cjs|\.env(?:\.[^/]*)?)$/.test(name)&&!/(^|\/)(?:browser-receipts|browser-diagnostics)(\/|$)/.test(name), `Private/test app file: ${name}`);
     assert(!/^node_modules\/(electron|electron-builder|app-builder-lib)(\/|$)/.test(name), `Dev dependency in app: ${name}`);
   }
   for (const name of required) checkText(name, asar.extractFile(archive, name));
   checkResources(resources);
+  const helper=path.join(resources,'native',`flow-browser-${arch || process.arch}`);
+  assert(fs.existsSync(helper),'Missing native browser helper');
   if (arch) {
     assert(['arm64', 'x64'].includes(arch), 'Architecture must be arm64 or x64');
     const executable = path.join(path.resolve(bundle), 'Contents', 'MacOS', 'Flow Studio');

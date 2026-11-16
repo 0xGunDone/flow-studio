@@ -24,3 +24,5 @@ app/machine.json
 **/*.p12
 **/*.key
 **/.venv/
+
+app/native/bin/
