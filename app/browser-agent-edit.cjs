@@ -123,6 +123,13 @@ function agentEditDOM(op,arg={}){
   const values=[...document.querySelectorAll('flow-add-menu-popover-content')].filter(visible);if(values.length===0)return false;if(values.length!==1||one('button[aria-label="Add ingredients to the prompt box"]',composer().root).getAttribute('aria-expanded')!=='true')error('AGENT_PICKER_NOT_VERIFIED','Список не принадлежит редактору Agent.');values[0].setAttribute('data-flow-studio-agent-picker',arg.nonce);return true;
  }
  if(op==='focus-search'){const values=[...picker().querySelectorAll('input[aria-label="Search assets"]')].filter(visible);if(values.length!==1)error('AGENT_PICKER_NOT_VERIFIED','Не найден собственный поиск исходников Agent.');values[0].focus();values[0].select();return document.activeElement===values[0];}
+ if(op==='picker-state'){
+  const values=[...document.querySelectorAll('flow-add-menu-popover-content')].filter(visible),trigger=one('button[aria-label="Add ingredients to the prompt box"]',composer().root);
+  if(!values.length)return {state:trigger.getAttribute('aria-expanded')==='true'?'opening':'closed'};
+  if(values.length!==1||values[0].getAttribute('data-flow-studio-agent-picker')!==arg.nonce)error('AGENT_PICKER_NOT_VERIFIED','Открыт другой или неоднозначный список исходников Agent.');
+  const searches=[...values[0].querySelectorAll('input[aria-label="Search assets"]')].filter(visible);if(searches.length>1)error('AGENT_PICKER_NOT_VERIFIED','Поиск исходников Agent выбран неоднозначно.');
+  const query=searches.length===1?searches[0].value:null;return {state:'open',query,exists:query===arg.name&&Boolean(pickerOption())};
+ }
  if(op==='asset-exists')return Boolean(pickerOption());
  if(op==='select-asset'){
   const value=pickerOption();if(!value||typeof arg.expectedResourceId!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(arg.expectedResourceId))error('AGENT_INPUTS_NOT_VERIFIED','Исходник исчез из списка Agent.');
@@ -224,26 +231,35 @@ async function agentSettings(page,plan,configure){
 }
 async function configureAgentEdit(page,plan){return agentSettings(page,plan,true);}
 async function verifyAgentEditSettings(page,plan){return agentSettings(page,plan,false);}
-async function attachAgentAsset(page,{name,kind,expectedResourceId,previous}={}){
+async function attachAgentAsset(page,{name,kind,expectedResourceId,previous,assetLookupTimeoutMs=60000}={}){
  if(typeof name!=='string'||!name.trim()||name.length>256||/[\r\n\0]/.test(name)||!['video','image'].includes(kind)||typeof expectedResourceId!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(expectedResourceId)||!previous||!Array.isArray(previous.ingredientImageResourceIds))throw fail('AGENT_INPUTS_NOT_VERIFIED','Нужны точный исходник Agent и предыдущий набор вложений.');
  const signature=value=>({sourceImageResourceId:inputId(value.source),ingredientImageResourceIds:value.ingredients.map(inputId)}),prior={sourceImageResourceId:previous.sourceImageResourceId||null,ingredientImageResourceIds:previous.ingredientImageResourceIds};
- const before=await runAgent(page,'composer');if(before.prompt.trim()||JSON.stringify(signature(before))!==JSON.stringify(prior))throw fail('BROWSER_DRAFT_PRESENT','Исходники или текст Agent изменились до прикрепления файла.');
+ const matchesPrior=value=>Boolean(value.source)===Boolean(prior.sourceImageResourceId)&&JSON.stringify(signature(value))===JSON.stringify(prior);
+ const before=await runAgent(page,'composer');if(before.prompt.trim()||!matchesPrior(before))throw fail('BROWSER_DRAFT_PRESENT','Исходники или текст Agent изменились до прикрепления файла.');
  if(kind==='video'&&prior.sourceImageResourceId||kind==='image'&&prior.ingredientImageResourceIds.length>=5)throw fail('AGENT_INPUTS_NOT_VERIFIED','Лимит исходников Agent достигнут.');
- const target={sourceImageResourceId:kind==='video'?expectedResourceId:prior.sourceImageResourceId,ingredientImageResourceIds:kind==='image'?[...prior.ingredientImageResourceIds,expectedResourceId]:prior.ingredientImageResourceIds},nonce=randomUUID();let opened=false,added=false;
- const args={nonce,name,kind,expectedResourceId};
+ const target={sourceImageResourceId:kind==='video'?expectedResourceId:prior.sourceImageResourceId,ingredientImageResourceIds:kind==='image'?[...prior.ingredientImageResourceIds,expectedResourceId]:prior.ingredientImageResourceIds};let nonce=randomUUID(),opened=false,added=false,reopened=false,selectionClaimed=false;
+ let args={nonce,name,kind,expectedResourceId};
+ const search=async()=>{await runAgent(page,'open-picker');opened=true;await page.until(()=>runAgent(page,'claim-picker',{nonce}),10000,'agent-asset-picker');if(!await runAgent(page,'focus-search',args))throw fail('PROMPT_FOCUS_FAILED','Не удалось выбрать поиск исходников Agent.');await page.client.send('Input.insertText',{text:name});};
  try{
-  await runAgent(page,'open-picker');opened=true;await page.until(()=>runAgent(page,'claim-picker',{nonce}),10000,'agent-asset-picker');
-  if(!await runAgent(page,'focus-search',args))throw fail('PROMPT_FOCUS_FAILED','Не удалось выбрать поиск исходников Agent.');await page.client.send('Input.insertText',{text:name});
-  await page.until(()=>runAgent(page,'asset-exists',args),15000,'agent-exact-asset');await runAgent(page,'select-asset',args);
+  await search();
+  await page.until(async()=>{
+   const state=await runAgent(page,'picker-state',args);if(state.state==='closed'){
+    const current=await runAgent(page,'composer');if(current.prompt.trim()||!matchesPrior(current))throw fail('AGENT_INPUTS_CHANGED','Исходники или текст Agent изменились при закрытии поиска.');
+    if(reopened)throw fail('AGENT_PICKER_NOT_VERIFIED','Поиск исходников Agent повторно закрылся до выбора файла.');
+    await runAgent(page,'release-picker',{nonce});reopened=true;nonce=randomUUID();args={nonce,name,kind,expectedResourceId};await search();return false;
+   }
+   return state.state==='open'&&state.query===name&&state.exists;
+  },assetLookupTimeoutMs,'agent-exact-asset-library');await runAgent(page,'select-asset',args);
   return await page.until(async()=>{
-   await runAgent(page,'claim-attached',args);const current=await runAgent(page,'composer'),value=signature(current);if(current.prompt.trim())throw fail('AGENT_INPUTS_CHANGED','В Agent появился чужой текст при выборе исходника.');
-   if(JSON.stringify(value)===JSON.stringify(target))return current;
+   selectionClaimed=await runAgent(page,'claim-attached',args)||selectionClaimed;const current=await runAgent(page,'composer'),value=signature(current);if(current.prompt.trim())throw fail('AGENT_INPUTS_CHANGED','В Agent появился чужой текст при выборе исходника.');
+   if(JSON.stringify(value)===JSON.stringify(target))return {...current,selectionNonce:nonce};
    const pendingNew=kind==='video'&&current.source?.pending&&!current.source.selectionClaim&&current.ingredients.length===prior.ingredientImageResourceIds.length||kind==='image'&&current.ingredients.length===prior.ingredientImageResourceIds.length+1&&current.ingredients.at(-1)?.pending&&!current.ingredients.at(-1).selectionClaim;
    if(pendingNew)return false;
    if(JSON.stringify(value)!==JSON.stringify(prior))throw fail('AGENT_INPUTS_CHANGED','Прикреплённый исходник Agent не совпал с выбранным.');
    if(!added)added=await runAgent(page,'add-selected-asset',args);return false;
   },20000,'agent-asset-attached');
- }finally{if(opened&&!page.signal?.aborted)await runAgent(page,'release-picker',{nonce}).catch(()=>{});}
+ }catch(error){if(selectionClaimed)error.agentSelectionNonce=nonce;throw error;}
+ finally{if(opened&&!page.signal?.aborted)await runAgent(page,'release-picker',{nonce}).catch(()=>{});}
 }
 async function clearOwnedAgentAttachments(page,{nonces,prompt=''}={}){
  if(!Array.isArray(nonces)||!nonces.length||nonces.some(value=>typeof value!=='string'||!/^[a-f0-9-]{36}$/i.test(value)))return false;

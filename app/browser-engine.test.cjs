@@ -236,6 +236,7 @@ async function harness(t, options = {}) {
         return {};
       }
       if (method === 'Page.enable') return {};
+      if(method==='Page.reload'){assert.ok(options.edit||options.recover);state.readOnlyReloads=(state.readOnlyReloads||0)+1;return {};}
       if (method === 'Page.navigate') { assert.ok(options.recover || options.recoverAfterObservation); state.url = params.url; state.videoEditor=/\/edit\//.test(state.url);state.opened = false; state.currentCandidate = null; return { frameId: FRAME }; }
       if (method === 'Page.setInterceptFileChooserDialog') { state.intercepting = params.enabled; return {}; }
       if (method === 'DOM.resolveNode') { assert.equal(options.edit,true);assert.deepEqual(params,{backendNodeId:73});state.videoResolved=true;return {object:{type:'object',subtype:'node',objectId:'video-file-input-owned'}}; }
@@ -288,7 +289,7 @@ async function harness(t, options = {}) {
     },
     async releaseIsolatedGenerationBrowser(value) { assert.ok(leases.includes(value)); if (!releasedLeases.has(value)) { releasedLeases.add(value); released = true; state.releases++; order.push('release'); } },
   };
-  const engine = createBrowserEngine({ accounts, dataDir, agentEdit: options.agentEdit ?? false, pollMs: 1, bindingTimeoutMs: options.bindingTimeoutMs ?? 20, confirmUploadRights: options.confirmUploadRights, inspectVideo: options.inspectVideo });
+  const engine = createBrowserEngine({ accounts, dataDir, agentEdit: options.agentEdit ?? false, observationRefreshMs: options.observationRefreshMs??30000, pollMs: 1, bindingTimeoutMs: options.bindingTimeoutMs ?? 20, confirmUploadRights: options.confirmUploadRights, inspectVideo: options.inspectVideo });
   return { engine, client, state, commands, ops, uploads, order, dataDir, listeners, leases, get lease() { return lease; }, get leaseController() { return leaseController; } };
 }
 
@@ -2650,7 +2651,7 @@ test('Agent Edit writes its immutable proposal before one approval and verifies 
  };
  h=await harness(t,{edit:true,recover:true,agentEdit,sourcePoster,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),operation(op,arg,state){if(op==='agent-scene-result'){assert.equal(state.agentApproved,true);state.opened=true;assert.equal(arg.sourceScene.url,sceneURL);assert.equal(arg.sourcePreview,sourcePreview);return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[sourcePreview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:sceneURL};}}});
  h.jobId=crypto.randomUUID();const result=await h.engine.generate(input({jobId:h.jobId,model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),{beforeSubmit(){durable++;}});
- assert.equal(approvals,1);assert.equal(durable,1);assert.deepEqual(stages.slice(0,3),['session','settings','source']);assert.equal(h.ops.some(op=>op.op==='submit'),false);assert.equal(result.media[0].kind,'video');assert.equal(h.state.releases,1);
+ assert.equal(approvals,1);assert.equal(durable,1);assert.deepEqual(stages.slice(0,3),['session','settings','source']);assert.equal(h.ops.some(op=>op.op==='submit'),false);assert.equal(result.media[0].kind,'video');assert.equal(h.state.releases,1);assert.equal(h.commands.filter(c=>c.method==='Page.reload'&&c.params.ignoreCache===true).length,1);
  const binding=h.ops.find(op=>op.op==='history-download').arg.binding;assert.deepEqual(binding.sourcePreviews,[sourcePreview]);assert.equal(binding.agentSource.sourceScene.url,sceneURL);
 });
 
@@ -2669,4 +2670,20 @@ test('Agent receipt recovery reads only the saved source scene and output previe
  const h=await harness(t,{recover:true,edit:true,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),agentEdit:new Proxy({},{get(){assert.fail('Recovery called Agent planning or approval')}}),operation(op,arg,state){if(op==='agent-scene-result'){assert.equal(state.url,sourceScene.url);state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[sourcePreview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:state.url};}}});
  const {jobId}=await savedReceipt(h,{model:'omni-1.2-flash-edit-landscape',projectURL,sourceScene,agentProposal:{quoteCredits:9,videoCount:1,sourcePreview,approvalText:'Would you like me to kick off this 1 video generation, costing 9 credits?'}});
  const result=await h.engine.recover(jobId);assert.deepEqual(await fs.readFile(result.media[0].path),MP4);assert.equal(h.state.submitted,0);assert.equal(h.state.videoUploads,undefined);assert.deepEqual(h.commands.filter(c=>c.method==='Page.navigate').map(c=>c.params.url),[sourceScene.url]);assert.equal(h.state.releases,1);
+});
+
+test('Agent recovery refreshes only the saved scene when its loaded state stalls, without another upload or approval',async t=>{
+ const projectURL='https://flow.google.com/project/'+SOURCE_PROJECT,sourceScene={url:projectURL+'/edit/'+SCENE,poster:'https://flow-content.google/image/'+GUID,sha256:crypto.createHash('sha256').update(MP4).digest('hex'),durationSeconds:3,width:1280,height:720},sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID;
+ const h=await harness(t,{recover:true,edit:true,observationRefreshMs:1,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),operation(op,arg,state){if(op==='agent-scene-result'){if(!state.readOnlyReloads)return false;state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[sourcePreview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:state.url};}}});
+ const {jobId,file}=await savedReceipt(h,{model:'omni-1.2-flash-edit-landscape',projectURL,sourceScene,agentProposal:{quoteCredits:9,videoCount:1,sourcePreview,approvalText:'Would you like me to kick off this 1 video generation, costing 9 credits?'}}),before=await fs.readFile(file);
+ const result=await h.engine.recover(jobId);assert.deepEqual(await fs.readFile(result.media[0].path),MP4);assert.equal(h.state.readOnlyReloads,1);assert.equal(h.state.submitted,0);assert.equal(h.state.videoUploads,undefined);assert.deepEqual(await fs.readFile(file),before);
+});
+
+test('Agent attachment failure clears only recorded own selection nonces before approval',async t=>{
+ const folder=await temporary(t),source=path.join(folder,'source.mp4');await fs.writeFile(source,MP4);let h,clearArgs,approvals=0;
+ const imageNonce='00000000-0000-4000-8000-000000000002',sourceNonce='00000000-0000-4000-8000-000000000001';
+ const agentEdit={async startAgentSession(){},async configureAgentEdit(){},async prepareAgentReferenceContext(){},async verifyAgentEditSettings(){},async attachAgentAsset(page,{kind}){if(kind==='video')return {selectionNonce:sourceNonce};throw Object.assign(failure('FLOW_UI_TIMEOUT'),{agentSelectionNonce:imageNonce});},async clearOwnedAgentAttachments(page,args){clearArgs=args;return true;},async approveAgentEdit(){approvals++;assert.fail('Attachment failure approved');}};
+ h=await harness(t,{edit:true,recover:true,agentEdit,sourcePoster:'https://flow-content.google/image/'+GUID,inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720})});
+ await assert.rejects(h.engine.generate(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source},{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Failed attachment persisted paid submission')}),{code:'FLOW_UI_TIMEOUT'});
+ assert.deepEqual(clearArgs,{nonces:[sourceNonce,imageNonce],prompt:''});assert.equal(approvals,0);assert.equal(h.state.releases,1);assert.equal(h.ops.some(op=>op.op==='submit'),false);
 });

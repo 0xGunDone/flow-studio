@@ -587,7 +587,7 @@ class FlowPage{
  }
 }
 
-function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bindingTimeoutMs=60000,inspectVideo,agentEdit=agentEditDefault}){
+function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bindingTimeoutMs=60000,inspectVideo,agentEdit=agentEditDefault,observationRefreshMs=30000}){
  if(!accounts?.acquireIsolatedGenerationBrowser||!path.isAbsolute(dataDir||''))throw new TypeError('Managed accounts and absolute dataDir required.');
  const prepared=new WeakSet(),used=new WeakSet(),receipts=createReceiptStore(dataDir);
  async function diagnose(page,jobId,error){try{const folder=path.join(dataDir,'browser-diagnostics');await fs.mkdir(folder,{recursive:true,mode:0o700});const detail={at:new Date().toISOString(),code:error.code,message:error.message,state:await page.run('failure-state')};await fs.writeFile(path.join(folder,jobId+'.json'),JSON.stringify(detail,null,2),{mode:0o600});const shot=await page.client.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});if(shot.data)await fs.writeFile(path.join(folder,jobId+'.png'),Buffer.from(shot.data,'base64'),{mode:0o600});}catch{}}
@@ -652,18 +652,18 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   }catch(error){if(!clicked&&!signal?.aborted)await clearOwned(page,plan.prompt,ingredients).catch(()=>{});if(!page.signal?.aborted)await diagnose(page,job,error);error.unknownOutcome=clicked&&!error.generationTerminal;throw error;}
  }
  async function submitAgentEdit(result,{signal,beforeSubmit,onProgress}){
-  const {page,plan,ingredients,lease,sourceScene,projectURL}=result,job=result.jobId||crypto.randomUUID();let approved=false;
+  const {page,plan,ingredients,lease,sourceScene,projectURL}=result,job=result.jobId||crypto.randomUUID();let approved=false;const selectionNonces=[];
   const resourceId=value=>{const match=/\/image\/([A-Za-z0-9_-]{1,256})$/.exec(value||'');if(!match)throw fail('SOURCE_VIDEO_NOT_VERIFIED','Не удалось прочитать ресурс исходника Agent.');return match[1];};
   try{
    await page.verifyAccount(lease.email);await page.verifySettings(plan);await waitForSourceScene(page,sourceScene);
    if(!await clearOwned(page,plan.prompt,ingredients))throw fail('PREPARED_INPUT_CHANGED','Исходный черновик изменился перед подготовкой Agent.');
-   await page.client.send('Page.navigate',{url:projectURL});await page.until(async()=>(await page.run('state')).url===projectURL,30000,'agent-project');await page.ready();await page.verifyAccount(lease.email);
+   await page.client.send('Page.navigate',{url:projectURL});await page.until(async()=>(await page.run('state')).url===projectURL,30000,'agent-project');await page.client.send('Page.reload',{ignoreCache:true});await page.ready();await page.verifyAccount(lease.email);
    await page.client.send('Emulation.setDeviceMetricsOverride',{width:1920,height:1080,deviceScaleFactor:1,mobile:false});await agentEdit.startAgentSession(page);await agentEdit.configureAgentEdit(page,plan);
    if(ingredients.length)await agentEdit.prepareAgentReferenceContext(page,{verifySettings:()=>agentEdit.verifyAgentEditSettings(page,plan)});
    let previous={sourceImageResourceId:null,ingredientImageResourceIds:[]};
    const sourceImageResourceId=resourceId(sourceScene.poster),ingredientImageResourceIds=ingredients.map(resourceId);
-   await agentEdit.attachAgentAsset(page,{name:result.sourceAssetName,kind:'video',expectedResourceId:sourceImageResourceId,previous});previous={sourceImageResourceId,ingredientImageResourceIds:[]};
-   for(let index=0;index<ingredients.length;index++){await agentEdit.attachAgentAsset(page,{name:result.imageAssetNames[index],kind:'image',expectedResourceId:ingredientImageResourceIds[index],previous});previous={sourceImageResourceId,ingredientImageResourceIds:ingredientImageResourceIds.slice(0,index+1)};}
+   {const selected=await agentEdit.attachAgentAsset(page,{name:result.sourceAssetName,kind:'video',expectedResourceId:sourceImageResourceId,previous});if(selected?.selectionNonce)selectionNonces.push(selected.selectionNonce);}previous={sourceImageResourceId,ingredientImageResourceIds:[]};
+   for(let index=0;index<ingredients.length;index++){const selected=await agentEdit.attachAgentAsset(page,{name:result.imageAssetNames[index],kind:'image',expectedResourceId:ingredientImageResourceIds[index],previous});if(selected?.selectionNonce)selectionNonces.push(selected.selectionNonce);previous={sourceImageResourceId,ingredientImageResourceIds:ingredientImageResourceIds.slice(0,index+1)};}
    const seconds=Math.ceil(sourceScene.durationSeconds),rate=plan.resolution==='360p'?1:3,maxCredits=rate*(Math.min(seconds,10)+Math.max(0,seconds-10)*2);
    const expected={projectURL,prompt:plan.prompt,sourceImageResourceId,ingredientImageResourceIds,maxCredits};
    onProgress('Готовим редактирование через Flow Agent…');const verifySettings=()=>agentEdit.verifyAgentEditSettings(page,plan),binding=await agentEdit.prepareAgentProposal(page,expected,{verifySettings});
@@ -671,11 +671,12 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    onProgress('Редактирование отправлено в Flow Agent. Ожидаем видео…');await page.client.send('Page.navigate',{url:sourceScene.url});
    await page.until(async()=>(await page.run('state')).url===sourceScene.url,30000,'agent-output-scene');
    return await observeAgentScene({page,plan,ingredients,lease,projectURL,sourceScene,sourcePreview:binding.source.origin+binding.source.path,onProgress,waitForResult:true});
-  }catch(error){if(!page.signal?.aborted)await diagnose(page,job,error);error.unknownOutcome=!error.generationTerminal&&(approved||error.unknownOutcome===true);throw error;}
+  }catch(error){if(!approved&&error.unknownOutcome!==true&&!page.signal?.aborted&&typeof agentEdit.clearOwnedAgentAttachments==='function'){if(error.agentSelectionNonce)selectionNonces.push(error.agentSelectionNonce);await agentEdit.clearOwnedAgentAttachments(page,{nonces:selectionNonces,prompt:''}).catch(()=>{});}if(!page.signal?.aborted)await diagnose(page,job,error);error.unknownOutcome=!error.generationTerminal&&(approved||error.unknownOutcome===true);throw error;}
  }
  async function observeAgentScene({page,plan,ingredients,lease,projectURL,sourceScene,sourcePreview,onProgress=()=>{},waitForResult=false}){
   const read=async()=>{const value=await page.run('agent-scene-result',{sourceScene,sourcePreview,prompt:plan.prompt,ingredients,open:true});if(value?.failure){const error=fail('FLOW_GENERATION_REJECTED','Flow отклонил редактирование: '+value.failure.message);error.generationTerminal=true;error.accountFailure=false;throw error;}return value?.ready?value:false;};
-  let history;try{history=await page.until(read,waitForResult?30*60*1000:30000,'agent-source-scene-result');}catch(error){if(error.code==='FLOW_UI_TIMEOUT'&&!waitForResult)throw fail('RESULT_NOT_READY','Редактирование ещё не завершено. Новая отправка не запускалась.');throw error;}if(!history)throw fail('RESULT_NOT_READY','Редактирование ещё не завершено. Новая отправка не запускалась.');
+  let lastRefresh=Date.now(),refreshDelay=observationRefreshMs;const poll=async()=>{const value=await read();if(value)return value;if(Date.now()-lastRefresh>=refreshDelay){if((await page.run('state')).url!==sourceScene.url)throw fail('SOURCE_VIDEO_NOT_VERIFIED','Сцена редактирования изменилась во время ожидания.');await page.client.send('Page.reload',{});lastRefresh=Date.now();refreshDelay=Math.min(refreshDelay*2,120000);onProgress('Обновляем состояние отправленного видео. Повторной генерации нет…');}return false;};
+  let history;try{history=await page.until(poll,waitForResult?30*60*1000:30000,'agent-source-scene-result');}catch(error){if(error.code==='FLOW_UI_TIMEOUT'&&!waitForResult)throw fail('RESULT_NOT_READY','Редактирование ещё не завершено. Новая отправка не запускалась.');throw error;}if(!history)throw fail('RESULT_NOT_READY','Редактирование ещё не завершено. Новая отправка не запускалась.');
   const folder=await fs.mkdtemp(path.join(dataDir,'browser-result-'));await fs.chmod(folder,0o700);
   try{const filename=await downloadOriginal(lease.client,page,folder,plan.resolution,page.signal,'video',{kind:'video',poster:history.posters[0],prompt:history.prompt,ingredients:history.ingredients,sourceVideos:history.sourceVideos||[],sourcePreviews:history.sourcePreviews||[],url:history.url,agentSource:{sourceScene,sourcePreview}}),file=path.join(folder,filename);
    if(typeof inspectVideo!=='function'||(await fs.stat(file)).size>100*1024*1024)throw fail('OUTPUT_METADATA_UNAVAILABLE','Не удалось проверить параметры результата Agent: локальная проверка доступна для видео до 100 МБ. Повторной генерации нет.');
