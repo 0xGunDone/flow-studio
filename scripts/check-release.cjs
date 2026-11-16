@@ -14,7 +14,7 @@ const bundle = value('--app');
 const arch = value('--arch');
 const packageJson = require('../app/package.json');
 const config = require('../electron-builder.cjs');
-const required = ['main.cjs', 'runtime.cjs', 'bootstrap.cjs', 'input-files.cjs', 'preload.cjs', 'accounts.cjs', 'recovery.cjs', 'agent-bridge.cjs', 'mcp-server.cjs', 'bridge-client.cjs', 'exports.cjs', 'index.html', 'help-content.html', 'renderer.js', 'styles.css', 'browser-native.cjs', 'browser-engine.cjs', 'browser-images.cjs', 'browser-video-models.cjs', 'browser-receipts.cjs', 'package.json'];
+const required = ['main.cjs', 'runtime.cjs', 'bootstrap.cjs', 'input-files.cjs', 'preload.cjs', 'accounts.cjs', 'recovery.cjs', 'agent-bridge.cjs', 'mcp-server.cjs', 'bridge-client.cjs', 'exports.cjs', 'index.html', 'help-content.html', 'renderer.js', 'styles.css', 'browser-native.cjs', 'browser-engine.cjs', 'browser-agent-edit.cjs', 'browser-images.cjs', 'browser-video-models.cjs', 'browser-receipts.cjs', 'package.json'];
 const forbidden = /(?:^|\/)(?:machine\.json|\.env(?:\..*)?|\.git|\.DS_Store|__pycache__|\.venv|history\.json|agent-bridge\.json|managed-accounts\.json|setting\.toml|browser-account-state\.json|account-participation\.json|last-image-markup\.json|last-download-diagnostic\.json|data|tmp|logs|browser_data|browser_profiles|browser-receipts|browser-diagnostics|node_modules\/electron)(?:\/|$)|\.(?:sqlite3?|db|pyc)$/i;
 
 function checkText(name, bytes) {

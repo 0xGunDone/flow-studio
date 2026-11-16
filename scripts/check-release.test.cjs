@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-test('release validation requires declared extension assets and rejects unsafe local paths', t => {
+test('release validation requires app modules and declared extension assets and rejects unsafe local paths', t => {
   const source = path.resolve(__dirname, '..'), root = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-release-check-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   for (const name of ['app', 'backend', 'extension', 'skills', 'scripts', 'electron-builder.cjs', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
@@ -14,6 +14,10 @@ test('release validation requires declared extension assets and rejects unsafe l
   }
   const run = () => spawnSync(process.execPath, ['scripts/check-release.cjs'], { cwd: root, encoding: 'utf8' });
   let result = run(); assert.equal(result.status, 0, result.stderr);
+  const agentModule = path.join(root, 'app/browser-agent-edit.cjs'), agentBytes = fs.readFileSync(agentModule);
+  fs.unlinkSync(agentModule);
+  result = run(); assert.notEqual(result.status, 0); assert.match(result.stderr, /Missing app source: browser-agent-edit\.cjs/);
+  fs.writeFileSync(agentModule, agentBytes);
   for (const name of ['background.js', 'popup.html', 'popup.js', 'popup.css']) {
     const file = path.join(root, 'extension', name), bytes = fs.readFileSync(file); fs.unlinkSync(file);
     result = run(); assert.notEqual(result.status, 0); assert.match(result.stderr, /Missing extension asset/); fs.writeFileSync(file, bytes);

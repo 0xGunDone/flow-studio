@@ -203,7 +203,7 @@ async function harness(t, options = {}) {
       if (released) throw failure('CDP_CLOSED');
       commands.push({ method, params });
       if (method === 'Emulation.setDeviceMetricsOverride') {
-        assert.deepEqual(params, { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+        assert.deepEqual(params, { width: options.agentEdit&&params.width===1920?1920:1280, height: options.agentEdit&&params.width===1920?1080:900, deviceScaleFactor: 1, mobile: false });
         state.viewport = { ...params }; return {};
       }
       if (method === 'Runtime.evaluate') {
@@ -288,7 +288,7 @@ async function harness(t, options = {}) {
     },
     async releaseIsolatedGenerationBrowser(value) { assert.ok(leases.includes(value)); if (!releasedLeases.has(value)) { releasedLeases.add(value); released = true; state.releases++; order.push('release'); } },
   };
-  const engine = createBrowserEngine({ accounts, dataDir, pollMs: 1, bindingTimeoutMs: options.bindingTimeoutMs ?? 20, confirmUploadRights: options.confirmUploadRights, inspectVideo: options.inspectVideo });
+  const engine = createBrowserEngine({ accounts, dataDir, agentEdit: options.agentEdit ?? false, pollMs: 1, bindingTimeoutMs: options.bindingTimeoutMs ?? 20, confirmUploadRights: options.confirmUploadRights, inspectVideo: options.inspectVideo });
   return { engine, client, state, commands, ops, uploads, order, dataDir, listeners, leases, get lease() { return lease; }, get leaseController() { return leaseController; } };
 }
 
@@ -1150,13 +1150,15 @@ function historyDOMFixture(values,options={}){
   for(const value of values){
     const entry=element(value.kind==='image'?'flow-editor-history-step-image':'flow-editor-history-step-video'),owned=extra=>({closest:selector=>selector===stepSelector?entry:null,...extra});
     const image=element('img',{src:value.poster,'data-media-id':value.mediaId||GUID},owned({currentSrc:value.poster,complete:value.loaded!==false,naturalWidth:value.loaded===false?0:360}));
-    const tile=element('flow-tile-container',{},owned({querySelectorAll:selector=>selector.includes(value.kind==='image'?'flow-image-tile':'flow-video-tile')?[image]:[]}));
+    const tile=element('flow-tile-container',{},owned({querySelectorAll:selector=>selector.includes(value.kind==='image'?'flow-image-tile':'flow-video-tile')?[image]:[],click:()=>{value.selectionClicks=(value.selectionClicks||0)+1;for(const item of values)item.selected=false;value.selected=true;}}));
     const prompt=element('div',{},owned({innerText:'Truncated UI preview…',querySelectorAll:()=>value.promptControls?[element('button')]:[]}));Object.defineProperty(prompt,'textContent',{get:()=>value.prompt});
     const ingredients=(value.ingredients||[]).map(source=>element('button',{'aria-label':'Ingredient'},owned({querySelectorAll:selector=>selector.includes('Ingredient image')&&source?[{currentSrc:source}]:[]})));
-    const videoIngredients=(value.sourceVideos||[]).map(source=>{
+    const videoIngredients=Array.from({length:Math.max(value.sourceVideos?.length||0,value.sourcePreviews?.length||0)},(_,index)=>{
+      const source=value.sourceVideos?.[index],preview=value.sourcePreviews?.[index];
       const wrapper=element('flow-ingredient-chip',{},owned({})),videoChip=element('flow-video-ingredient-chip',{},owned({}));
       const media=element('video',{src:source},owned({closest:selector=>selector===stepSelector?entry:selector==='flow-video-ingredient-chip'?videoChip:null}));
-      return element('button',{'aria-label':'Ingredient'},owned({closest:selector=>selector===stepSelector?entry:selector==='flow-video-ingredient-chip'?videoChip:selector==='flow-ingredient-chip'?wrapper:null,querySelectorAll:selector=>selector==='video[src],source[src]'&&source?[media]:[]}));
+      const imagePreview=element('img',{src:preview,alt:'Video ingredient image'},owned({currentSrc:preview,closest:selector=>selector===stepSelector?entry:selector==='flow-video-ingredient-chip'?videoChip:null}));
+      return element('button',{'aria-label':'Ingredient','aria-busy':String(value.videoIngredientBusy??false)},owned({closest:selector=>selector===stepSelector?entry:selector==='flow-video-ingredient-chip'?videoChip:selector==='flow-ingredient-chip'?wrapper:null,querySelectorAll:selector=>selector==='video[src],source[src]'&&source?[media]:selector==='img[alt="Video ingredient image"]'&&preview?[imagePreview]:[]}));
     });
     const ingredientButtons=value.videoIngredientIndex===undefined?[...ingredients,...videoIngredients]:[...ingredients.slice(0,value.videoIngredientIndex),...videoIngredients,...ingredients.slice(value.videoIngredientIndex)];
     const sourceVideos=(value.sourceVideos||[]).map(source=>element('video',{src:source},owned({})));
@@ -1185,8 +1187,8 @@ function sourceSceneDOMFixture(values,options={}){
  return h;
 }
 
-function failedSourceSceneDOMFixture({poster='https://flow-content.google/image/'+GUID,prompt=input().prompt,ingredients=[],sourceVideos=['https://flow-content.google/video/'+GUID],title='Failed',message='Sorry, this video failed to generate.',...options}={}){
- const h=sourceSceneDOMFixture([{poster},{prompt,ingredients,sourceVideos,selected:false,download:false}],options),entry=h.steps[1],query=entry.querySelectorAll,tile=query('flow-tile-container')[0],tileQuery=tile.querySelectorAll;
+function failedSourceSceneDOMFixture({poster='https://flow-content.google/image/'+GUID,prompt=input().prompt,ingredients=[],sourceVideos=['https://flow-content.google/video/'+GUID],sourcePreviews=[],title='Failed',message='Sorry, this video failed to generate.',...options}={}){
+ const h=sourceSceneDOMFixture([{poster},{prompt,ingredients,sourceVideos,sourcePreviews,selected:false,download:false}],options),entry=h.steps[1],query=entry.querySelectorAll,tile=query('flow-tile-container')[0],tileQuery=tile.querySelectorAll;
  const owned=extra=>({closest:selector=>selector==='flow-editor-history-step-video,flow-editor-history-step-image'?entry:null,...extra});
  const errorTile=owned({querySelectorAll:selector=>selector==='.error-title'?[owned({textContent:title})]:selector==='.error-message-text'?[owned({textContent:message})]:[]});
  entry.querySelectorAll=selector=>selector==='flow-error-tile'?[errorTile]:query(selector);
@@ -1420,6 +1422,80 @@ test('History rejects unknown mixed or repeated video ingredient kinds and waits
  button.closest=selector=>selector==='flow-image-ingredient-chip'?{}:closest(selector);assert.throws(()=>h.run('history',{poster:value.poster}),/RESULT_INPUT_MISMATCH/);
  button.closest=selector=>selector==='flow-video-ingredient-chip'?null:closest(selector);assert.throws(()=>h.run('history',{poster:value.poster}),/RESULT_INPUT_MISMATCH/);
  assert.throws(()=>historyDOMFixture([{...value,sourceVideos:[...value.sourceVideos,...value.sourceVideos]}]).run('history',{poster:value.poster}),/RESULT_INPUT_MISMATCH/);
+});
+
+test('History reads the persisted typed video image preview as source provenance without inventing video identity',()=>{
+ const id=GUID,preview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+id,images=['https://flow-content.google/image/first','https://flow-content.google/image/second'];
+ const value={prompt:input().prompt,poster:'generated-result',ingredients:images,sourcePreviews:[preview+'?GoogleAccessId=fixture&Signature=private'],videoIngredientIndex:1},h=historyDOMFixture([value]);
+ const result=h.run('history',{poster:value.poster});assert.deepEqual(Array.from(result.ingredients),images);assert.deepEqual(Array.from(result.sourceVideos),[]);assert.deepEqual(Array.from(result.sourcePreviews),[preview]);assert.equal(result.ingredientsReady,true);
+ const flowPreview='https://flow-content.google/image/'+id,withBoth=historyDOMFixture([{...value,sourcePreviews:[flowPreview],sourceVideos:['https://flow-content.google/video/'+id]}]).run('history',{poster:value.poster});assert.deepEqual(Array.from(withBoth.sourcePreviews),[flowPreview]);assert.equal(withBoth.ingredientsReady,true);
+ assert.throws(()=>historyDOMFixture([{...value,sourceVideos:['https://flow-content.google/video/'+SCENE]}]).run('history',{poster:value.poster}),/RESULT_INPUT_MISMATCH/);
+ for(const sourcePreviews of [[preview.replace(id,'not-a-uuid')],[preview+'#fragment'],[preview.replace('https://','https://user:pass@')],[preview.replace('storage.googleapis.com','storage.googleapis.com.evil.test')],['https://flow-content.google/video/'+id]])assert.equal(historyDOMFixture([{...value,sourcePreviews}]).run('history',{poster:value.poster}).ingredientsReady,false);
+ assert.equal(historyDOMFixture([{...value,videoIngredientBusy:true}]).run('history',{poster:value.poster}).ingredientsReady,false);
+ const button=h.steps[0].videoIngredients[0],query=button.querySelectorAll;button.querySelectorAll=selector=>selector==='img[alt="Video ingredient image"]'?[...query(selector),...query(selector)]:query(selector);assert.throws(()=>h.run('history',{poster:value.poster}),/RESULT_INPUT_MISMATCH/);
+});
+
+test('History download binds exact source image preview and old bindings accept only an absent preview',()=>{
+ const value={prompt:input().prompt,poster:'generated-result',sourcePreviews:['https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID]},h=historyDOMFixture([value]),history=h.run('history',{poster:value.poster});
+ const binding={kind:'video',poster:value.poster,prompt:history.prompt,ingredients:[],sourceVideos:[],sourcePreviews:Array.from(history.sourcePreviews),url:history.url};
+ assert.equal(h.run('history-download',{binding,click:true}),true);assert.equal(value.downloadClicks,1);
+ const old={...binding};delete old.sourcePreviews;assert.throws(()=>h.run('history-download',{binding:old,click:true}),/RESULT_INPUT_MISMATCH/);assert.equal(value.downloadClicks,1);
+ const changed=historyDOMFixture([{...value,sourcePreviews:['https://storage.googleapis.com/ai-sandbox-videofx/image/'+SCENE]}]);assert.throws(()=>changed.run('history-download',{binding,click:true}),/RESULT_INPUT_MISMATCH/);assert.equal(value.downloadClicks,1);
+ const legacyValue={prompt:input().prompt,poster:'legacy-result'},legacy=historyDOMFixture([legacyValue]),legacyHistory=legacy.run('history',{poster:legacyValue.poster});assert.equal(legacy.run('history-download',{binding:{kind:'video',poster:legacyValue.poster,prompt:legacyHistory.prompt,ingredients:[],sourceVideos:[],url:legacyHistory.url}}),true);
+});
+
+test('Agent scene result binds fresh exact two-entry source and generated History through typed image preview despite opaque poster aliases',()=>{
+ const sourceScene={url:'https://flow.google.com/project/'+SOURCE_PROJECT+'/edit/'+SCENE,poster:'https://flow-content.google/image/'+GUID},sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID,refs=['https://flow-content.google/image/first','https://flow-content.google/image/second'];
+ const source={poster:'https://flow.google.com/asb/current-source-alias',selected:false},output={prompt:input().prompt,poster:'https://flow.google.com/asb/generated-output',sourcePreviews:[sourcePreview+'?Signature=private'],ingredients:refs};
+ const request={sourceScene,sourcePreview,prompt:input().prompt,ingredients:refs},h=sourceSceneDOMFixture([source,output]),ready=h.run('agent-scene-result',request);
+ assert.equal(ready.ready,true);assert.equal(ready.url,sourceScene.url);assert.deepEqual(Array.from(ready.sourcePreviews),[sourcePreview]);assert.deepEqual(Array.from(ready.ingredients),refs);assert.deepEqual(Array.from(ready.sourceVideos),[]);assert.deepEqual(Array.from(ready.posters),[output.poster]);
+ const binding={kind:'video',poster:output.poster,prompt:ready.prompt,ingredients:refs,sourceVideos:[],sourcePreviews:[sourcePreview],url:ready.url,agentSource:{sourceScene,sourcePreview}};
+ assert.equal(h.run('history-download',{binding,click:true}),true);assert.equal(output.downloadClicks,1);
+ const replaced=sourceSceneDOMFixture([source,{...output,sourcePreviews:['https://storage.googleapis.com/ai-sandbox-videofx/image/'+SCENE]}]);assert.throws(()=>replaced.run('history-download',{binding,click:true}),/SOURCE_VIDEO_NOT_VERIFIED|RESULT_INPUT_MISMATCH/);assert.equal(output.downloadClicks,1);
+ for(const [values,options] of [
+  [[source,{...output,prompt:input().prompt+' foreign'}],{}],
+  [[source,{...output,ingredients:[...refs].reverse()}],{}],
+  [[source,{...output,sourcePreviews:['https://storage.googleapis.com/ai-sandbox-videofx/image/'+SCENE]}],{}],
+  [[source,{...output,poster:sourcePreview+'?Signature=source'}],{}],
+  [[{poster:'https://flow-content.google/image/'+SCENE,selected:false},output],{}],
+  [[source,output,{...output,selected:false}],{}],
+  [[source,output],{url:sourceScene.url.replace(SCENE,GUID)}],
+  [[source,output],{clips:2}],
+ ])assert.throws(()=>sourceSceneDOMFixture(values,options).run('agent-scene-result',request),/SOURCE_VIDEO_NOT_VERIFIED|RESULT_INPUT_MISMATCH/);
+});
+
+test('Agent scene result waits for owned pending and selects only exact generated tile while literal owned failures need exact inputs',()=>{
+ const sourceScene={url:'https://flow.google.com/project/'+SOURCE_PROJECT+'/edit/'+SCENE,poster:'https://flow-content.google/image/'+GUID},sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID,request={sourceScene,sourcePreview,prompt:input().prompt,ingredients:[]};
+ const pending=sourceSceneDOMFixture([{poster:sourceScene.poster},{prompt:input().prompt,pending:true,sourcePreviews:[sourcePreview],selected:false}]);assert.equal(pending.run('agent-scene-result',request),false);
+ const source={poster:'https://flow.google.com/asb/source-alias'},output={prompt:input().prompt,poster:'https://flow.google.com/asb/generated-output',sourcePreviews:[sourcePreview],selected:false},h=sourceSceneDOMFixture([source,output]);
+ assert.equal(h.run('agent-scene-result',request),false);assert.equal(output.selectionClicks,undefined);assert.equal(h.run('agent-scene-result',{...request,open:true}),false);assert.equal(output.selectionClicks,1);assert.equal(source.selectionClicks,undefined);assert.equal(h.run('agent-scene-result',request).ready,true);
+ const failed=failedSourceSceneDOMFixture({sourceVideos:[],sourcePreviews:[sourcePreview]});
+ // This fixture's dedicated wrapper owns the error tile; source previews use the same typed base entry.
+ const failure=failed.run('agent-scene-result',request);assert.equal(failure.failure.message,'Failed\nSorry, this video failed to generate.');
+ assert.throws(()=>failed.run('agent-scene-result',{...request,prompt:'foreign'}),/RESULT_INPUT_MISMATCH/);
+});
+
+test('Agent scene reload waits for imported and output pending tiles until owned prompt previews and images load',()=>{
+ const sourceScene={url:'https://flow.google.com/project/'+SOURCE_PROJECT+'/edit/'+SCENE,poster:'https://flow-content.google/image/'+GUID},sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID,request={sourceScene,sourcePreview,prompt:input().prompt,ingredients:[]};
+ for(const values of [
+  [{poster:'https://flow.google.com/asb/source',pending:true},{prompt:input().prompt,poster:'https://flow.google.com/asb/output',pending:true,sourcePreviews:[sourcePreview],selected:false}],
+  [{poster:'https://flow.google.com/asb/source',pending:true},{poster:'https://flow.google.com/asb/output',pending:true,selected:false}],
+  [{poster:'https://flow.google.com/asb/source',loaded:false},{prompt:input().prompt,poster:'https://flow.google.com/asb/output',sourcePreviews:[sourcePreview],selected:false}],
+  [{poster:'https://flow.google.com/asb/source'},{prompt:input().prompt,poster:'https://flow.google.com/asb/output',sourcePreviews:[null],videoIngredientBusy:true,selected:false}],
+ ])assert.equal(sourceSceneDOMFixture(values).run('agent-scene-result',request),false);
+ const source={poster:'https://flow.google.com/asb/source',selected:false},output={prompt:input().prompt,poster:'https://flow.google.com/asb/output',sourcePreviews:[sourcePreview]};
+ const settled=sourceSceneDOMFixture([source,output]);assert.equal(settled.run('agent-scene-result',request).ready,true);
+ assert.throws(()=>sourceSceneDOMFixture([{poster:source.poster},{poster:output.poster,selected:false}]).run('agent-scene-result',request),/SOURCE_VIDEO_NOT_VERIFIED/);
+ assert.throws(()=>sourceSceneDOMFixture([source,{...output,prompt:'Known foreign request'}]).run('agent-scene-result',request),/RESULT_INPUT_MISMATCH/);
+});
+
+test('Agent scene result waits only ephemeral source poster placeholders and reports safe mismatch enums without URLs',()=>{
+ const sourceScene={url:'https://flow.google.com/project/'+SOURCE_PROJECT+'/edit/'+SCENE,poster:'https://flow-content.google/image/'+GUID},sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID,request={sourceScene,sourcePreview,prompt:input().prompt,ingredients:[]},output={prompt:input().prompt,poster:'https://flow.google.com/asb/generated-result',sourcePreviews:[sourcePreview]};
+ for(const poster of ['',undefined,'data:image/png;base64,PLACEHOLDER','blob:https://flow.google.com/'+SCENE])assert.equal(sourceSceneDOMFixture([{poster,selected:false},output]).run('agent-scene-result',request),false);
+ for(const [poster,reason] of [['https://flow-content.google/image/'+SCENE,'recognized-resource-mismatch'],['https://evil.example/private?token=SECRET','unrecognized-source-poster'],['blob:https://evil.example/private','unrecognized-source-poster'],[sourcePreview,'unrecognized-source-poster']]){
+  assert.throws(()=>sourceSceneDOMFixture([{poster,selected:false},output]).run('agent-scene-result',request),error=>error.message.includes(reason)&&!error.message.includes('SECRET')&&!error.message.includes('https://'));
+ }
+ assert.equal(sourceSceneDOMFixture([{poster:'https://flow.google.com/asb/settled-source',selected:false},output]).run('agent-scene-result',request).ready,true);
 });
 
 test('History rejects missing duplicate imported and mixed-kind selected entries and prompt UI contamination',()=>{
@@ -2557,4 +2633,40 @@ test('avatar-free Edit verifies fresh home account in managed second target with
   assert.equal(editorOps.every(op=>['editor-account','state'].includes(op)),true);
   if(scenario==='unavailable')assert.equal(homeCalls.length,0);
  }
+});
+
+test('Agent Edit writes its immutable proposal before one approval and verifies source-bound output without a direct submit',async t=>{
+ const folder=await temporary(t),source=path.join(folder,'source.mp4');await fs.writeFile(source,MP4);
+ const sourcePoster='https://flow-content.google/image/'+GUID,sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID,sceneURL='https://flow.google.com/project/'+SOURCE_PROJECT+'/edit/'+SCENE;
+ let h,approvals=0,durable=0;const stages=[];
+ const agentEdit={
+  async startAgentSession(){assert.equal(h.state.prompt,'');assert.equal(h.state.url,'https://flow.google.com/project/'+SOURCE_PROJECT);stages.push('session');},
+  async configureAgentEdit(page,plan){assert.equal(plan.model,'omni-1.2-flash-edit-landscape');stages.push('settings');},
+  async attachAgentAsset(page,value){assert.equal(value.kind,'video');assert.equal(value.expectedResourceId,GUID);assert.match(value.name,/^[a-f0-9-]{36}$/);stages.push('source');},
+  async verifyAgentEditSettings(){stages.push('verify-settings');},
+  async prepareAgentProposal(page,expected,{verifySettings}){await verifySettings();assert.equal(expected.prompt,input().prompt);assert.equal(expected.sourceImageResourceId,GUID);return {source:{origin:'https://storage.googleapis.com',path:'/ai-sandbox-videofx/image/'+GUID},quoteCredits:9,permissionTitle:'Would you like me to kick off this 1 video generation, costing 9 credits?'};},
+  async approveAgentEdit(page,binding,{beforeSubmit,verifySettings}){await verifySettings();await beforeSubmit();assert.equal(durable,1);const receipt=await createReceiptStore(h.dataDir).read(h.jobId);assert.deepEqual(receipt.agentProposal,{quoteCredits:9,videoCount:1,sourcePreview,approvalText:binding.permissionTitle});approvals++;h.state.agentApproved=true;},
+  async readAgentEditOutput(){h.state.url=sceneURL;h.state.opened=true;return {openPoint:{x:100,y:100}};},
+ };
+ h=await harness(t,{edit:true,recover:true,agentEdit,sourcePoster,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),operation(op,arg,state){if(op==='agent-scene-result'){assert.equal(state.agentApproved,true);state.opened=true;assert.equal(arg.sourceScene.url,sceneURL);assert.equal(arg.sourcePreview,sourcePreview);return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[sourcePreview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:sceneURL};}}});
+ h.jobId=crypto.randomUUID();const result=await h.engine.generate(input({jobId:h.jobId,model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),{beforeSubmit(){durable++;}});
+ assert.equal(approvals,1);assert.equal(durable,1);assert.deepEqual(stages.slice(0,3),['session','settings','source']);assert.equal(h.ops.some(op=>op.op==='submit'),false);assert.equal(result.media[0].kind,'video');assert.equal(h.state.releases,1);
+ const binding=h.ops.find(op=>op.op==='history-download').arg.binding;assert.deepEqual(binding.sourcePreviews,[sourcePreview]);assert.equal(binding.agentSource.sourceScene.url,sceneURL);
+});
+
+test('Agent Edit durable failure never approves, and interruption after approval remains unknown without replay',async t=>{
+ for(const stage of ['persist','after-approval']){
+  const folder=await temporary(t),source=path.join(folder,'source.mp4');await fs.writeFile(source,MP4);let approvals=0,plans=0,h;
+  const agentEdit={async startAgentSession(){},async configureAgentEdit(){},async attachAgentAsset(){},async verifyAgentEditSettings(){},async prepareAgentProposal(){plans++;return {source:{origin:'https://flow-content.google',path:'/image/'+GUID},quoteCredits:9,permissionTitle:'Would you like me to kick off this 1 video generation, costing 9 credits?'};},async approveAgentEdit(page,binding,{beforeSubmit}){await beforeSubmit();approvals++;},async readAgentEditOutput(){throw failure('CDP_CLOSED');}};
+  h=await harness(t,{edit:true,recover:true,agentEdit,sourcePoster:'https://flow-content.google/image/'+GUID,inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),operation(op){if(op==='agent-scene-result')throw failure('CDP_CLOSED');}});
+  await assert.rejects(h.engine.generate(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),{beforeSubmit(){if(stage==='persist')throw failure('PERSIST_FAILED');}}),e=>e.code===(stage==='persist'?'PERSIST_FAILED':'CDP_CLOSED')&&e.unknownOutcome===(stage==='after-approval'));
+  assert.equal(plans,1);assert.equal(approvals,stage==='persist'?0:1);assert.equal(h.ops.some(op=>op.op==='submit'),false);assert.equal(h.state.releases,1);
+ }
+});
+
+test('Agent receipt recovery reads only the saved source scene and output preview without planning or approving again',async t=>{
+ const projectURL='https://flow.google.com/project/'+SOURCE_PROJECT,sourceScene={url:projectURL+'/edit/'+SCENE,poster:'https://flow-content.google/image/'+GUID,sha256:crypto.createHash('sha256').update(MP4).digest('hex'),durationSeconds:3,width:1280,height:720},sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID;
+ const h=await harness(t,{recover:true,edit:true,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),agentEdit:new Proxy({},{get(){assert.fail('Recovery called Agent planning or approval')}}),operation(op,arg,state){if(op==='agent-scene-result'){assert.equal(state.url,sourceScene.url);state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[sourcePreview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:state.url};}}});
+ const {jobId}=await savedReceipt(h,{model:'omni-1.2-flash-edit-landscape',projectURL,sourceScene,agentProposal:{quoteCredits:9,videoCount:1,sourcePreview,approvalText:'Would you like me to kick off this 1 video generation, costing 9 credits?'}});
+ const result=await h.engine.recover(jobId);assert.deepEqual(await fs.readFile(result.media[0].path),MP4);assert.equal(h.state.submitted,0);assert.equal(h.state.videoUploads,undefined);assert.deepEqual(h.commands.filter(c=>c.method==='Page.navigate').map(c=>c.params.url),[sourceScene.url]);assert.equal(h.state.releases,1);
 });

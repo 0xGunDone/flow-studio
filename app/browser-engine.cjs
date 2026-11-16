@@ -7,6 +7,7 @@ const {createReceiptStore}=require('./browser-receipts.cjs');
 const {stageVideo}=require('./input-files.cjs');
 const {imagePlanFor,supportsImageModel,prepareImagePage,verifyImagePage}=require('./browser-images.cjs');
 const {veoPlanFor,supportsVeoModel}=require('./browser-video-models.cjs');
+const agentEditDefault=require('./browser-agent-edit.cjs');
 
 const MODEL=/^omni-1\.2-flash-(i2v-)?([3-9]|1[0-5])s-(landscape|portrait)(-360p)?$/;
 const EDIT=/^omni-1\.2-flash-edit-(landscape|portrait)(-360p)?$/;
@@ -138,6 +139,7 @@ function flowDOM(op,arg={}){
   return {name:label(xs[0]),poster};
  }
  if(op==='source-scene')return sourceSceneState(arg.sourceScene||{poster:arg.poster,durationSeconds:arg.durationSeconds},Boolean(arg.output),arg.projectURL,Boolean(arg.loading),arg);
+ if(op==='agent-scene-result')return agentSceneResult(arg);
  if(op==='edit-settings'){
   const model=one('button','Выбрать семейство моделей');
   if(arg.choose){click(model);return true;}
@@ -343,20 +345,25 @@ function flowDOM(op,arg={}){
   const stepSelector='flow-editor-history-step-video,flow-editor-history-step-image';
   const buttons=[...entry.querySelectorAll('button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]')].filter(node=>node.closest(stepSelector)===entry);
   const canonical=(value,kind)=>{if(typeof value!=='string'||value!==value.trim()||/[\r\n]/.test(value))return null;try{const u=new URL(value);return !u.username&&!u.password&&!u.hash&&u.origin==='https://flow-content.google'&&new RegExp('^/'+kind+'/[A-Za-z0-9_-]{1,256}$').test(u.pathname)?u.origin+u.pathname:null;}catch{return null;}};
-  const ingredients=[],sourceVideos=[];
+  const previewIdentity=value=>{if(typeof value!=='string'||value!==value.trim()||/[\r\n]/.test(value))return null;try{const u=new URL(value);return !u.username&&!u.password&&!u.hash&&((u.origin==='https://flow-content.google'&&/^\/image\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(u.pathname))||(u.origin==='https://storage.googleapis.com'&&/^\/ai-sandbox-videofx\/image\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(u.pathname)))?u.origin+u.pathname:null;}catch{return null;}};
+  const ingredients=[],sourceVideos=[],sourcePreviews=[];let videoCount=0,sourcesReady=true;
   for(const button of buttons){
    const imageChip=button.closest?.('flow-image-ingredient-chip'),videoChip=button.closest?.('flow-video-ingredient-chip'),wrapper=button.closest?.('flow-ingredient-chip');
    if(imageChip&&videoChip||wrapper&&!imageChip&&!videoChip||imageChip&&imageChip.closest(stepSelector)!==entry||videoChip&&videoChip.closest(stepSelector)!==entry)error('RESULT_INPUT_MISMATCH','Не удалось определить тип исходника выбранной записи истории.');
    if(videoChip){
     const videos=[...button.querySelectorAll('video[src],source[src]')].filter(node=>node.closest(stepSelector)===entry&&node.closest('flow-video-ingredient-chip')===videoChip);
-    sourceVideos.push(videos.length===1?canonical(videos[0].getAttribute('src'),'video'):null);
+    const previews=[...button.querySelectorAll('img[alt="Video ingredient image"]')].filter(node=>node.closest(stepSelector)===entry&&node.closest('flow-video-ingredient-chip')===videoChip);
+    if(++videoCount>1||videos.length>1||previews.length>1)error('RESULT_INPUT_MISMATCH','Исходное видео записи истории выбрано неоднозначно.');
+    const video=videos.length===1?canonical(videos[0].getAttribute('src'),'video'):null,preview=previews.length===1?previewIdentity(previews[0].getAttribute('src')):null;
+    if(videos.length)sourceVideos.push(video);if(previews.length)sourcePreviews.push(preview);
+    if(video&&preview&&new URL(video).pathname.slice('/video/'.length)!==new URL(preview).pathname.split('/').pop())error('RESULT_INPUT_MISMATCH','Видео и его изображение в записи истории не совпали.');
+    sourcesReady=sourcesReady&&button.getAttribute('aria-busy')==='false'&&Boolean(videos.length||previews.length)&&(!videos.length||Boolean(video))&&(!previews.length||Boolean(preview));
    }else{
     const images=[...button.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];
     ingredients.push(images.length===1?canonical(images[0].currentSrc||images[0].src,'image'):null);
    }
   }
-  if(sourceVideos.length>1)error('RESULT_INPUT_MISMATCH','В записи истории должно быть не больше одного исходного видео.');
-  return {ingredients,sourceVideos,ingredientsReady:ingredients.every(Boolean)&&sourceVideos.every(Boolean)};
+  return {ingredients,sourceVideos,sourcePreviews,ingredientsReady:ingredients.every(Boolean)&&sourcesReady};
  }
  function selectedHistory(kind,poster){
   const stepSelector='flow-editor-history-step-video,flow-editor-history-step-image',entryTag=kind==='image'?'FLOW-EDITOR-HISTORY-STEP-IMAGE':'FLOW-EDITOR-HISTORY-STEP-VIDEO';
@@ -369,20 +376,68 @@ function flowDOM(op,arg={}){
   const promptNodes=[...entry.querySelectorAll('flow-expandable-prompt .prompt-text')].filter(node=>node.closest(stepSelector)===entry);
   if(promptNodes.length!==1||promptNodes[0].querySelectorAll('button,mat-icon,input,textarea,[role="button"]').length||typeof promptNodes[0].textContent!=='string'||!promptNodes[0].textContent.trim())error('RESULT_INPUT_MISMATCH','Не удалось прочитать полный запрос выбранной записи истории.');
   const prompt=promptNodes[0].textContent;
-  const {ingredients,sourceVideos,ingredientsReady}=historyInputs(entry);
+  const {ingredients,sourceVideos,sourcePreviews,ingredientsReady}=historyInputs(entry);
   const ownedButtons=[...entry.querySelectorAll('button[aria-label="Download"],button[aria-label="More options"]')].filter(button=>button.closest(stepSelector)===entry&&tile.contains(button));
   const download=ownedButtons.filter(button=>button.getAttribute('aria-label')==='Download');
   const more=ownedButtons.filter(button=>button.getAttribute('aria-label')==='More options');
   if(download.length>1||!download.length&&more.length>1)error('RESULT_INPUT_MISMATCH','Не удалось связать скачивание с выбранной записью истории.');
-  const data={prompt,ingredients,ingredientsReady,sourceVideos,posters,url:location.href};
+  const data={prompt,ingredients,ingredientsReady,sourceVideos,sourcePreviews,posters,url:location.href};
   return {entry,trigger:download[0]||more[0],submenu:!download.length,data};
  }
  if(op==='history')return selectedHistory(arg.kind,arg.poster).data;
+ function agentSceneResult(request){
+  const expected=request?.sourceScene,stepSelector='flow-editor-history-step-video,flow-editor-history-step-image';
+  const previewID=value=>typeof value==='string'?/^https:\/\/(?:flow-content\.google\/image\/|storage\.googleapis\.com\/ai-sandbox-videofx\/image\/)([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.exec(value)?.[1]:null;
+  const sourceID=previewID(expected?.poster),expectedID=previewID(request?.sourcePreview);
+  if(!expected||typeof expected.url!=='string'||!/^https:\/\/flow\.google\.com\/project\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/edit\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(expected.url)||location.href!==expected.url||!sourceID||sourceID!==expectedID||typeof request.prompt!=='string'||!request.prompt.trim()||!Array.isArray(request.ingredients))error('SOURCE_VIDEO_NOT_VERIFIED','Не сохранена точная связь результата помощника с исходной сценой.');
+  const clips=document.querySelectorAll('flow-scene-timeline .clip').length;if(!clips)return false;if(clips!==1)error('SOURCE_VIDEO_NOT_VERIFIED','Сцена помощника должна содержать одно видео.');
+  const regions=all('region').filter(node=>label(node)==='История');if(!regions.length)return false;if(regions.length!==1)error('SOURCE_VIDEO_NOT_VERIFIED','История сцены помощника выбрана неоднозначно.');
+  const entries=[...regions[0].querySelectorAll(stepSelector)];if(!entries.length)return false;if(entries.length>2||entries.some(entry=>entry.tagName!=='FLOW-EDITOR-HISTORY-STEP-VIDEO'))error('SOURCE_VIDEO_NOT_VERIFIED','История помощника не подтверждает единственный исходник и один новый результат.');
+  const versions=entries.map(entry=>{
+   const owned=selector=>[...entry.querySelectorAll(selector)].filter(node=>node.closest(stepSelector)===entry),tiles=owned('flow-tile-container'),selected=owned('flow-tile-container.selected.high-emphasis'),prompts=owned('flow-expandable-prompt .prompt-text'),pending=owned('flow-pending-tile'),failures=owned('flow-error-tile');
+   if(tiles.length!==1||selected.length>1||selected.length===1&&selected[0]!==tiles[0]||prompts.length>1||pending.length>1||failures.length>1||pending.length&&failures.length)error('SOURCE_VIDEO_NOT_VERIFIED','Версия сцены помощника выбрана неоднозначно.');
+   const images=[...tiles[0].querySelectorAll('flow-video-tile img[alt="Generated video thumbnail"],flow-video-tile img[alt="Значок сгенерированного видео"]')];
+   return {entry,tile:tiles[0],selected:selected.length===1,prompts,pending:pending.length===1,failure:failures[0],images};
+  });
+  if(versions.filter(version=>version.selected).length>1)error('SOURCE_VIDEO_NOT_VERIFIED','В сцене помощника выбрано несколько версий.');
+  const imported=versions.filter(version=>!version.prompts.length&&!version.failure);
+  if(!imported.length)return false;
+  if(imported.length!==1){if(versions.some(version=>version.pending||!version.images.length||version.images.some(image=>!image.complete||image.naturalWidth<=0)))return false;error('SOURCE_VIDEO_NOT_VERIFIED','Исходная версия сцены помощника не подтверждена.');}
+  if(!imported[0].images.length||imported[0].pending)return false;
+  if(imported[0].images.length!==1)error('SOURCE_VIDEO_NOT_VERIFIED','Исходная версия сцены помощника не подтверждена.');
+  const importedImage=imported[0].images[0],rawImportedPoster=importedImage.getAttribute('src'),importedPoster=sourcePosterIdentity(rawImportedPoster);
+  if(!importedImage.complete||importedImage.naturalWidth<=0)return false;
+  if(!importedPoster){
+   let temporary=!rawImportedPoster||/^data:image\//i.test(rawImportedPoster);try{const value=new URL(rawImportedPoster);if(value.protocol==='blob:'&&value.origin==='https://flow.google.com')temporary=true;}catch{}
+   if(temporary)return false;error('SOURCE_VIDEO_NOT_VERIFIED','Исходная версия сцены помощника изменилась (reason=unrecognized-source-poster).');
+  }
+  if(!/^https:\/\/flow\.google\.com\/asb\//.test(importedPoster)&&previewID(importedPoster)!==sourceID)error('SOURCE_VIDEO_NOT_VERIFIED','Исходная версия сцены помощника изменилась (reason=recognized-resource-mismatch).');
+  if(versions.length===1)return false;
+  const generated=versions.find(version=>version!==imported[0]);
+  if(!generated.prompts.length){if(generated.pending)return false;error('RESULT_INPUT_MISMATCH','Не прочитан запрос новой версии помощника.');}
+  const prompt=generated.prompts[0];if(typeof prompt.textContent!=='string'||!prompt.textContent.trim()||prompt.querySelectorAll('button,mat-icon,input,textarea,[role="button"]').length||!samePrompt(prompt.textContent.trim(),request.prompt.trim()))error('RESULT_INPUT_MISMATCH','Запрос результата помощника не совпал с исходным.');
+  const inputs=historyInputs(generated.entry);if(!inputs.ingredientsReady)return false;
+  if(JSON.stringify(inputs.ingredients)!==JSON.stringify(request.ingredients))error('RESULT_INPUT_MISMATCH','Изображения результата помощника не совпали с исходными.');
+  if(inputs.sourcePreviews.length!==1||previewID(inputs.sourcePreviews[0])!==expectedID)error('SOURCE_VIDEO_NOT_VERIFIED','Изображение исходного видео результата помощника не совпало с сохранённым.');
+  if(generated.failure){
+   if(generated.images.length)error('SOURCE_VIDEO_NOT_VERIFIED','Ошибка помощника содержит неоднозначный результат.');
+   const titles=[...generated.failure.querySelectorAll('.error-title')].filter(node=>node.closest(stepSelector)===generated.entry),messages=[...generated.failure.querySelectorAll('.error-message-text')].filter(node=>node.closest(stepSelector)===generated.entry);
+   if(titles.length!==1||messages.length!==1||typeof titles[0].textContent!=='string'||typeof messages[0].textContent!=='string'||!titles[0].textContent.trim()||!messages[0].textContent.trim())error('RESULT_INPUT_MISMATCH','Ошибка результата помощника не подтверждена.');
+   const message=titles[0].textContent.trim()+'\n'+messages[0].textContent.trim();if(message.length>1200)error('RESULT_INPUT_MISMATCH','Ошибка результата помощника не подтверждена.');return {failure:{message},url:location.href};
+  }
+  if(generated.pending)return false;
+  if(generated.images.length!==1||!generated.images[0].complete||generated.images[0].naturalWidth<=0)return false;
+  const resultPoster=generated.images[0].getAttribute('src');let resultPreviewID;try{const url=new URL(resultPoster);if(!url.username&&!url.password&&!url.hash)resultPreviewID=previewID(url.origin+url.pathname);}catch{}
+  if(!resultPoster||resultPoster===importedImage.getAttribute('src')||sourcePosterIdentity(resultPoster)===expected.poster||resultPreviewID===expectedID)error('SOURCE_VIDEO_NOT_VERIFIED','Результат помощника не является новой версией.');
+  if(!generated.selected){if(request.open)click(generated.tile);return false;}
+  const selected=selectedHistory('video',resultPoster).data;return {ready:true,...selected};
+ }
  function boundHistory(binding){
-  if(!binding||typeof binding.prompt!=='string'||!Array.isArray(binding.ingredients)||!Array.isArray(binding.sourceVideos)||typeof binding.poster!=='string'||typeof binding.url!=='string')error('RESULT_INPUT_MISMATCH','Не сохранена связь выбранной записи истории.');
+  if(!binding||typeof binding.prompt!=='string'||!Array.isArray(binding.ingredients)||!Array.isArray(binding.sourceVideos)||binding.sourcePreviews!==undefined&&!Array.isArray(binding.sourcePreviews)||typeof binding.poster!=='string'||typeof binding.url!=='string')error('RESULT_INPUT_MISMATCH','Не сохранена связь выбранной записи истории.');
   const current=selectedHistory(binding.kind,binding.poster),value=current.data;
-  if(value.url!==binding.url||!samePrompt(value.prompt.trim(),binding.prompt.trim())||!value.ingredientsReady||JSON.stringify(value.ingredients)!==JSON.stringify(binding.ingredients)||JSON.stringify(value.sourceVideos)!==JSON.stringify(binding.sourceVideos))error('RESULT_INPUT_MISMATCH','Выбранная запись истории изменилась перед скачиванием.');
-  if(binding.sourceScene)sourceSceneState(binding.sourceScene,true);
+  if(value.url!==binding.url||!samePrompt(value.prompt.trim(),binding.prompt.trim())||!value.ingredientsReady||JSON.stringify(value.ingredients)!==JSON.stringify(binding.ingredients)||JSON.stringify(value.sourceVideos)!==JSON.stringify(binding.sourceVideos)||JSON.stringify(value.sourcePreviews)!==JSON.stringify(binding.sourcePreviews||[]))error('RESULT_INPUT_MISMATCH','Выбранная запись истории изменилась перед скачиванием.');
+  if(binding.agentSource){const state=agentSceneResult({...binding.agentSource,prompt:binding.prompt,ingredients:binding.ingredients});if(!state?.ready||state.posters[0]!==binding.poster)error('RESULT_INPUT_MISMATCH','Не подтверждена исходная сцена скачивания результата помощника.');}
+  else if(binding.sourceScene)sourceSceneState(binding.sourceScene,true);
   return current;
  }
  function controlledMenu(trigger){
@@ -532,7 +587,7 @@ class FlowPage{
  }
 }
 
-function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bindingTimeoutMs=60000,inspectVideo}){
+function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bindingTimeoutMs=60000,inspectVideo,agentEdit=agentEditDefault}){
  if(!accounts?.acquireIsolatedGenerationBrowser||!path.isAbsolute(dataDir||''))throw new TypeError('Managed accounts and absolute dataDir required.');
  const prepared=new WeakSet(),used=new WeakSet(),receipts=createReceiptStore(dataDir);
  async function diagnose(page,jobId,error){try{const folder=path.join(dataDir,'browser-diagnostics');await fs.mkdir(folder,{recursive:true,mode:0o700});const detail={at:new Date().toISOString(),code:error.code,message:error.message,state:await page.run('failure-state')};await fs.writeFile(path.join(folder,jobId+'.json'),JSON.stringify(detail,null,2),{mode:0o600});const shot=await page.client.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});if(shot.data)await fs.writeFile(path.join(folder,jobId+'.png'),Buffer.from(shot.data,'base64'),{mode:0o600});}catch{}}
@@ -543,13 +598,13 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   const decoded=plan.refs.map(ref=>decodeImage(ref.dataUrl));
   let videoMetadata;
   if(plan.video){if(typeof inspectVideo!=='function')throw fail('VIDEO_METADATA_UNAVAILABLE','Обновите локальный движок проверки видео.');videoMetadata=await inspectVideo({path:plan.video.path,signal});if(!Number.isFinite(videoMetadata?.durationSeconds)||videoMetadata.durationSeconds<=0||videoMetadata.durationSeconds>15.02||!['video/mp4','video/quicktime','video/x-m4v'].includes(videoMetadata.mimeType))throw fail('VIDEO_METADATA_INVALID','Не удалось подтвердить исходное видео длительностью до 15 секунд.');const expected=plan.resolution==='360p'?(plan.aspect==='9:16'?[360,640]:[640,360]):plan.aspect==='9:16'?[720,1280]:[1280,720];if(videoMetadata.width!==expected[0]||videoMetadata.height!==expected[1])throw fail('MODEL_SETTINGS_NOT_VERIFIED','Для выбранного режима редактирования исходное видео должно иметь формат '+expected[0]+'×'+expected[1]+'. Измените выбранную модель или подготовьте исходник нужного размера.');}
-  const lease=await accounts.acquireIsolatedGenerationBrowser(input.accountId,{signal,...(plan.video||plan.kind==='image'?{windowMode:'offscreen'}:{})});let folder,page,ingredients=Object.freeze([]),ownedDraft=false,sourceScene;
+  const lease=await accounts.acquireIsolatedGenerationBrowser(input.accountId,{signal,...(plan.video||plan.kind==='image'?{windowMode:'offscreen'}:{})});let folder,page,ingredients=Object.freeze([]),ownedDraft=false,sourceScene,sourceAssetName;const imageAssetNames=[];
   try{
    if(lease.email.toLowerCase()!==input.accountEmail.toLowerCase())throw fail('ACCOUNT_MISMATCH','Аккаунт изменился до начала генерации.');
    page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal,confirmUploadRights:typeof confirmUploadRights==='function'?details=>confirmUploadRights({...details,accountId:lease.accountId,accountEmail:lease.email}):undefined});onProgress('Подключаем фоновый браузер…');const projectURL=await page.project(lease.email);
    if(plan.video){
     folder=await fs.mkdtemp(path.join(dataDir,'browser-inputs-'));await fs.chmod(folder,0o700);
-    const staged=await stageVideo(plan.video.path,folder),file=staged.target,name=path.basename(file);
+    const staged=await stageVideo(plan.video.path,folder),file=staged.target,name=path.basename(file);sourceAssetName=name.replace(/\.(mp4|mov|m4v)$/i,'');
     // This digest records the bytes assigned to Flow's input; it is not a Google media ID.
     const sourceHash=crypto.createHash('sha256'),sourceFile=await fs.open(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
     try{for await(const chunk of sourceFile.createReadStream({autoClose:false}))sourceHash.update(chunk);}finally{await sourceFile.close();}
@@ -566,10 +621,10 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    if(plan.refs.length&&!folder){folder=await fs.mkdtemp(path.join(dataDir,'browser-inputs-'));await fs.chmod(folder,0o700);}
    for(let i=0;i<plan.refs.length;i++){
     const image=decoded[i],name='ref-'+image.sha256.slice(0,16)+'-'+i+'-'+crypto.randomUUID().slice(0,8)+'.'+image.ext,file=path.join(folder,name);
-    await fs.writeFile(file,image.bytes,{flag:'wx',mode:0o600});onProgress('Прикрепляем изображение '+(i+1)+' из '+plan.refs.length+'…');ingredients=await page.upload({path:file,name},ingredients,plan.method==='frames'?(i===0?'Старт':'Конец'):undefined);
+    imageAssetNames.push(name);await fs.writeFile(file,image.bytes,{flag:'wx',mode:0o600});onProgress('Прикрепляем изображение '+(i+1)+' из '+plan.refs.length+'…');ingredients=await page.upload({path:file,name},ingredients,plan.method==='frames'?(i===0?'Старт':'Конец'):undefined);
    }
    await page.verifySettings(plan);await page.verifyAccount(lease.email);const c=await page.run('composer');if(!samePrompt(c.prompt,plan.prompt)||JSON.stringify(c.ingredients)!==JSON.stringify(ingredients))throw fail('PREPARED_INPUT_CHANGED','Flow изменил подготовленный запрос.');
-   const result=Object.freeze({lease,page,plan,ingredients,projectURL,folder,jobId:input.jobId,...(sourceScene?{sourceScene}:{})});prepared.add(result);return result;
+   const result=Object.freeze({lease,page,plan,ingredients,projectURL,folder,jobId:input.jobId,...(sourceScene?{sourceScene,sourceAssetName,imageAssetNames}:{})});prepared.add(result);return result;
   }catch(error){if(page&&!page.signal?.aborted)await diagnose(page,input.jobId||'preparation',error);if(ownedDraft&&!signal?.aborted)await clearOwned(page,plan.prompt,ingredients).catch(()=>{});try{if(folder)await fs.rm(folder,{recursive:true,force:true});}finally{await accounts.releaseIsolatedGenerationBrowser(lease).catch(()=>{});}throw error;}
  }
  async function clearOwned(page,prompt,ingredients){if(!await page.run('clear-owned',{prompt,ingredients}))return false;await page.until(async()=>{const c=await page.run('composer');return samePrompt(c.prompt,prompt)&&c.ingredients.length===0;},15000,'clear-owned-ingredients');await page.fillPrompt('');try{await page.until(async()=>{const c=await page.run('composer');return c.prompt===''&&c.ingredients.length===0;},15000,'clear-owned');}catch(error){try{const c=await page.run('composer');error.message+=' '+JSON.stringify({promptLength:c.prompt.length,ingredientCount:c.ingredients.length});}catch{}throw error;}return true;}
@@ -578,6 +633,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   if(!prepared.has(result)||used.has(result)||typeof beforeSubmit!=='function')throw fail('PREPARATION_REQUIRED','Нужна неиспользованная подготовка запроса.');used.add(result);
   const {page,plan,ingredients,lease}=result,job=result.jobId||crypto.randomUUID();let clicked=false;
   if(signal!==page.requestSignal)throw fail('PREPARATION_SIGNAL_CHANGED','Подготовка и отправка должны принадлежать одной задаче.');
+  if(result.sourceScene&&agentEdit)return submitAgentEdit(result,{signal,beforeSubmit,onProgress});
   try{
    await page.verifyAccount(lease.email);await page.verifySettings(plan);const baseline=result.sourceScene?[]:await page.run('baseline',{job});
    const c=await page.run('composer');if(!samePrompt(c.prompt,plan.prompt)||JSON.stringify(c.ingredients)!==JSON.stringify(ingredients))throw fail('PREPARED_INPUT_CHANGED','Подготовленный запрос изменился.');
@@ -594,6 +650,39 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    await page.bind(baseline,plan.prompt,job,bindingTimeoutMs,plan.kind);
    return await collectResult({page,plan,ingredients,lease,job,projectURL:result.projectURL,onProgress,sourceVideo:result.sourceVideo,sourceScene:result.sourceScene});
   }catch(error){if(!clicked&&!signal?.aborted)await clearOwned(page,plan.prompt,ingredients).catch(()=>{});if(!page.signal?.aborted)await diagnose(page,job,error);error.unknownOutcome=clicked&&!error.generationTerminal;throw error;}
+ }
+ async function submitAgentEdit(result,{signal,beforeSubmit,onProgress}){
+  const {page,plan,ingredients,lease,sourceScene,projectURL}=result,job=result.jobId||crypto.randomUUID();let approved=false;
+  const resourceId=value=>{const match=/\/image\/([A-Za-z0-9_-]{1,256})$/.exec(value||'');if(!match)throw fail('SOURCE_VIDEO_NOT_VERIFIED','Не удалось прочитать ресурс исходника Agent.');return match[1];};
+  try{
+   await page.verifyAccount(lease.email);await page.verifySettings(plan);await waitForSourceScene(page,sourceScene);
+   if(!await clearOwned(page,plan.prompt,ingredients))throw fail('PREPARED_INPUT_CHANGED','Исходный черновик изменился перед подготовкой Agent.');
+   await page.client.send('Page.navigate',{url:projectURL});await page.until(async()=>(await page.run('state')).url===projectURL,30000,'agent-project');await page.ready();await page.verifyAccount(lease.email);
+   await page.client.send('Emulation.setDeviceMetricsOverride',{width:1920,height:1080,deviceScaleFactor:1,mobile:false});await agentEdit.startAgentSession(page);await agentEdit.configureAgentEdit(page,plan);
+   if(ingredients.length)await agentEdit.prepareAgentReferenceContext(page,{verifySettings:()=>agentEdit.verifyAgentEditSettings(page,plan)});
+   let previous={sourceImageResourceId:null,ingredientImageResourceIds:[]};
+   const sourceImageResourceId=resourceId(sourceScene.poster),ingredientImageResourceIds=ingredients.map(resourceId);
+   await agentEdit.attachAgentAsset(page,{name:result.sourceAssetName,kind:'video',expectedResourceId:sourceImageResourceId,previous});previous={sourceImageResourceId,ingredientImageResourceIds:[]};
+   for(let index=0;index<ingredients.length;index++){await agentEdit.attachAgentAsset(page,{name:result.imageAssetNames[index],kind:'image',expectedResourceId:ingredientImageResourceIds[index],previous});previous={sourceImageResourceId,ingredientImageResourceIds:ingredientImageResourceIds.slice(0,index+1)};}
+   const seconds=Math.ceil(sourceScene.durationSeconds),rate=plan.resolution==='360p'?1:3,maxCredits=rate*(Math.min(seconds,10)+Math.max(0,seconds-10)*2);
+   const expected={projectURL,prompt:plan.prompt,sourceImageResourceId,ingredientImageResourceIds,maxCredits};
+   onProgress('Готовим редактирование через Flow Agent…');const verifySettings=()=>agentEdit.verifyAgentEditSettings(page,plan),binding=await agentEdit.prepareAgentProposal(page,expected,{verifySettings});
+   await agentEdit.approveAgentEdit(page,binding,{verifySettings,beforeSubmit:async()=>{await page.verifyAccount(lease.email);await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL,ingredients:[...ingredients],baseline:[],createdAt:new Date().toISOString(),sourceScene,agentProposal:{quoteCredits:binding.quoteCredits,videoCount:1,sourcePreview:binding.source.origin+binding.source.path,approvalText:binding.permissionTitle}});await beforeSubmit();}});approved=true;
+   onProgress('Редактирование отправлено в Flow Agent. Ожидаем видео…');await page.client.send('Page.navigate',{url:sourceScene.url});
+   await page.until(async()=>(await page.run('state')).url===sourceScene.url,30000,'agent-output-scene');
+   return await observeAgentScene({page,plan,ingredients,lease,projectURL,sourceScene,sourcePreview:binding.source.origin+binding.source.path,onProgress,waitForResult:true});
+  }catch(error){if(!page.signal?.aborted)await diagnose(page,job,error);error.unknownOutcome=!error.generationTerminal&&(approved||error.unknownOutcome===true);throw error;}
+ }
+ async function observeAgentScene({page,plan,ingredients,lease,projectURL,sourceScene,sourcePreview,onProgress=()=>{},waitForResult=false}){
+  const read=async()=>{const value=await page.run('agent-scene-result',{sourceScene,sourcePreview,prompt:plan.prompt,ingredients,open:true});if(value?.failure){const error=fail('FLOW_GENERATION_REJECTED','Flow отклонил редактирование: '+value.failure.message);error.generationTerminal=true;error.accountFailure=false;throw error;}return value?.ready?value:false;};
+  let history;try{history=await page.until(read,waitForResult?30*60*1000:30000,'agent-source-scene-result');}catch(error){if(error.code==='FLOW_UI_TIMEOUT'&&!waitForResult)throw fail('RESULT_NOT_READY','Редактирование ещё не завершено. Новая отправка не запускалась.');throw error;}if(!history)throw fail('RESULT_NOT_READY','Редактирование ещё не завершено. Новая отправка не запускалась.');
+  const folder=await fs.mkdtemp(path.join(dataDir,'browser-result-'));await fs.chmod(folder,0o700);
+  try{const filename=await downloadOriginal(lease.client,page,folder,plan.resolution,page.signal,'video',{kind:'video',poster:history.posters[0],prompt:history.prompt,ingredients:history.ingredients,sourceVideos:history.sourceVideos||[],sourcePreviews:history.sourcePreviews||[],url:history.url,agentSource:{sourceScene,sourcePreview}}),file=path.join(folder,filename);
+   if(typeof inspectVideo!=='function'||(await fs.stat(file)).size>100*1024*1024)throw fail('OUTPUT_METADATA_UNAVAILABLE','Не удалось проверить параметры результата Agent: локальная проверка доступна для видео до 100 МБ. Повторной генерации нет.');
+   const metadata=await inspectVideo({path:file,signal:page.signal});
+   if(metadata?.width!==sourceScene.width||metadata?.height!==sourceScene.height||!Number.isFinite(metadata?.durationSeconds)||metadata.durationSeconds<=0||metadata.durationSeconds>15.02||Math.abs(metadata.durationSeconds-sourceScene.durationSeconds)>0.15)throw fail('MODEL_SETTINGS_NOT_VERIFIED','Размер или длительность результата Agent не совпали с выбранными параметрами. Повторной генерации нет.');
+   onProgress('Готово');return {media:[{kind:'video',path:file}],accountId:lease.accountId,accountEmail:lease.email,projectURL};
+  }catch(error){await fs.rm(folder,{recursive:true,force:true});throw error;}
  }
  async function observeSourceScene({page,plan,ingredients,lease,projectURL,sourceScene,onProgress=()=>{},waitForResult=false}){
   const read=async()=>{
@@ -651,6 +740,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal});await page.ready();await page.verifyAccount(receipt.accountEmail);
    if(receipt.sourceScene){
     if((await page.run('state')).url!==receipt.sourceScene.url){await lease.client.send('Page.navigate',{url:receipt.sourceScene.url});await page.until(async()=>(await page.run('state')).url===receipt.sourceScene.url,30000,'recovery-source-scene');await page.verifyAccount(receipt.accountEmail);}
+    if(receipt.agentProposal)return await observeAgentScene({page,plan,ingredients:receipt.ingredients,lease,projectURL:receipt.projectURL,sourceScene:receipt.sourceScene,sourcePreview:receipt.agentProposal.sourcePreview,onProgress,waitForResult});
     return await observeSourceScene({page,plan,ingredients:receipt.ingredients,lease,projectURL:receipt.projectURL,sourceScene:receipt.sourceScene,onProgress,waitForResult});
    }
    if((await page.run('state')).url!==receipt.projectURL){await lease.client.send('Page.navigate',{url:receipt.projectURL});await page.until(async()=>(await page.run('state')).url===receipt.projectURL,30000,'recovery-project');await page.verifyAccount(receipt.accountEmail);}

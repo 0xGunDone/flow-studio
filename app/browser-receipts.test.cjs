@@ -60,3 +60,16 @@ test('source scene receipt stores honest local provenance and exact same-project
  await assert.rejects(store.write(randomUUID(),{...value,ingredients:Array(6).fill('https://flow-content.google/image/ref')}),{code:'BROWSER_RECEIPT_INVALID'});
  assert.equal((await store.write(randomUUID(),record())).sourceScene,undefined);
 });
+
+test('Agent proposal receipt binds observed image preview quote and exact approval title without invented session or video identity',async t=>{
+ const {dir,store}=await fixture(t),projectId='5927b3e9-314b-432f-af56-b76efcd20c51',sceneId='0baaa1e6-f272-4bf7-a75d-5f05231b357e',resource='1091dac2-e2e4-4039-b234-2e90198017a0';
+ const approvalText='Would you like me to kick off this 1 video generation, costing 36 credits?',base={...record(),model:'omni-1.2-flash-edit-portrait',projectURL:'https://flow.google.com/project/'+projectId,sourceScene:{url:'https://flow.google.com/project/'+projectId+'/edit/'+sceneId,poster:'https://flow-content.google/image/'+resource,sha256:'a'.repeat(64),durationSeconds:10.026667,width:720,height:1280}};
+ for(const sourcePreview of ['https://storage.googleapis.com/ai-sandbox-videofx/image/'+resource,'https://flow-content.google/image/'+resource]){
+  const id=randomUUID(),agentProposal={quoteCredits:36,videoCount:1,sourcePreview,approvalText},saved=await store.write(id,{...base,agentProposal}),reopened=await createReceiptStore(dir).read(id);
+  assert.deepEqual(saved.agentProposal,agentProposal);assert.deepEqual(reopened.agentProposal,agentProposal);assert.equal(saved.sourceVideo,undefined);assert.equal(saved.schema,1);assert.equal(saved.prompt,base.prompt);assert.deepEqual(saved.ingredients,base.ingredients);
+ }
+ const valid={quoteCredits:36,videoCount:1,sourcePreview:'https://storage.googleapis.com/ai-sandbox-videofx/image/'+resource,approvalText};
+ for(const agentProposal of [null,{},[],{...valid,quoteCredits:0},{...valid,quoteCredits:1.5},{...valid,quoteCredits:100001},{...valid,videoCount:2},{...valid,sourcePreview:valid.sourcePreview+'?Signature=private'},{...valid,sourcePreview:valid.sourcePreview+'#fragment'},{...valid,sourcePreview:valid.sourcePreview.replace(resource,sceneId)},{...valid,sourcePreview:'https://flow-content.google/video/'+resource},{...valid,sourcePreview:'https://flow.google.com/asb/opaque'},{...valid,sourcePreview:valid.sourcePreview.replace('https://','https://user:pass@')},{...valid,sourcePreview:valid.sourcePreview.replace('storage.googleapis.com','storage.googleapis.com.evil')},{...valid,approvalText:''},{...valid,approvalText:'Would you like me to kick off this 2 video generations, costing 36 credits?'},{...valid,approvalText:approvalText.replace('36','30')},{...valid,approvalText:approvalText+'\n'},{...valid,cookies:'private'},{...valid,messageIndex:0}])await assert.rejects(store.write(randomUUID(),{...base,agentProposal}),{code:'BROWSER_RECEIPT_INVALID'});
+ for(const patch of [{sourceScene:undefined},{model:'omni-1.2-flash-10s-portrait'},{sourceScene:{...base.sourceScene,poster:'https://flow.google.com/asb/opaque-source'}},{sourceVideo:'https://flow-content.google/video/'+resource,sourceVideoDuration:10.026667}])await assert.rejects(store.write(randomUUID(),{...base,...patch,agentProposal:valid}),{code:'BROWSER_RECEIPT_INVALID'});
+ assert.equal((await store.write(randomUUID(),base)).agentProposal,undefined);
+});
