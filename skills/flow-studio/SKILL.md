@@ -31,6 +31,8 @@ Use optional `accountId` from `list_accounts` to pin one active account in `prep
 
 On a first upload, Google may show “Rights to use this image” or separate source-video rights terms. Flow Studio displays the exact terms and account in its own confirmation dialog; only the user accepts or cancels. Never pre-accept rights terms or infer acceptance from upload/generation authorization. Cancellation stops that upload. Honor explicit consent already given for the same account and terms in the current session. This consent never submits generation or authorizes credit spend.
 
+Before submission, `FLOW_UI_TIMEOUT` at `account-button` or `composer-ready` can reflect a product announcement or an empty expanded Agent panel, including an off-viewport layout. The app dismisses only the recognized Omni 1.2 announcement and closes only one verified empty Agent panel; nonempty drafts and references stay untouched. Other onboarding, rights and terms remain user actions. Use a no-spend isolated-browser inspection on the same account for a persistent readiness error; never retry generation diagnostically. See [project readiness](references/generation.md#project-readiness).
+
 The old `inspect_browser`, `prepare_browser`, `submit_browser`, and `cancel_browser_preparation` tools remain legacy foreground diagnostics. They are not needed for standard background generation. Read [references/native-browser.md](references/native-browser.md) only for that legacy route.
 
 ## Preferred video model

@@ -99,6 +99,14 @@ function flowDOM(op,arg={}){
   let xs=all(role,root).filter(el=>label(el)===name);if(role==='textbox'&&name==='Что вы хотите создать?'){const main=xs.filter(el=>!el.closest?.('flow-agent-panel'));if(main.length)xs=main;}if(xs.length!==1)error(xs.length?'CONTROL_AMBIGUOUS':'CONTROL_NOT_FOUND','Не удалось однозначно найти '+name);return xs[0];
  };
  const click=el=>{if(el.disabled||el.getAttribute('aria-disabled')==='true')error('CONTROL_DISABLED','Элемент пока недоступен.');el.click();};
+ if(op==='product-announcement'){
+  const dialogs=[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible),matches=dialogs.filter(dialog=>[...dialog.querySelectorAll('h1,h2,h3,[role="heading"]')].some(heading=>text(heading)==='Introducing Omni 1.2!'));
+  if(!matches.length)return false;
+  if(dialogs.length!==1||matches.length!==1)error('PRODUCT_ANNOUNCEMENT_NOT_VERIFIED','Окно новостей Flow выбрано неоднозначно.');
+  const dialog=matches[0],buttons=all('button',dialog),start=buttons.filter(button=>text(button)==='Get started'),changelog=buttons.filter(button=>text(button)==='View all changelogs');
+  if(start.length!==1||changelog.length!==1||buttons.length!==2||dialog.querySelectorAll('input,textarea,select,[role="checkbox"],[role="radio"],a[href]').length||/terms|privacy|agree|consent|rights to use/i.test(text(dialog)))error('PRODUCT_ANNOUNCEMENT_NOT_VERIFIED','Окно Flow содержит другие действия или условия. Закройте его вручную через подключение аккаунта.');
+  if(arg.dismiss)click(start[0]);return true;
+ }
  const point=el=>{if(el.disabled||el.getAttribute('aria-disabled')==='true')error('CONTROL_DISABLED','Элемент пока недоступен.');const r=el.getBoundingClientRect();if(r.width<=0||r.height<=0)error('CONTROL_HIDDEN','Элемент недоступен в окне Flow.');const x=r.left+r.width/2,y=r.top+r.height/2;const hit=document.elementFromPoint(x,y);if(!hit||!(hit===el||el.contains(hit)))error('CONTROL_OBSCURED','Кнопку Flow перекрывает другой элемент.');return {x,y};};
  const prompt=()=>{const edit=all('textbox').filter(el=>['Describe how to edit this video…','Опишите, как изменить это видео…','Describe how to edit this video...'].includes(el.getAttribute('aria-label')));return edit.length===1?edit[0]:one('textbox','Что вы хотите создать?');};
  const promptValue=()=>{const value=prompt().innerText;return /^[\r\n]*$/.test(value)?'':value;};
@@ -158,7 +166,7 @@ function flowDOM(op,arg={}){
  }
  if(op==='composer-mode')return {agent:Boolean(prompt().closest('flow-agent-panel')),creative:Boolean(prompt().closest('flow-creative-agent-prompt-box')),ready:true};
  if(op==='close-empty-agent-panel'){
-  const panels=[...document.querySelectorAll('flow-agent-panel')].filter(visible);if(!panels.length)return false;if(panels.length!==1)error('CONTROL_AMBIGUOUS','Найдено несколько панелей помощника Flow.');
+  const panels=[...document.querySelectorAll('flow-agent-panel')].filter(node=>node.getClientRects().length&&getComputedStyle(node).visibility!=='hidden'&&!node.closest('[aria-hidden="true"],[inert]'));if(!panels.length)return false;if(panels.length!==1)error('CONTROL_AMBIGUOUS','Найдено несколько панелей помощника Flow.');
   const panel=panels[0],roots=[...panel.querySelectorAll('flow-base-prompt-box')].filter(root=>root.closest('flow-agent-panel')===panel);
   if(roots.length!==1)error('CONTROL_AMBIGUOUS','Не удалось однозначно проверить редактор помощника Flow.');
   const root=roots[0],editors=[...root.querySelectorAll('flow-rich-text-editor [role="textbox"],textarea')].filter(node=>node.closest('flow-agent-panel')===panel&&node.closest('flow-base-prompt-box')===root),editable=[...root.querySelectorAll('[role="textbox"],textarea,[contenteditable="true"],input[type="text"]')].filter(node=>node.closest('flow-agent-panel')===panel&&node.closest('flow-base-prompt-box')===root);
@@ -489,6 +497,7 @@ class FlowPage{
   await this.client.send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,modifiers:0,clickCount:1,...position});
  }
  async bind(baseline,prompt,job,timeout=60000,kind='video'){let lastError;try{return await this.until(async()=>{try{return await this.run('bind-result',{baseline,prompt,job,kind});}catch(error){if(error.code==='RESULT_BINDING_CHANGED'){lastError=error;return false;}throw error;}},timeout,'generation-card');}catch(error){if(error.code==='FLOW_UI_TIMEOUT'&&lastError)throw lastError;throw error;}}
+ async dismissProductAnnouncement(){if(!await this.run('product-announcement'))return false;await this.run('product-announcement',{dismiss:true});await this.until(async()=>!await this.run('product-announcement'),15000,'product-announcement-close');return true;}
  async verifyAccount(email){
   const editorAccount=await this.run('editor-account');
   if(editorAccount){if(editorAccount!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Окно Flow открыто под другим аккаунтом.');return;}
@@ -499,12 +508,13 @@ class FlowPage{
    if((await this.run('state')).url!==editorURL)throw fail('ACCOUNT_MISMATCH','Редактор Flow изменился во время проверки аккаунта.');
    return;
   }
-  await this.until(()=>this.run('exists',{name:'Сведения об аккаунте'}),15000,'account-button');
+  let announcementDismissed=false;
+  await this.until(async()=>{if(await this.run('exists',{name:'Сведения об аккаунте'}))return true;if(!announcementDismissed&&await this.dismissProductAnnouncement())announcementDismissed=true;return false;},15000,'account-button');
   await this.click('Сведения об аккаунте');const actual=await this.until(()=>this.run('account'),15000,'account-identity');
   if(actual!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Окно Flow открыто под другим аккаунтом.');
   await this.click('Закрыть панель аккаунта');await this.until(async()=>!(await this.run('account')));
  }
- async project(email){await this.ready();await this.verifyAccount(email);if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url)){await this.until(async()=>(await this.run('state')).projectLinks.length>0,20000,'project-links');await this.run('project');await this.until(async()=>/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url),20000,'project-navigation');}await this.verifyAccount(email);await this.run('close-empty-agent-panel');const mode=await this.until(async()=>{try{return await this.run('composer-mode');}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},20000,'composer-ready');if(mode.agent){await this.run('close-agent');await this.until(async()=>{try{return !(await this.run('composer-mode')).agent;}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},15000,'generation-composer');}if((await this.run('composer-mode')).creative){await this.run('manual-mode');await this.until(async()=>!(await this.run('composer-mode')).creative,15000,'manual-composer');}return (await this.run('state')).url;}
+ async project(email){await this.ready();await this.dismissProductAnnouncement();await this.verifyAccount(email);if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url)){await this.until(async()=>(await this.run('state')).projectLinks.length>0,20000,'project-links');await this.run('project');await this.until(async()=>/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url),20000,'project-navigation');}await this.dismissProductAnnouncement();await this.verifyAccount(email);await this.run('close-empty-agent-panel');const mode=await this.until(async()=>{try{return await this.run('composer-mode');}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},20000,'composer-ready');if(mode.agent){await this.run('close-agent');await this.until(async()=>{try{return !(await this.run('composer-mode')).agent;}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},15000,'generation-composer');}if((await this.run('composer-mode')).creative){await this.run('manual-mode');await this.until(async()=>!(await this.run('composer-mode')).creative,15000,'manual-composer');}return (await this.run('state')).url;}
  async radio(name){await this.run('radio',{name,set:true});await this.until(()=>this.run('radio',{name}));}
  async settings(plan){
   await this.click('Триггер настроек');await this.until(()=>this.run('exists',{role:'radio',name:'Видео'}));
