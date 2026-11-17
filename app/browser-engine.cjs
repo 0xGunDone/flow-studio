@@ -602,6 +602,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   try{
    if(lease.email.toLowerCase()!==input.accountEmail.toLowerCase())throw fail('ACCOUNT_MISMATCH','Аккаунт изменился до начала генерации.');
    page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal,confirmUploadRights:typeof confirmUploadRights==='function'?details=>confirmUploadRights({...details,accountId:lease.accountId,accountEmail:lease.email}):undefined});onProgress('Подключаем фоновый браузер…');const projectURL=await page.project(lease.email);
+   if(plan.video&&plan.resolution==='360p'&&agentEdit){const preferences={method:'ingredients',seconds:Math.max(3,Math.min(15,Math.round(videoMetadata.durationSeconds))),aspect:plan.aspect,resolution:'360p'};await page.settings(preferences);await page.verifySettings(preferences);}
    if(plan.video){
     folder=await fs.mkdtemp(path.join(dataDir,'browser-inputs-'));await fs.chmod(folder,0o700);
     const staged=await stageVideo(plan.video.path,folder),file=staged.target,name=path.basename(file);sourceAssetName=name.replace(/\.(mp4|mov|m4v)$/i,'');
@@ -613,7 +614,8 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
     const uploaded=()=>page.until(()=>page.run('video-uploaded',{name}),120000,'source-video-upload');let source;try{source=await uploaded();}catch(error){if(error.code!=='FLOW_UPLOAD_CONSENT_REQUIRED'||typeof page.confirmUploadRights!=='function')throw error;const rights=await page.run('upload-rights');if(await abortable(()=>page.confirmUploadRights({text:rights.text,signal:page.signal}),page.signal)!==true)throw error;await page.run('accept-upload-rights',{text:rights.text});await page.until(async()=>!(await page.run('upload-rights-pending')),10000,'video-rights-close');source=await uploaded();}await page.until(()=>page.run('video-uploaded',{name,open:true}),15000,'source-video-visible');await page.until(async()=>/\/edit\//.test((await page.run('state')).url),30000,'source-video-editor');
     const scene=await waitForSourceScene(page,{poster:source.poster,durationSeconds:videoMetadata.durationSeconds},projectURL);
     sourceScene=Object.freeze({...scene,sha256,durationSeconds:videoMetadata.durationSeconds,width:videoMetadata.width,height:videoMetadata.height});
-    page.settings=async value=>{await page.run('edit-settings',{choose:true});await page.run('model-option');await page.verifyEditSettings(value,sourceScene);};page.verifySettings=value=>page.verifyEditSettings(value,sourceScene);
+    const verifyEdit=value=>value.resolution==='360p'&&agentEdit?page.run('edit-settings'):page.verifyEditSettings(value,sourceScene);
+    page.settings=async value=>{await page.run('edit-settings',{choose:true});await page.run('model-option');await verifyEdit(value);};page.verifySettings=verifyEdit;
    }
    const original=await page.run('composer');if(original.prompt.trim()||original.ingredients.length){let detail;try{detail=await page.run('prompt-state',{expected:plan.prompt});}catch{}throw fail('BROWSER_DRAFT_PRESENT','В профиле остался незавершённый запрос. Откройте Flow через подключение аккаунта и сохраните или очистите черновик.'+(detail?' '+JSON.stringify(detail):''));}
    if(plan.kind==='image'){page.settings=value=>prepareImagePage(page,value);page.verifySettings=value=>verifyImagePage(page,value);}
@@ -658,8 +660,9 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    await page.verifyAccount(lease.email);await page.verifySettings(plan);await waitForSourceScene(page,sourceScene);
    if(!await clearOwned(page,plan.prompt,ingredients))throw fail('PREPARED_INPUT_CHANGED','Исходный черновик изменился перед подготовкой Agent.');
    await page.client.send('Page.navigate',{url:projectURL});await page.until(async()=>(await page.run('state')).url===projectURL,30000,'agent-project');await page.client.send('Page.reload',{ignoreCache:true});await page.ready();await page.verifyAccount(lease.email);
+   if(plan.resolution==='360p'){await page.project(lease.email);const preferences={method:'ingredients',seconds:Math.max(3,Math.min(15,Math.round(sourceScene.durationSeconds))),aspect:plan.aspect,resolution:'360p'};await FlowPage.prototype.settings.call(page,preferences);await FlowPage.prototype.verifySettings.call(page,preferences);}
    await page.client.send('Emulation.setDeviceMetricsOverride',{width:1920,height:1080,deviceScaleFactor:1,mobile:false});await agentEdit.startAgentSession(page);await agentEdit.configureAgentEdit(page,plan);
-   if(ingredients.length)await agentEdit.prepareAgentReferenceContext(page,{verifySettings:()=>agentEdit.verifyAgentEditSettings(page,plan)});
+   if(ingredients.length||plan.resolution==='360p')await agentEdit.prepareAgentReferenceContext(page,{verifySettings:()=>agentEdit.verifyAgentEditSettings(page,plan),resolution:plan.resolution,aspect:plan.aspect});
    let previous={sourceImageResourceId:null,ingredientImageResourceIds:[]};
    const sourceImageResourceId=resourceId(sourceScene.poster),ingredientImageResourceIds=ingredients.map(resourceId);
    {const selected=await agentEdit.attachAgentAsset(page,{name:result.sourceAssetName,kind:'video',expectedResourceId:sourceImageResourceId,previous});if(selected?.selectionNonce)selectionNonces.push(selected.selectionNonce);}previous={sourceImageResourceId,ingredientImageResourceIds:[]};
@@ -724,10 +727,20 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    }catch(e){await fs.rm(folder,{recursive:true,force:true});throw e;}
  }
  async function generate(input,options={}){
-  let result,observationError;
+  let result,observationError,agentObservationRecovery=false;
   try{result=await prepare(input,options);options.onAccount?.({id:result.lease.accountId,email:result.lease.email});return await submit(result,options);}
-  catch(error){if(!input.jobId||options.signal?.aborted||!error.unknownOutcome||!['RESULT_BINDING_CHANGED','RESULT_LOST','FLOW_UI_TIMEOUT','DOWNLOAD_FAILED','CDP_TIMEOUT'].includes(error.code))throw error;observationError=error;}
+  catch(error){
+   if(!input.jobId||options.signal?.aborted||!error.unknownOutcome||error.generationTerminal)throw error;
+   agentObservationRecovery=Boolean(result?.sourceScene&&agentEdit&&['SOURCE_VIDEO_NOT_VERIFIED','RESULT_INPUT_MISMATCH','AGENT_PROPOSAL_CHANGED','AGENT_INPUTS_NOT_VERIFIED'].includes(error.code));
+   if(!agentObservationRecovery&&!['RESULT_BINDING_CHANGED','RESULT_LOST','FLOW_UI_TIMEOUT','DOWNLOAD_FAILED','CDP_TIMEOUT'].includes(error.code))throw error;observationError=error;
+  }
   finally{if(result)await release(result);}
+  if(agentObservationRecovery){
+   try{
+    let receipt;try{receipt=await receipts.read(input.jobId);}catch(error){if(error.code==='ENOENT')throw fail('BROWSER_RECEIPT_MISSING','Запись отправленного предложения Agent не найдена. Новая генерация не запускалась.');throw error;}
+    if(!receipt.agentProposal||['accountId','accountEmail','model','prompt'].some(key=>receipt[key]!==input[key])||receipt.projectURL!==result.projectURL||JSON.stringify(receipt.sourceScene)!==JSON.stringify(result.sourceScene)||JSON.stringify(receipt.ingredients)!==JSON.stringify(result.ingredients))throw fail('BROWSER_RECEIPT_MISMATCH','Запись отправленного предложения Agent не совпала с исходной задачей. Новая генерация не запускалась.');
+   }catch(error){error.unknownOutcome=true;throw error;}
+  }
   if(observationError){options.onProgress?.('Восстанавливаем наблюдение за отправленной задачей. Новая генерация не запускается…');return recover(input.jobId,{signal:options.signal,onProgress:options.onProgress,expected:{accountId:input.accountId,accountEmail:input.accountEmail,model:input.model,prompt:input.prompt},waitForResult:true});}
  }
  async function inspect(accountId,{signal,email}={}){const lease=await accounts.acquireIsolatedGenerationBrowser(accountId,{signal});const page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal});try{const projectURL=await page.project(email||lease.email);await page.click('Триггер настроек');let controls;try{controls=await page.until(async()=>{const c=await page.run('controls');return c.radios.length?c:null;},15000,'settings-inspection');}finally{await page.click('Триггер настроек').catch(()=>{});}return {ready:true,accountId:lease.accountId,accountEmail:lease.email,projectURL,engine:'isolated-browser',usesDesktopFocus:false,controls};}finally{await accounts.releaseIsolatedGenerationBrowser(lease);}}

@@ -2687,3 +2687,56 @@ test('Agent attachment failure clears only recorded own selection nonces before 
  await assert.rejects(h.engine.generate(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source},{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Failed attachment persisted paid submission')}),{code:'FLOW_UI_TIMEOUT'});
  assert.deepEqual(clearArgs,{nonces:[sourceNonce,imageNonce],prompt:''});assert.equal(approvals,0);assert.equal(h.state.releases,1);assert.equal(h.ops.some(op=>op.op==='submit'),false);
 });
+
+async function agentObservationRecoveryFixture(t,{code='SOURCE_VIDEO_NOT_VERIFIED',persistent=false,receiptChange,onSent,noJobId=false}={}){
+ const folder=await temporary(t),source=path.join(folder,'source.mp4');await fs.writeFile(source,MP4);
+ const sourcePoster='https://flow-content.google/image/'+GUID,sourcePreview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID,counters={approvals:0,plans:0,sessions:0,attachments:0,durable:0};let h,receiptBytes;
+ const jobId=noJobId?undefined:crypto.randomUUID();
+ const agentEdit={async startAgentSession(){counters.sessions++;},async configureAgentEdit(){},async verifyAgentEditSettings(){},async prepareAgentReferenceContext(){},async attachAgentAsset(){counters.attachments++;},async prepareAgentProposal(){counters.plans++;return {source:{origin:'https://storage.googleapis.com',path:'/ai-sandbox-videofx/image/'+GUID},quoteCredits:9,permissionTitle:'Would you like me to kick off this 1 video generation, costing 9 credits?'};},async approveAgentEdit(page,binding,{beforeSubmit}){await beforeSubmit();counters.approvals++;}};
+ h=await harness(t,{edit:true,recover:true,recoverAfterObservation:true,agentEdit,sourcePoster,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),onRecoveryAcquire(){assert.equal(h.state.releases,1);assert.equal(h.order.at(-1),'release');assert.equal(counters.approvals,1);assert.equal(counters.plans,1);},async operation(op,arg,state){
+  if(op!=='agent-scene-result')return;
+  if(state.acquisitions===1||persistent){
+   if(receiptChange&&state.acquisitions===1&&!state.changedReceipt){state.changedReceipt=true;await receiptChange(path.join(h.dataDir,'browser-receipts',jobId+'.json'));}
+   throw failure(code);
+  }
+  assert.equal(state.url,arg.sourceScene.url);assert.equal(arg.prompt,input().prompt);assert.equal(arg.sourcePreview,sourcePreview);state.opened=true;
+  return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[sourcePreview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:state.url};
+ }});
+ const value=input({...(jobId?{jobId}:{}),model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),run=options=>h.engine.generate(value,{beforeSubmit:async()=>{counters.durable++;if(jobId)receiptBytes=await fs.readFile(path.join(h.dataDir,'browser-receipts',jobId+'.json'));},onProgress:text=>{if(text.startsWith('Редактирование отправлено'))onSent?.();},...options});
+ return{h,counters,jobId,run,get receiptBytes(){return receiptBytes;}};
+}
+
+test('paid Agent observation errors recover once in a fresh lease without repeating uploads session planning or approval',async t=>{
+ for(const code of ['SOURCE_VIDEO_NOT_VERIFIED','RESULT_INPUT_MISMATCH','AGENT_PROPOSAL_CHANGED','AGENT_INPUTS_NOT_VERIFIED']){
+  const f=await agentObservationRecoveryFixture(t,{code}),result=await f.run();
+  assert.deepEqual(await fs.readFile(result.media[0].path),MP4);assert.deepEqual(f.counters,{approvals:1,plans:1,sessions:1,attachments:1,durable:1});assert.equal(f.h.state.videoUploads.length,1);assert.equal(f.h.uploads.length,0);assert.equal(f.h.state.acquisitions,2);assert.equal(f.h.state.releases,2);assert.equal(f.h.ops.some(op=>op.op==='submit'),false);
+  assert.equal(f.h.commands.filter(command=>command.method==='DOM.setFileInputFiles').length,1);assert.deepEqual(await fs.readFile(path.join(f.h.dataDir,'browser-receipts',f.jobId+'.json')),f.receiptBytes);
+ }
+});
+
+test('paid Agent observation recovery validates immutable receipt before a second acquisition and rejects missing corrupt or changed ownership',async t=>{
+ for(const [receiptChange,code] of [
+  [file=>fs.unlink(file),'BROWSER_RECEIPT_MISSING'],
+  [file=>fs.writeFile(file,'not-json'),'BROWSER_RECEIPT_INVALID'],
+  [async file=>{const value=JSON.parse(await fs.readFile(file,'utf8'));value.prompt+=' changed';await fs.writeFile(file,JSON.stringify(value));},'BROWSER_RECEIPT_MISMATCH'],
+  [async file=>{const value=JSON.parse(await fs.readFile(file,'utf8'));value.sourceScene.sha256='b'.repeat(64);await fs.writeFile(file,JSON.stringify(value));},'BROWSER_RECEIPT_MISMATCH'],
+  [async file=>{const value=JSON.parse(await fs.readFile(file,'utf8'));delete value.agentProposal;await fs.writeFile(file,JSON.stringify(value));},'BROWSER_RECEIPT_MISMATCH'],
+ ]){
+  const f=await agentObservationRecoveryFixture(t,{receiptChange});await assert.rejects(f.run(),error=>error.code===code&&error.unknownOutcome===true);assert.equal(f.h.state.acquisitions,1);assert.equal(f.h.state.releases,1);assert.equal(f.counters.approvals,1);assert.equal(f.h.state.videoUploads.length,1);
+ }
+});
+
+test('paid Agent observation recovery never loops or follows cancelled terminal or unkeyed jobs',async t=>{
+ const persistent=await agentObservationRecoveryFixture(t,{persistent:true});await assert.rejects(persistent.run(),error=>error.code==='SOURCE_VIDEO_NOT_VERIFIED'&&error.unknownOutcome===true);assert.equal(persistent.h.state.acquisitions,2);assert.equal(persistent.h.state.releases,2);assert.equal(persistent.counters.approvals,1);
+ const controller=new AbortController(),cancelled=await agentObservationRecoveryFixture(t,{onSent:()=>controller.abort(failure('CANCELLED'))});await assert.rejects(cancelled.run({signal:controller.signal}),{code:'CANCELLED'});assert.equal(cancelled.h.state.acquisitions,1);assert.equal(cancelled.counters.approvals,1);
+ const terminal=await agentObservationRecoveryFixture(t,{onSent:()=>{throw Object.assign(failure('SOURCE_VIDEO_NOT_VERIFIED'),{generationTerminal:true});}});await assert.rejects(terminal.run(),error=>error.generationTerminal===true&&error.unknownOutcome===false);assert.equal(terminal.h.state.acquisitions,1);assert.equal(terminal.counters.approvals,1);
+ const unkeyed=await agentObservationRecoveryFixture(t,{noJobId:true});await assert.rejects(unkeyed.run(),error=>error.code==='SOURCE_VIDEO_NOT_VERIFIED'&&error.unknownOutcome===true);assert.equal(unkeyed.h.state.acquisitions,1);assert.equal(unkeyed.counters.approvals,1);
+});
+
+test('360p Agent Edit verifies ordinary resolution preferences and requires the exact four-credit proposal before one paid action',async t=>{
+ const folder=await temporary(t),source=path.join(folder,'source.mp4');await fs.writeFile(source,MP4);let h,approvals=0,context;
+ const sceneURL='https://flow.google.com/project/'+SOURCE_PROJECT+'/edit/'+SCENE,preview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID;
+ const agentEdit={async startAgentSession(){assert.equal(h.state.radios.has('360p 360p: видео генерируется быстрее, но разрешение ниже'),true);},async configureAgentEdit(){},async prepareAgentReferenceContext(page,args){context=args;},async attachAgentAsset(){},async verifyAgentEditSettings(){},async prepareAgentProposal(page,expected){assert.equal(expected.maxCredits,4);return {source:{origin:'https://storage.googleapis.com',path:'/ai-sandbox-videofx/image/'+GUID},quoteCredits:4,permissionTitle:'Would you like me to kick off this 1 video generation, costing 4 credits?'};},async approveAgentEdit(page,binding,{beforeSubmit}){await beforeSubmit();approvals++;}};
+ h=await harness(t,{edit:true,recover:true,agentEdit,sourcePoster:'https://flow-content.google/image/'+GUID,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3.029333,mimeType:'video/mp4',width:360,height:640}),operation(op,arg,state){if(op==='agent-scene-result'){state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[preview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:sceneURL};}}});
+ const result=await h.engine.generate(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-portrait-360p',references:[{kind:'video',path:source}]}),{beforeSubmit(){}});assert.equal(approvals,1);assert.equal(context.resolution,'360p');assert.equal(context.aspect,'9:16');assert.equal(result.media[0].kind,'video');assert.equal(h.ops.some(x=>x.op==='submit'),false);
+});
