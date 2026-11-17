@@ -43,10 +43,17 @@ class FlowClientImageGenerationArgumentTests(unittest.TestCase):
         self.assertIsNone(request[2])
         self.assertIsNone(request[9])
 
-    def test_image_requests_follow_fourteen_slot_layout(self):
+    def test_reference_layout_applies_only_to_valid_reference_ids(self):
+        cases = (
+            (None, []),
+            ([], []),
+            ([{}, {"name": " "}], []),
+            ([{"name": MEDIA_ID}], [MEDIA_ID]),
+            ([{"mediaId": MEDIA_ID}, {"name": PROJECT_ID}], [MEDIA_ID, PROJECT_ID]),
+        )
         for model_name in ("BELUGA", "HARBOR_SEAL", "GEM_PIX_2"):
-            for image_inputs in (None, [{"name": MEDIA_ID}]):
-                with self.subTest(model=model_name, references=bool(image_inputs)):
+            for image_inputs, reference_ids in cases:
+                with self.subTest(model=model_name, image_inputs=image_inputs):
                     argument = self.client._build_frontend_image_generation_argument(
                         project_id=PROJECT_ID,
                         prompt="an apple",
@@ -57,7 +64,12 @@ class FlowClientImageGenerationArgumentTests(unittest.TestCase):
                         image_inputs=image_inputs,
                     )
                     request = argument[1][0]
-                    self.assertEqual(len(request), 14)
+                    self.assertEqual(len(request), 15 if reference_ids else 14)
+                    self.assertEqual(request[14:], [4] if reference_ids else [])
+                    self.assertEqual(
+                        request[2],
+                        [[media_id, None, None, None, 1] for media_id in reference_ids] or None,
+                    )
                     self.assertEqual(request[5], model_name)
                     self.assertEqual(request[9:12], [None, None, None])
                     self.assertEqual(request[12], "session-id")
