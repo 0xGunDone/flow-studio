@@ -92,6 +92,12 @@ class FlowFrontendTransportTests(unittest.IsolatedAsyncioTestCase):
             "session_cookies": {"OSID": "stale", "HSID": "wrong-scope", "deleted": "stale"},
         })
 
+    def test_control_plane_timeout_honors_config_within_five_to_thirty_seconds(self):
+        for configured, expected in ((None, 30), (4, 5), (10, 10), (20, 20), (120, 30)):
+            with self.subTest(configured=configured):
+                self.client.timeout = configured
+                self.assertEqual(self.client._get_control_plane_timeout(), expected)
+
     async def call(self, transport, stream=False):
         with (
             patch("src.services.flow_frontend.AsyncSession", transport.session),

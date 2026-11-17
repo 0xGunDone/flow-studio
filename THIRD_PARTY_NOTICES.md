@@ -12,6 +12,8 @@ Flow Studio includes third-party software. Each component remains subject to its
 
 The vendored backend includes local modifications for Flow Studio. Preserve `backend/LICENSE` and its original notice when redistributing this code.
 
+Selective upstream backports: [control-plane timeout](https://github.com/TheSmallHanCat/flow2api/pull/196), [3:4 and 4:3 image aspect ratios](https://github.com/TheSmallHanCat/flow2api/pull/198), and [image reference compatibility](https://github.com/TheSmallHanCat/flow2api/commit/bce69c9addeb0542e90f12ee73ea0cbce756259c). The base revision above is unchanged.
+
 ## Flow Studio Session Sync
 
 The optional [`extension/`](extension) is an original Flow Studio implementation under the root [MIT license](LICENSE). Its source and artwork do not include the upstream Flow2API Token Updater extension.

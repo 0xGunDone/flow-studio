@@ -4,6 +4,9 @@ const fs=require('node:fs/promises');
 const path=require('node:path');
 const crypto=require('node:crypto');
 
+// Bump when the bundled backend changes, independently of the desktop version.
+const backendRevision='flow2api-20261117-compat';
+
 async function writePrivateOnce(file,contents){
   try{await fs.writeFile(file,contents,{flag:'wx',mode:0o600});}
   catch(error){if(error.code!=='EEXIST')throw error;}
@@ -24,7 +27,7 @@ async function prepareEngine({dataDir,backendDir,version='1.0.0'}){
   // Compose interpolates dollar signs even in JSON. Escape filesystem paths.
   const source=value=>value.replace(/\$/g,()=> '$$');
   const compose={name:'flow-studio',services:{flow2api:{
-    init:true,image:`flow-studio-engine:${version}`,
+    init:true,image:`flow-studio-engine:${version}-${backendRevision}`,
     build:{context:source(backendDir),dockerfile:'Dockerfile.headed'},
     ports:['127.0.0.1:38000:8000'],
     volumes:[
