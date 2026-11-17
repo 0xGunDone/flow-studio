@@ -5,6 +5,11 @@ const fail=(code,message)=>Object.assign(new Error(message),{code});
 const issued=new WeakMap(),used=new WeakSet();
 const referenceContexts=new WeakMap();
 const AGENT_REFERENCE_CONTEXT='For the next message, edit the attached video with Omni 1.2 Flash. Use every attached image as a generation ingredient, preserving attachment order; retain the next user prompt verbatim in the generation request. Make one video only. Do not generate or request approval until the next message supplies the video, images and prompt. If this combination cannot be passed to video editing, say so.';
+function agentReferenceContext({resolution='720p',aspect}={}){
+ if(!['720p','360p'].includes(resolution)||aspect!==undefined&&!['9:16','16:9'].includes(aspect)||resolution==='360p'&&aspect===undefined)throw fail('AGENT_SETTINGS_NOT_VERIFIED','Для управляющего сообщения нужны 720p или 360p и точный формат видео.');
+ if(resolution==='720p')return AGENT_REFERENCE_CONTEXT;
+ return 'For the next video editing request, use Omni 1.2 Flash at exactly 360p, '+(aspect==='9:16'?'vertical 9:16':'horizontal 16:9')+', one output, preserving the duration of the attached source. Do not use 720p and do not upscale or resize an output. Use every attached image as a generation ingredient, preserving attachment order; retain the next user prompt verbatim in the generation request. Do not generate or request approval until the next message supplies the video, any images and prompt. If exact 360p video editing with these inputs cannot be requested, say so.';
+}
 const inputId=value=>value?.imageResourceId||value?.selectionClaim?.expectedResourceId||null;
 
 // Runs only in Flow's own Agent panel. Ordinary composer helpers stay separate.
@@ -206,7 +211,10 @@ function agentEditDOM(op,arg={}){
 
 async function runAgent(page,op,arg={}){
  page.signal?.throwIfAborted();
- if(['reference-send-box','reference-context-ready'].includes(op)||arg.expected?.referenceContext!==undefined||arg.binding?.referenceContext!==undefined)arg={...arg,referenceContext:AGENT_REFERENCE_CONTEXT};
+ if(['reference-send-box','reference-context-ready'].includes(op)||arg.referenceContext!==undefined||arg.expected?.referenceContext!==undefined||arg.binding?.referenceContext!==undefined){
+  const context=referenceContexts.get(page);if(!context||[arg.referenceContext,arg.expected?.referenceContext,arg.binding?.referenceContext].some(value=>value!==undefined&&value!==context.text))throw fail('AGENT_SESSION_CHANGED','Управляющая инструкция не принадлежит этому браузеру или изменилась.');
+  arg={...arg,referenceContext:context.text};
+ }
  const result=await page.client.send('Runtime.evaluate',{expression:'('+agentEditDOM.toString()+')('+JSON.stringify(op)+','+JSON.stringify(arg)+')',returnByValue:true,awaitPromise:true,userGesture:true});
  if(result.exceptionDetails){const description=result.exceptionDetails.exception?.description||'',match=description.match(/(?:Error: )?([A-Z][A-Z0-9_]+): ([^\n]+)/);throw fail(match?.[1]||'BROWSER_UI_ERROR',match?.[2]||'Не удалось прочитать помощника Flow.');}return result.result?.value;
 }
@@ -271,19 +279,20 @@ async function trustedAgentPress(page,op,arg,onDispatch){
  await page.until(async()=>{const before=await runAgent(page,op,arg);await page.client.send('Input.dispatchMouseEvent',{type:'mouseMoved',button:'none',buttons:0,modifiers:0,clickCount:0,x:before.x,y:before.y});await wait(50,undefined,{signal:page.signal});const after=await runAgent(page,op,arg);if(!['x','y','left','top','width','height'].every(key=>Number.isFinite(after[key])&&after[key]===before[key]))return false;position={x:after.x,y:after.y};return true;},10000,'agent-control-stable');
  page.signal?.throwIfAborted();onDispatch?.();await page.client.send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,force:0.5,modifiers:0,clickCount:1,...position});await page.client.send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,modifiers:0,clickCount:1,...position});
 }
-async function prepareAgentReferenceContext(page,{verifySettings}={}){
+async function prepareAgentReferenceContext(page,{verifySettings,resolution='720p',aspect}={}){
  if(typeof verifySettings!=='function')throw fail('AGENT_SETTINGS_NOT_VERIFIED','Перед управляющим сообщением нужны проверенные настройки Agent.');
+ const referenceContext=agentReferenceContext({resolution,aspect});
  if(referenceContexts.has(page))throw fail('AGENT_SESSION_CHANGED','Управляющее сообщение уже отправлялось. Повторной отправки нет.');
  await verifySettings();const composer=await runAgent(page,'composer');if(composer.prompt.trim()||composer.source||composer.ingredients.length||!await runAgent(page,'session-empty'))throw fail('BROWSER_DRAFT_PRESENT','Для управляющего сообщения нужна новая пустая сессия без вложений.');
- referenceContexts.set(page,{status:'pending',projectURL:composer.projectURL});
- if(!await runAgent(page,'focus-prompt'))throw fail('PROMPT_FOCUS_FAILED','Не удалось выбрать поле управляющего сообщения.');await page.client.send('Input.insertText',{text:AGENT_REFERENCE_CONTEXT});
+ referenceContexts.set(page,{status:'pending',projectURL:composer.projectURL,text:referenceContext});
+ if(!await runAgent(page,'focus-prompt'))throw fail('PROMPT_FOCUS_FAILED','Не удалось выбрать поле управляющего сообщения.');await page.client.send('Input.insertText',{text:referenceContext});
  await verifySettings();await trustedAgentPress(page,'reference-send-box',{});
  const context=await page.until(async()=>{try{return await runAgent(page,'reference-context-ready');}catch(error){if(['AGENT_PROPOSAL_NOT_READY','AGENT_PANEL_NOT_VERIFIED'].includes(error.code))return false;throw error;}},120000,'agent-reference-context');
- referenceContexts.set(page,{status:'ready',projectURL:context.projectURL});return {referenceContext:AGENT_REFERENCE_CONTEXT,submitted:false};
+ referenceContexts.set(page,{status:'ready',projectURL:context.projectURL,text:referenceContext});return {referenceContext,submitted:false};
 }
 async function prepareAgentProposal(page,expected,{verifySettings}={}){
  if(typeof verifySettings!=='function')throw fail('AGENT_SETTINGS_NOT_VERIFIED','Перед отправкой сообщения нужны проверенные настройки помощника.');
- const referenceContext=referenceContexts.get(page);if(referenceContext){if(referenceContext.status!=='ready'||referenceContext.projectURL!==expected.projectURL)throw fail('AGENT_SESSION_CHANGED','Управляющая сессия ещё не проверена.');expected={...expected,referenceContext:AGENT_REFERENCE_CONTEXT};}else if(expected.referenceContext!==undefined)throw fail('AGENT_SESSION_CHANGED','Управляющая сессия не принадлежит этому браузеру.');
+ const referenceContext=referenceContexts.get(page);if(referenceContext){if(referenceContext.status!=='ready'||referenceContext.projectURL!==expected.projectURL||expected.referenceContext!==undefined&&expected.referenceContext!==referenceContext.text)throw fail('AGENT_SESSION_CHANGED','Управляющая сессия ещё не проверена или изменилась.');expected={...expected,referenceContext:referenceContext.text};}else if(expected.referenceContext!==undefined)throw fail('AGENT_SESSION_CHANGED','Управляющая сессия не принадлежит этому браузеру.');
  await verifySettings();const composer=await runAgent(page,'composer');if(composer.prompt.trim())throw fail('BROWSER_DRAFT_PRESENT','В помощнике есть чужой текст. Он сохранён.');
  if(inputId(composer.source)!==expected.sourceImageResourceId||JSON.stringify(composer.ingredients.map(inputId))!==JSON.stringify(expected.ingredientImageResourceIds))throw fail('AGENT_INPUTS_CHANGED','Исходники помощника не совпали с подготовленными. Текст не изменён.');
  if(referenceContext)await runAgent(page,'reference-context-ready');else if(!await runAgent(page,'session-empty'))throw fail('AGENT_SESSION_CHANGED','Перед отправкой нужна новая пустая сессия помощника.');
@@ -297,4 +306,4 @@ async function approveAgentEdit(page,binding,{beforeSubmit,verifySettings}={}){
  try{await verifySettings();await verifyAgentProposal(page,binding);await beforeSubmit();page.signal?.throwIfAborted();await verifySettings();await verifyAgentProposal(page,binding);await trustedAgentPress(page,'approve-box',{binding},()=>{dispatched=true;});return {clicked:true};}
  catch(error){error.unknownOutcome=dispatched;throw error;}
 }
-module.exports={AGENT_REFERENCE_CONTEXT,agentEditDOM,runAgent,openAgentEdit,startAgentSession,configureAgentEdit,verifyAgentEditSettings,attachAgentAsset,clearOwnedAgentAttachments,prepareAgentReferenceContext,readAgentProposal,verifyAgentProposal,prepareAgentProposal,approveAgentEdit,readAgentEditOutput,observeAgentEditOutput};
+module.exports={AGENT_REFERENCE_CONTEXT,agentReferenceContext,agentEditDOM,runAgent,openAgentEdit,startAgentSession,configureAgentEdit,verifyAgentEditSettings,attachAgentAsset,clearOwnedAgentAttachments,prepareAgentReferenceContext,readAgentProposal,verifyAgentProposal,prepareAgentProposal,approveAgentEdit,readAgentEditOutput,observeAgentEditOutput};
