@@ -116,6 +116,7 @@ async function harness(t, options = {}) {
     }
     if (op === 'composer-mode') return { agent: false, creative: false, ready: true };
     if (op === 'close-empty-agent-panel') return false;
+    if (op === 'product-announcement') return false;
     if (op === 'close-agent' || op === 'manual-mode') assert.fail('Normal composer must not switch assistant modes');
     if (op === 'click') return click(arg.name);
     if (op === 'download-option') { if (arg.click) await click(arg.resolution + ' Исходный размер'); return true; }
@@ -972,25 +973,25 @@ test('assistant mode exits only empty agent draft and switches empty creative co
   assert.equal(run('composer-mode').creative, false);
 });
 
-test('expanded empty Agent panel closes without a main composer and preserves message drafts refs and ambiguous panels',()=>{
- let value='\n',chip=false,panels=1,closed=0,unknownEditor=false;
+test('expanded empty Agent panel beyond the viewport closes once and preserves message drafts refs and ambiguous controls',()=>{
+ let value='\n',chip=false,panels=1,closed=0,unknownEditor=false,closeCount=1,inert=false,cssHidden=false;
  const element=(attributes={},extra={})=>({getAttribute:key=>attributes[key]??null,getClientRects:()=>[1],closest:()=>null,querySelectorAll:()=>[],...extra});
- const panel=element({},{}),root=element({},{}),editor=element({role:'textbox','aria-label':'What do you want to create?'},{closest:selector=>selector==='flow-agent-panel'?panel:selector==='flow-base-prompt-box'?root:null});Object.defineProperty(editor,'innerText',{get:()=>value});
- const title=element({'aria-label':'Editable text'},{value:'Untitled session'}),close=element({'aria-label':'Close'},{closest:selector=>selector==='flow-agent-panel'?panel:null,getBoundingClientRect:()=>({left:1586,top:24,width:32,height:32,right:1618,bottom:56}),click:()=>closed++}),foreignClose=element({'aria-label':'Close'},{click:()=>assert.fail('Foreign close button must never receive click')});
+ const panel=element({},{getBoundingClientRect:()=>({left:1284,top:76,width:344,height:812,right:1628,bottom:888}),closest:selector=>selector==='[aria-hidden="true"],[inert]'&&inert?{}:null}),root=element({},{}),editor=element({role:'textbox','aria-label':'What do you want to create?'},{getBoundingClientRect:()=>({left:1311,top:799,width:288,height:20,right:1599,bottom:819}),closest:selector=>selector==='flow-agent-panel'?panel:selector==='flow-base-prompt-box'?root:null});Object.defineProperty(editor,'innerText',{get:()=>value});
+ const title=element({'aria-label':'Editable text'},{value:'Untitled session'}),close=element({'aria-label':'Close'},{closest:selector=>selector==='flow-agent-panel'?panel:null,getBoundingClientRect:()=>({left:1586,top:83,width:34,height:34,right:1620,bottom:117}),click:()=>closed++}),foreignClose=element({'aria-label':'Close'},{click:()=>assert.fail('Foreign close button must never receive click')});
  root.closest=selector=>selector==='flow-agent-panel'?panel:null;
  root.querySelectorAll=selector=>selector==='flow-rich-text-editor [role="textbox"],textarea'?[editor]:selector==='[role="textbox"],textarea,[contenteditable="true"],input[type="text"]'?[editor,...(unknownEditor?[{...editor}]:[])]:selector==='flow-ingredient-chip,flow-image-ingredient-chip,flow-video-ingredient-chip,button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]'?chip?[element()]:[]:[];
- panel.querySelectorAll=selector=>selector==='flow-base-prompt-box'?[root]:selector==='flow-image-ingredient-chip,flow-video-ingredient-chip,button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]'?chip?[element()]:[]:selector==='button,[role="button"]'?[close]:selector.includes('input')?[title]:[];
- const context={innerWidth:1280,innerHeight:900,location:{origin:'https://flow.google.com'},getComputedStyle:()=>({visibility:'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector==='flow-agent-panel'?Array(panels).fill(panel):selector==='button,[role="button"]'?[foreignClose]:[]}};
+ panel.querySelectorAll=selector=>selector==='flow-base-prompt-box'?[root]:selector==='flow-image-ingredient-chip,flow-video-ingredient-chip,button[aria-label="Ingredient"],button[aria-label="Image ingredient"],button[aria-label="Ингредиент"]'?chip?[element()]:[]:selector==='button,[role="button"]'?Array(closeCount).fill(close):selector.includes('input')?[title]:[];
+ const context={innerWidth:1280,innerHeight:900,location:{origin:'https://flow.google.com'},getComputedStyle:node=>({visibility:node===panel&&cssHidden?'hidden':'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector==='flow-agent-panel'?Array(panels).fill(panel):selector==='button,[role="button"]'?[foreignClose]:[]}};
  const run=()=>vm.runInNewContext('('+flowDOM.toString()+')("close-empty-agent-panel")',context);
  assert.equal(run(),true);assert.equal(closed,1);
  value='Exact foreign draft';assert.throws(run,/BROWSER_DRAFT_PRESENT/);assert.equal(closed,1);assert.equal(value,'Exact foreign draft');
  value='';chip=true;assert.throws(run,/BROWSER_DRAFT_PRESENT/);assert.equal(closed,1);
- chip=false;unknownEditor=true;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);unknownEditor=false;panels=2;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);panels=0;assert.equal(run(),false);
+ chip=false;unknownEditor=true;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);unknownEditor=false;closeCount=2;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);closeCount=1;panels=2;assert.throws(run,/CONTROL_AMBIGUOUS/);assert.equal(closed,1);panels=1;inert=true;assert.equal(run(),false);assert.equal(closed,1);inert=false;cssHidden=true;assert.equal(run(),false);assert.equal(closed,1);cssHidden=false;panels=0;assert.equal(run(),false);
 });
 
 test('project closes expanded empty Agent before it waits for a standard composer and never types or submits',async()=>{
  const ops=[],url='https://flow.google.com/project/'+SOURCE_PROJECT;let open=true;
- const page=new FlowPage({send:()=>assert.fail('No raw mutations needed')},undefined,{pollMs:1});page.ready=async()=>{};page.verifyAccount=async()=>{};
+ const page=new FlowPage({send:()=>assert.fail('No raw mutations needed')},undefined,{pollMs:1});page.ready=async()=>{};page.verifyAccount=async()=>{};page.dismissProductAnnouncement=async()=>{};
  page.run=async op=>{ops.push(op);if(op==='state')return{url};if(op==='close-empty-agent-panel'){open=false;return true;}if(op==='composer-mode'){assert.equal(open,false,'Panel must close before prompt()-based composer inspection');return{agent:false,creative:false,ready:true};}assert.fail('Unexpected '+op);};
  assert.equal(await page.project(EMAIL),url);assert.equal(ops.filter(op=>op==='close-empty-agent-panel').length,1);assert.equal(ops.indexOf('close-empty-agent-panel')<ops.indexOf('composer-mode'),true);assert.equal(ops.some(op=>['submit','focus-prompt','clear-owned','manual-mode'].includes(op)),false);
 });
@@ -2739,4 +2740,79 @@ test('360p Agent Edit verifies ordinary resolution preferences and requires the 
  const agentEdit={async startAgentSession(){assert.equal(h.state.radios.has('360p 360p: видео генерируется быстрее, но разрешение ниже'),true);},async configureAgentEdit(){},async prepareAgentReferenceContext(page,args){context=args;},async attachAgentAsset(){},async verifyAgentEditSettings(){},async prepareAgentProposal(page,expected){assert.equal(expected.maxCredits,4);return {source:{origin:'https://storage.googleapis.com',path:'/ai-sandbox-videofx/image/'+GUID},quoteCredits:4,permissionTitle:'Would you like me to kick off this 1 video generation, costing 4 credits?'};},async approveAgentEdit(page,binding,{beforeSubmit}){await beforeSubmit();approvals++;}};
  h=await harness(t,{edit:true,recover:true,agentEdit,sourcePoster:'https://flow-content.google/image/'+GUID,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3.029333,mimeType:'video/mp4',width:360,height:640}),operation(op,arg,state){if(op==='agent-scene-result'){state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[preview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:sceneURL};}}});
  const result=await h.engine.generate(input({jobId:crypto.randomUUID(),model:'omni-1.2-flash-edit-portrait-360p',references:[{kind:'video',path:source}]}),{beforeSubmit(){}});assert.equal(approvals,1);assert.equal(context.resolution,'360p');assert.equal(context.aspect,'9:16');assert.equal(result.media[0].kind,'video');assert.equal(h.ops.some(x=>x.op==='submit'),false);
+});
+
+test('project resolves a recognized product announcement before account verification on initial and newly navigated pages',async()=>{
+ for(const initial of ['https://flow.google.com/','https://flow.google.com/project/project-owned']){
+  let url=initial,announcement=true,checks=0;const events=[],page=new FlowPage({send:()=>assert.fail('Project readiness fixture must not use raw browser commands')});
+  page.ready=async()=>{events.push('ready');};
+  page.dismissProductAnnouncement=async()=>{events.push('announcement:'+url);announcement=false;};
+  page.verifyAccount=async email=>{assert.equal(announcement,false,'Announcement must be resolved before opening the account drawer');assert.equal(email,EMAIL);checks++;events.push('account:'+url);};
+  page.until=async fn=>{for(let attempt=0;attempt<3;attempt++){const result=await fn();if(result)return result;}assert.fail('Project fixture did not settle');};
+  page.run=async op=>{
+   if(op==='state')return {url,projectLinks:[{href:'/project/project-owned'}]};
+   if(op==='project'){events.push('navigate');url='https://flow.google.com/project/project-owned';announcement=true;return true;}
+   if(op==='close-empty-agent-panel'){assert.equal(announcement,false);return false;}
+   if(op==='composer-mode')return {agent:false,creative:false,ready:true};
+   assert.fail('Unexpected project readiness operation: '+op);
+  };
+  assert.equal(await page.project(EMAIL),'https://flow.google.com/project/project-owned');assert.equal(checks,2);
+  assert.ok(events.indexOf('announcement:'+initial)<events.indexOf('account:'+initial));
+  if(initial==='https://flow.google.com/')assert.ok(events.indexOf('navigate')<events.lastIndexOf('announcement:https://flow.google.com/project/project-owned'));
+ }
+});
+
+function productAnnouncementFixture(){
+ let title='Introducing Omni 1.2!',active=true,roots=1,duplicateGetStarted=false,foreignInput=false,foreignLink=false,policyText=false,inert=false,cssHidden=false;const clicks=[];
+ const element=(attributes={},extra={})=>Object.defineProperties({getAttribute:key=>attributes[key]??null,getClientRects:()=>active?[1]:[],getBoundingClientRect:()=>({left:260,top:100,width:600,height:650,right:860,bottom:750}),closest:selector=>selector==='[aria-hidden="true"],[inert]'&&inert?{}:selector==='[role="dialog"],dialog'?dialog:null,querySelectorAll:()=>[],querySelector:()=>null},Object.getOwnPropertyDescriptors(extra));
+ const heading=element({role:'heading'},{get innerText(){return title;},get textContent(){return title;}}),getStarted=element({},{innerText:'Get started',textContent:'Get started',click(){clicks.push('Get started');active=false;}}),changelogs=element({},{innerText:'View all changelogs',textContent:'View all changelogs',click(){clicks.push('View all changelogs');}}),unknown=element({role:'checkbox'},{innerText:'Email me product updates'});
+ const dialog=element({role:'dialog'},{get innerText(){return title+'\nNew features\nView all changelogs\nGet started'+(policyText?'\nTerms of service and consent to marketing':'');},get textContent(){return this.innerText;},contains:node=>[heading,getStarted,changelogs,unknown].includes(node)});
+ dialog.querySelectorAll=selector=>{
+  if(selector==='h1,h2,h3,[role="heading"]')return [heading];
+  if(selector==='button,[role="button"]')return [getStarted,changelogs,...(duplicateGetStarted?[getStarted]:[])];
+  if(/input|checkbox|select|textarea|switch/.test(selector))return foreignInput||foreignLink&&selector.includes('a[href]')?[unknown]:[];
+  if(selector.includes('a[')||selector==='a')return foreignLink?[unknown]:[];
+  return [];
+ };
+ dialog.querySelector=selector=>dialog.querySelectorAll(selector)[0]||null;
+ const context={innerWidth:1280,innerHeight:900,location:{origin:'https://flow.google.com'},getComputedStyle:()=>({visibility:cssHidden?'hidden':'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector==='[role="dialog"],dialog'||selector==='[role="dialog"]'?active?Array(roots).fill(dialog):[]:[]}};
+ return {clicks,run:arg=>vm.runInNewContext('('+flowDOM.toString()+')("product-announcement",'+JSON.stringify(arg||{})+')',context),set:values=>{if(values.title!==undefined)title=values.title;if(values.active!==undefined)active=values.active;if(values.roots!==undefined)roots=values.roots;if(values.duplicateGetStarted!==undefined)duplicateGetStarted=values.duplicateGetStarted;if(values.foreignInput!==undefined)foreignInput=values.foreignInput;if(values.foreignLink!==undefined)foreignLink=values.foreignLink;if(values.policyText!==undefined)policyText=values.policyText;if(values.inert!==undefined)inert=values.inert;if(values.cssHidden!==undefined)cssHidden=values.cssHidden;}};
+}
+
+test('product announcement dismisses only the unique exact Omni heading and owned Get started control once',()=>{
+ const h=productAnnouncementFixture();assert.equal(h.run(),true);assert.deepEqual(h.clicks,[]);assert.equal(h.run({dismiss:true}),true);assert.deepEqual(h.clicks,['Get started']);assert.equal(h.run(),false);assert.equal(h.run({dismiss:true}),false);assert.deepEqual(h.clicks,['Get started']);
+});
+
+test('product announcement preserves unrelated onboarding policy inputs links and ambiguous or inert dialogs',()=>{
+ for(const scenario of [{title:'Welcome to Flow'}, {title:'Terms of service'}, {duplicateGetStarted:true}, {roots:2}, {foreignInput:true}, {foreignLink:true}, {policyText:true}, {inert:true}, {cssHidden:true}]){
+  const h=productAnnouncementFixture();h.set(scenario);let result,error;try{result=h.run({dismiss:true});}catch(caught){error=caught;}if(error)assert.match(error.message,/PRODUCT_ANNOUNCEMENT_NOT_VERIFIED/,JSON.stringify(scenario));else assert.equal(result,false,JSON.stringify(scenario));assert.deepEqual(h.clicks,[],JSON.stringify(scenario));
+ }
+});
+
+function lateAnnouncementAccountFixture({visibleEmail=EMAIL,reappears=false}={}){
+ const events=[];let accountPolls=0,announcementChecks=0,dismissals=0,opened=false;
+ const page=new FlowPage({send:()=>assert.fail('Account readiness fixture must not use raw browser commands')});
+ page.until=async(fn,_timeout,stage)=>{for(let attempt=0;attempt<4;attempt++){const value=await fn();if(value)return value;}throw failure('FLOW_UI_TIMEOUT',stage||'ui');};
+ page.dismissProductAnnouncement=async()=>{announcementChecks++;if(accountPolls<2){events.push('announcement-absent');return false;}dismissals++;events.push('announcement-dismissed');return true;};
+ page.click=async name=>{events.push(name);if(name==='Сведения об аккаунте')opened=true;else if(name==='Закрыть панель аккаунта')opened=false;else assert.fail('Unexpected account control: '+name);};
+ page.run=async(op,arg)=>{
+  if(op==='editor-account')return null;
+  if(op==='state')return {url:'https://flow.google.com/project/'+SOURCE_PROJECT};
+  if(op==='exists'){assert.equal(arg.name,'Сведения об аккаунте');accountPolls++;const available=accountPolls>=3&&dismissals===1&&!reappears;events.push(available?'account-available':'account-blocked');return available;}
+  if(op==='account')return opened?visibleEmail:null;
+  assert.fail('Unexpected account readiness operation: '+op);
+ };
+ return {page,events,get accountPolls(){return accountPolls;},get announcementChecks(){return announcementChecks;},get dismissals(){return dismissals;}};
+}
+
+test('account wait dismisses a late announcement after an early false check and still validates the exact account identity',async()=>{
+ for(const visibleEmail of [EMAIL,'other@example.test']){
+  const h=lateAnnouncementAccountFixture({visibleEmail});
+  if(visibleEmail===EMAIL)await h.page.verifyAccount(EMAIL);else await assert.rejects(h.page.verifyAccount(EMAIL),{code:'ACCOUNT_MISMATCH'});
+  assert.equal(h.dismissals,1);assert.equal(h.announcementChecks,2,'An absent first check must leave one later dismissal available');assert.equal(h.accountPolls,3);assert.equal(h.events.indexOf('announcement-absent')<h.events.indexOf('announcement-dismissed'),true);assert.equal(h.events.indexOf('announcement-dismissed')<h.events.indexOf('Сведения об аккаунте'),true);assert.equal(h.events.filter(value=>value==='Сведения об аккаунте').length,1);assert.equal(h.events.includes('Закрыть панель аккаунта'),visibleEmail===EMAIL);
+ }
+});
+
+test('account wait never dismisses a reappearing announcement twice and never opens an unverified account drawer',async()=>{
+ const h=lateAnnouncementAccountFixture({reappears:true});await assert.rejects(h.page.verifyAccount(EMAIL),error=>error.code==='FLOW_UI_TIMEOUT'&&error.message==='account-button');assert.equal(h.dismissals,1);assert.equal(h.announcementChecks,2);assert.equal(h.accountPolls,4);assert.equal(h.events.includes('Сведения об аккаунте'),false);
 });
