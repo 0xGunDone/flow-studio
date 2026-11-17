@@ -137,7 +137,7 @@ test('generation stops before credential access or submission when engine restar
  assert.equal(r.aborts.size,0);
 });
 test('pending engine restart preserves single-submission guard',async()=>{
- const r=new Runtime({dataDir:'/unused'});r.ready=true;r.models=[{id:'veo-3.1-fast'}];
+ const r=new Runtime({dataDir:'/unused'});r.ready=true;r.models=[{id:'gemini-3.1-flash-image-landscape'}];
  r.persist=async()=>{};r.refreshAccounts=async()=>[];
  let finishRestart,enteredRestart,jobTask,starts=0;
  const restarting=new Promise(resolve=>{enteredRestart=resolve;});
@@ -145,7 +145,7 @@ test('pending engine restart preserves single-submission guard',async()=>{
  r.start=async()=>{starts++;enteredRestart();await restart;r.ready=false;r.message='Engine restart failed';};
  const runJob=r.runJob.bind(r);
  r.runJob=(...args)=>(jobTask=runJob(...args));
- const input={model:'veo-3.1-fast',prompt:'Test'};
+ const input={model:'gemini-3.1-flash-image-landscape',prompt:'Test'};
  const {jobId}=r.generate(input);
  await restarting;
  try{
@@ -405,37 +405,30 @@ test('cooldown metadata exposes only public fields and manual reset verifies bac
  r.jobs=[{status:'running'}];await assert.rejects(r.clearCooldown(7),/завершения генерации/);
 });
 
-test('saved retry replays exact model, frame order, immutable video and source id after restart on original account',async t=>{
- const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os'),http=require('node:http'),{EventEmitter}=require('node:events'),{Readable}=require('node:stream');
+test('saved browser retry preserves model frame order immutable video and account while cached server extension cannot submit',async t=>{
+ const fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os');
  const folder=await fs.mkdtemp(path.join(os.tmpdir(),'flow-retry-'));t.after(()=>fs.rm(folder,{recursive:true,force:true}));
  const originalVideo=path.join(folder,'original.mov');await fs.writeFile(originalVideo,'original-video-content');
  const models=['omni-1.2-flash-edit-landscape','veo-3.1-fast-i2v-8s-landscape','veo-3.1-fast-extend-8s-landscape'].map(id=>({id}));
  const images=['data:image/png;base64,c3RhcnQ=','data:image/png;base64,ZW5k'];
- const payloads=[],videos=[],events=[];
- t.mock.method(http,'request',(_url,options,callback)=>{
-  assert.equal(options.method,'POST');
-  const request=new EventEmitter();request.end=body=>{
-   const payload=JSON.parse(body);payloads.push(payload);
-   (async()=>{
-    videos.push(await Promise.all((payload.video_references||[]).map(ref=>fs.readFile(path.join(folder,'engine','tmp','flow-studio-inputs',ref.file_id),'utf8'))));
-    const stream=Readable.from(['data: '+JSON.stringify({flow_studio:{account:{id:7,email:'owner@example.test'}}})+'\n\n','data: '+JSON.stringify({error:{message:'Synthetic upstream failure',code:'generation_failed'}})+'\n\n'].map(text=>Buffer.from(text)));
-    stream.statusCode=200;stream.headers={'content-type':'text/event-stream'};callback(stream);
-   })().catch(error=>request.emit('error',error));
-  };return request;
- });
+ const attempts=[],events=[];
+ const engine={supports:input=>models.slice(0,2).some(model=>model.id===input.model),async generate(input,{beforeSubmit}){
+  attempts.push({model:input.model,prompt:input.prompt,accountId:input.accountId,accountEmail:input.accountEmail,images:input.references.filter(ref=>ref.kind==='image').map(ref=>ref.dataUrl),videos:await Promise.all(input.references.filter(ref=>ref.kind==='video').map(ref=>fs.readFile(ref.path,'utf8')))});
+  await beforeSubmit();throw Object.assign(new Error('Synthetic upstream failure'),{code:'generation_failed',generationTerminal:true});
+ }};
  const setup=r=>{
   r.ready=true;r.models=models;r.accounts=[{id:7,email:'owner@example.test',isActive:true}];r.start=async()=>{};
-  r.refreshAccounts=async()=>r.accounts;r.command=async()=>({stdout:JSON.stringify({username:'test-only',password:'test-only',apiKey:'test-only'})});return r;
+  r.refreshAccounts=async()=>r.accounts;r.command=async()=>assert.fail('Browser retry must not read server credentials');r.attachBrowserEngine(engine);return r;
  };
  let r=setup(new Runtime({dataDir:folder,databasePath:path.join(folder,'engine','data','flow.db'),composePath:'/synthetic-compose',onEvent:event=>events.push(event)}));
  const cases=[
   {model:models[0].id,prompt:'  Preserve exact edit  ',references:[{kind:'image',dataUrl:images[1]},{kind:'video',path:originalVideo},{kind:'image',dataUrl:images[0]}]},
   {model:models[1].id,prompt:'Preserve frames',images},
-  {model:models[2].id,prompt:'Preserve extension',sourceVideoId:'source-generation-id'},
  ];
  const ids=[];
  for(const input of cases){ids.push(r.generate(input).jobId);await Promise.all([...r.jobTasks]);}
- assert.equal(payloads.length,3);
+ assert.equal(attempts.length,2);assert.deepEqual(attempts[0].images,[images[1],images[0]]);assert.deepEqual(attempts[1].images,images);
+ const legacy={id:'legacy-extension',model:models[2].id,prompt:'Preserve extension',status:'failed',media:[],accountId:7,accountEmail:'owner@example.test',generationEngine:'server',unknownOutcome:false};r.jobs.push(legacy);await r.saveRetryInput(legacy,[],'source-generation-id',[]);await r.persist();
  const history=await fs.readFile(path.join(folder,'history.json'),'utf8');
  assert.doesNotMatch(history,/base64|original\.mov|video-content/);
  assert.doesNotMatch(JSON.stringify({jobs:r.publicJobs(),events}),/base64|original\.mov|video-content|test-only/);
@@ -449,13 +442,11 @@ test('saved retry replays exact model, frame order, immutable video and source i
   assert.throws(()=>r.generate(cases[1]),/подготовки повтора/);
   const result=await first;await Promise.all([...r.jobTasks]);
   assert.equal((await r.retryGeneration(input)).jobId,result.jobId);assert.equal(r.jobs.find(job=>job.id===result.jobId).retryOf,original.id);
-  const replay=payloads[3+i],initial=payloads[i];
-  assert.equal(replay.model,initial.model);assert.deepEqual(replay.messages,initial.messages);assert.equal(replay.flow_studio_account_id,7);
-  assert.deepEqual(replay.video_references?.map(({file_id,...metadata})=>metadata),initial.video_references?.map(({file_id,...metadata})=>metadata));
-  assert.deepEqual(videos[3+i],videos[i]);assert.equal(original.status,'failed');
+  assert.deepEqual(attempts[2+i],attempts[i]);assert.equal(original.status,'failed');
  }
- assert.equal(payloads.length,6);assert.deepEqual(videos[3],['original-video-content']);
- assert.equal(payloads[5].messages[0].content[1].image_url.url,'extend://source-generation-id');
+ assert.equal(attempts.length,4);assert.deepEqual(attempts[2].videos,['original-video-content']);
+ const restoredLegacy=r.jobs.find(job=>job.id===legacy.id),cached=await r.readRetryInput(restoredLegacy);assert.equal(cached.sourceVideoId,'source-generation-id');const before=JSON.stringify(r.jobs);
+ await assert.rejects(r.retryGeneration({jobId:legacy.id,requestId:'legacy-new-attempt'}),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});assert.equal(JSON.stringify(r.jobs),before);assert.equal(attempts.length,4);
 });
 
 test('retry blocks unknown outcomes, policy denials and changed account, with no submission or fallback',async t=>{

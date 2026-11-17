@@ -20,7 +20,8 @@ function capabilities(model){
   const minVideos=method==='edit'?1:0,maxVideos=method==='edit'?info.maxVideos:0;
   inputsByMethod[method]={minImages,maxImages,minVideos,maxVideos,minReferences:minImages+minVideos,maxReferences:maxImages+maxVideos,supportsStartFrame:method==='frames',supportsEndFrame:method==='frames'&&maxImages>1,requiresSourceVideoId:method==='extend'};
  }
- return {id:model.id,description:info.label,kind:info.kind,generationEngine:model.id==='omni-1.2-flash'||/^omni-1\.2-flash-(?:(?:i2v-)?(?:[3-9]|1[0-5])s-|edit-)(?:landscape|portrait)(?:-360p)?$/.test(model.id)||supportsVeoModel({model:model.id})||supportsImageModel({model:model.id})?'isolated-browser':'server',mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
+ const generationEngine=model.id==='omni-1.2-flash'||/^omni-1\.2-flash-(?:(?:i2v-)?(?:[3-9]|1[0-5])s-|edit-)(?:landscape|portrait)(?:-360p)?$/.test(model.id)||supportsVeoModel({model:model.id})||supportsImageModel({model:model.id})?'isolated-browser':'server';
+ return {id:model.id,description:info.label,kind:info.kind,generationEngine,...(info.kind==='video'?{visibleWatermarkPolicy:'require_off',visibleWatermarkVerification:generationEngine==='isolated-browser'?'supported':'unsupported'}:{}),mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
 }
 function externalJob(job){
  const {requestHash,...result}=job;
@@ -92,7 +93,7 @@ async function validatedInput(runtime,params){
  const inputs=videos.length?{references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...videos.map(file=>({kind:'video',path:file}))]}:{images};
  const generateArguments={model:model.id,method,prompt:params.prompt};
  for(const key of ['accountId','referencePaths','videoPaths','startFramePath','endFramePath','sourceVideoId'])if(params[key]!==undefined)generateArguments[key]=params[key];
- return {input:{model:model.id,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId,...(params.accountId!==undefined?{accountId:params.accountId}:{})},preview:{valid:true,model:info,method,settings,inputs:{images:files.length,videos:videos.length,references:hasFrames?0:refs.length+videos.length,startFrame:params.startFramePath!==undefined,endFrame:params.endFramePath!==undefined,sourceVideo:hasSource},generateArguments,checks:{localFiles:'passed',videoDuration:videos.length?'checked_at_submission':'not_applicable',accountAccess:'not_checked',credits:'not_checked'}}};
+ return {input:{model:model.id,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId,...(params.accountId!==undefined?{accountId:params.accountId}:{})},preview:{valid:true,model:info,method,settings,inputs:{images:files.length,videos:videos.length,references:hasFrames?0:refs.length+videos.length,startFrame:params.startFramePath!==undefined,endFrame:params.endFramePath!==undefined,sourceVideo:hasSource},generateArguments,checks:{localFiles:'passed',videoDuration:videos.length?'checked_at_submission':'not_applicable',accountAccess:'not_checked',credits:'not_checked',visibleWatermark:info.kind==='video'?'not_checked':'not_applicable'}}};
 }
 async function generationInput(runtime,params){
  if(params&&Object.hasOwn(params,'checkBrowser'))throw failure('checkBrowser доступен только для подготовки.');
@@ -112,7 +113,7 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
  return async function dispatch(method,params={}){
   switch(method){
    case 'status':
-    await ready();return {ready:runtime.ready,message:runtime.message,modelsCount:runtime.models.length,accounts:runtime.accounts,runningJobs:runtime.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,model:j.model,progress:j.progress,...(j.generationEngine?{generationEngine:j.generationEngine}:{})})),countHistory:runtime.jobs.length,login:getLoginState(),apiVersion:3,features:['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation']};
+    await ready();return {ready:runtime.ready,message:runtime.message,modelsCount:runtime.models.length,accounts:runtime.accounts,runningJobs:runtime.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,model:j.model,progress:j.progress,...(j.generationEngine?{generationEngine:j.generationEngine}:{})})),countHistory:runtime.jobs.length,login:getLoginState(),apiVersion:3,videoWatermarkPolicy:'require_off',features:['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation','video-visible-watermark-off']};
    case 'models':{
     await ready();let models=runtime.models.map(capabilities);
     if(params.kind)models=models.filter(m=>m.kind===params.kind);
@@ -133,10 +134,11 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
     if(typeof checkIsolatedInputs!=='function')throw failure('Проверка фонового браузера недоступна. Обновите приложение.','BROWSER_CHECK_UNAVAILABLE');
     const checked=await checkIsolatedInputs({model:input.model,prompt:input.prompt,accountId:input.accountId,references:input.references||(input.images||[]).map(dataUrl=>({kind:'image',dataUrl}))});
     if(checked?.ready!==true||checked.accountId!==input.accountId||checked.cleared!==true||checked.submitted!==false||checked.uploadedImages!==preview.inputs.images||checked.model!==undefined&&checked.model!==input.model||checked.uploadedVideos!==undefined&&checked.uploadedVideos!==preview.inputs.videos)throw failure('Браузер не подтвердил проверку и очистку подготовленного запроса.','BROWSER_CHECK_UNCONFIRMED');
-    const browserCheck=Object.fromEntries(['ready','accountId','accountEmail','projectURL','model','referenceCount','uploadedImages','submitted','cleared'].filter(key=>Object.hasOwn(checked,key)).map(key=>[key,checked[key]]));
+    if(preview.model.kind==='video'&&checked.visibleWatermark!=='off')throw failure('Браузер не подтвердил отключение видимого водяного знака.','VISIBLE_WATERMARK_UNVERIFIED');
+    const browserCheck=Object.fromEntries(['visibleWatermark','ready','accountId','accountEmail','projectURL','model','referenceCount','uploadedImages','submitted','cleared'].filter(key=>Object.hasOwn(checked,key)).map(key=>[key,checked[key]]));
     if(typeof checked.email==='string'&&!browserCheck.accountEmail)browserCheck.accountEmail=checked.email;
     browserCheck.uploadedVideos=preview.inputs.videos;
-    return {...preview,checks:{...preview.checks,browser:'passed',upload:preview.inputs.images||preview.inputs.videos?'passed':'not_applicable'},browserCheck};
+    return {...preview,checks:{...preview.checks,visibleWatermark:preview.model.kind==='video'?'off':'not_applicable',browser:'passed',upload:preview.inputs.images||preview.inputs.videos?'passed':'not_applicable'},browserCheck};
    }
    case 'generate':{
     await ready();const input=await generationInput(runtime,params);

@@ -38,7 +38,7 @@ async function harness(t, options = {}) {
     radios: new Set(), assets: new Map(), selected: null, submitted: 0, resultPolls: 0,
     fileLookups: 0, acquisitions: 0, releases: 0, downloadFolder: null, focused: false,
     rightsText: RIGHTS_TEXT, rightsAccepted: false, rightsAccepts: 0,
-    rightsPendingReads: 0,
+    rightsPendingReads: 0, watermarkChecked:options.watermarkChecked??false,watermarkDisabled:options.watermarkDisabled??false,watermarkMandatory:options.watermarkMandatory??false,watermarkReads:0,watermarkMutations:0,
   };
   const startup = [...(options.startup || [])];
   let signal, released = false;
@@ -123,6 +123,13 @@ async function harness(t, options = {}) {
     if (op === 'image-download-option') { if (arg.click) await click('1K Исходный размер'); return { resolution: '1K' }; }
     if (op === 'exists') return arg.name === 'Видео' ? state.settingsOpen : arg.name === 'Загрузить' ? state.pickerOpen : true;
     if (op === 'account') return state.accountOpen ? options.visibleEmail || EMAIL : null;
+    if(op==='visible-watermark'){
+      assert.equal(state.accountOpen,true,'Visible watermark state must be read only in the open account drawer');state.watermarkReads++;
+      if(arg.email?.toLowerCase()!==(options.visibleEmail||EMAIL).toLowerCase())throw failure('ACCOUNT_MISMATCH');
+      if(options.watermarkUnavailable)throw failure('VISIBLE_WATERMARK_UNVERIFIED');
+      if(arg.disable&&state.watermarkChecked){if(state.watermarkDisabled||state.watermarkMandatory)throw failure('VISIBLE_WATERMARK_REQUIRED');state.watermarkChecked=false;state.watermarkMutations++;}
+      return {checked:state.watermarkChecked,disabled:state.watermarkDisabled,mandatory:state.watermarkMandatory};
+    }
     if (op === 'editor-account') return state.videoEditor&&!options.noEditorAvatar?options.visibleEmail||EMAIL:null;
     if (op === 'project') { state.url = 'https://flow.google.com/project/' + (options.edit ? SOURCE_PROJECT : 'project-owned'); return true; }
     if (op === 'radio') { if (arg.set) { for (const item of radioGroup(arg.name)) state.radios.delete(item); state.radios.add(arg.name); return true; } return state.radios.has(arg.name); }
@@ -198,6 +205,22 @@ async function harness(t, options = {}) {
     assert.fail(`Unexpected DOM operation: ${op}`);
   }
   const client = {
+    async withVerificationPage(callback){
+      const originalURL=state.url;let opened=false;
+      try{return await callback({send:async(method,params={})=>{
+        signal?.throwIfAborted();leaseController.signal.throwIfAborted();commands.push({method,params,verification:true});
+        if(method==='Emulation.setDeviceMetricsOverride')return {};
+        assert.equal(method,'Runtime.evaluate');if(params.expression==='location.href')return {result:{value:'https://flow.google.com/'}};
+        assert.ok(params.expression.startsWith(evaluatePrefix));const[op,arg]=JSON.parse('['+params.expression.slice(evaluatePrefix.length+1,-1)+']');ops.push({op,arg,verification:true});
+        if(op==='state')return {result:{value:{url:'https://flow.google.com/',accountButtons:1,projectLinks:[]}}};
+        if(op==='editor-account')return {result:{value:null}};
+        if(op==='exists')return {result:{value:true}};
+        if(op==='click'){if(arg.name==='Сведения об аккаунте')opened=true;else if(arg.name==='Закрыть панель аккаунта')opened=false;else assert.fail('Unexpected verification page control: '+arg.name);return {result:{value:true}};}
+        if(op==='account')return {result:{value:opened?options.visibleEmail||EMAIL:null}};
+        if(op==='visible-watermark'){const prior=state.accountOpen;state.accountOpen=opened;try{return {result:{value:await operation(op,arg)}};}catch(error){return domError(error);}finally{state.accountOpen=prior;}}
+        assert.fail('Unexpected verification page operation: '+op);
+      }});}finally{assert.equal(state.url,originalURL,'Account setting verification must not navigate the source editor');}
+    },
     async send(method, params = {}) {
       signal?.throwIfAborted();
       leaseController.signal.throwIfAborted();
@@ -1622,7 +1645,7 @@ test('one and two ingredients retain uploaded byte digests, canonical resource o
 test('no-spend check uploads two exact ordered refs, clears owned draft, and releases all files without mouse submission', async t => {
   const h = await harness(t), references = [{ kind: 'image', dataUrl: PNG }, { kind: 'image', dataUrl: GIF }];
   const result = await h.engine.check(input({ references }));
-  assert.deepEqual(result, { ready: true, accountId: 7, accountEmail: EMAIL, projectURL: 'https://flow.google.com/project/project-owned', model: input().model, referenceCount: 2, uploadedImages: 2, submitted: false, cleared: true });
+  assert.deepEqual(result, { ready: true, accountId: 7, accountEmail: EMAIL, projectURL: 'https://flow.google.com/project/project-owned', model: input().model, referenceCount: 2, uploadedImages: 2, visibleWatermark:'off', submitted: false, cleared: true });
   assert.equal(h.uploads.length, 2);
   for (let i = 0; i < references.length; i++) assert.deepEqual(h.uploads[i].bytes, Buffer.from(references[i].dataUrl.split(',')[1], 'base64'));
   assert.deepEqual(h.ops.filter(op => op.op === 'clear-owned').map(op => op.arg), [{ prompt: input().prompt, ingredients: h.uploads.map(upload => upload.identity) }]);
@@ -2815,4 +2838,88 @@ test('account wait dismisses a late announcement after an early false check and 
 
 test('account wait never dismisses a reappearing announcement twice and never opens an unverified account drawer',async()=>{
  const h=lateAnnouncementAccountFixture({reappears:true});await assert.rejects(h.page.verifyAccount(EMAIL),error=>error.code==='FLOW_UI_TIMEOUT'&&error.message==='account-button');assert.equal(h.dismissals,1);assert.equal(h.announcementChecks,2);assert.equal(h.accountPolls,4);assert.equal(h.events.includes('Сведения об аккаунте'),false);
+});
+
+function watermarkDOMFixture(options={}){
+ let checked=Object.hasOwn(options,'checked')?options.checked:'false',disabled=options.disabled??false,mandatory=options.mandatory??false;const clicks=[];
+ let panel,host;const element=(tag,attributes={},extra={})=>Object.defineProperties({tagName:tag.toUpperCase(),getAttribute:key=>attributes[key]??null,getClientRects:()=>[1],getBoundingClientRect:()=>({left:900,top:100,width:300,height:600,right:1200,bottom:700}),closest:selector=>selector==='[aria-hidden="true"],[inert]'?null:selector.includes('flow-watermark-toggle')?host:selector.includes('dialog')||selector.includes('Account settings')?panel:null,querySelectorAll:()=>[],querySelector:()=>null},Object.getOwnPropertyDescriptors(extra));
+ const close=element('button',{'aria-label':'Close account panel'},{click:()=>assert.fail('DOM watermark operation must not close or switch account')}),toggle=element('button',{role:'switch','aria-label':'Visible watermarking'},{get disabled(){return disabled;},getAttribute:key=>key==='role'?'switch':key==='aria-label'?'Visible watermarking':key==='aria-checked'?checked:key==='aria-disabled'?String(options.ariaDisabled??false):null,click(){clicks.push('watermark');checked='false';}}),foreign=element('button',{role:'switch','aria-label':'Visible watermarking'},{click:()=>assert.fail('Foreign watermark control received click')}),reason=element('div',{}, {get innerText(){return mandatory?'Visible watermarking is required in your region':'';},get textContent(){return this.innerText;}}),email=element('span',{}, {innerText:options.email||EMAIL,textContent:options.email||EMAIL});
+ host=element('flow-watermark-toggle',{}, {contains:node=>node===toggle||node===reason});
+ host.querySelectorAll=selector=>selector.includes('watermark-forced-reason')?mandatory?[reason]:[]:selector.includes('switch')?Array(options.switchCount??1).fill(toggle):[];
+ host.querySelector=selector=>host.querySelectorAll(selector)[0]||null;
+ panel=element('div',{role:'dialog','aria-label':'Account settings'},{innerText:(options.email||EMAIL)+(options.extraEmail?'\nsecond@example.test':'')+'\nVisible watermarking',textContent:options.email||EMAIL,contains:node=>[host,toggle,reason,email,close].includes(node)});
+ panel.querySelectorAll=selector=>selector.includes('flow-watermark-toggle')?Array(options.hostCount??1).fill(host):selector.includes('watermark-forced-reason')?mandatory?[reason]:[]:selector.includes('user-email')?[email]:selector.includes('switch')?Array(options.switchCount??1).fill(toggle):selector==='button,[role="button"]'?[close,toggle]:selector.includes('Close account panel')?[close]:[];
+ panel.querySelector=selector=>panel.querySelectorAll(selector)[0]||null;
+ const context={innerWidth:1280,innerHeight:900,location:{origin:'https://flow.google.com'},getComputedStyle:()=>({visibility:'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector.includes('Account settings')||selector==='[role="dialog"]'||selector==='[role="dialog"],dialog'?Array(options.panelCount??1).fill(panel):selector.includes('switch')?[foreign]:[]}};
+ return {clicks,run:arg=>vm.runInNewContext('('+flowDOM.toString()+')("visible-watermark",'+JSON.stringify({email:EMAIL,...arg})+')',context)};
+}
+
+test('visible watermark DOM reads exact owned OFF state without a click and disables enabled ON only once',()=>{
+ const off=watermarkDOMFixture();assert.deepEqual(JSON.parse(JSON.stringify(off.run())),{checked:false,disabled:false,mandatory:false});assert.deepEqual(off.clicks,[]);off.run({disable:true});assert.deepEqual(off.clicks,[]);
+ const on=watermarkDOMFixture({checked:'true'});assert.deepEqual(JSON.parse(JSON.stringify(on.run())),{checked:true,disabled:false,mandatory:false});assert.deepEqual(on.clicks,[]);on.run({disable:true});assert.deepEqual(on.clicks,['watermark']);assert.equal(on.run().checked,false);on.run({disable:true});assert.deepEqual(on.clicks,['watermark']);
+ const mandatory=watermarkDOMFixture({checked:'true',disabled:true,mandatory:true});assert.deepEqual(JSON.parse(JSON.stringify(mandatory.run())),{checked:true,disabled:true,mandatory:true});assert.deepEqual(mandatory.clicks,[]);
+});
+
+test('visible watermark DOM rejects mandatory ON and unknown ownership or state without clicking any switch',()=>{
+ for(const options of [{checked:'true',disabled:true,mandatory:true},{checked:'true',disabled:true},{checked:'true',ariaDisabled:true},{email:'other@example.test'},{extraEmail:true},{panelCount:0},{panelCount:2},{hostCount:0},{hostCount:2},{switchCount:0},{switchCount:2},{checked:'mixed'},{checked:null}]){
+  const h=watermarkDOMFixture(options);assert.throws(()=>h.run({disable:true}),error=>/VISIBLE_WATERMARK_REQUIRED|VISIBLE_WATERMARK_UNVERIFIED|ACCOUNT_MISMATCH/.test(error.message),JSON.stringify(options));assert.deepEqual(h.clicks,[],JSON.stringify(options));
+ }
+});
+
+test('watermark helper closes the bound drawer on failure and rejects a preference that returns ON after reopening',async()=>{
+ for(const scenario of ['off','on','mandatory','missing','account-changed','persistence-failed','save-timeout']){
+  let opened=false,opens=0,toggles=0,checked=scenario!=='off',reads=0;const page=new FlowPage({send:()=>assert.fail('Watermark helper must use the owned Flow page only')});
+  page.until=async(fn,_timeout,stage)=>{for(let attempt=0;attempt<3;attempt++){const value=await fn();if(value)return value;}throw failure('FLOW_UI_TIMEOUT',stage);};
+  page.click=async name=>{if(name==='Сведения об аккаунте'){opened=true;opens++;if(scenario==='persistence-failed'&&opens===2)checked=true;}else if(name==='Закрыть панель аккаунта')opened=false;else assert.fail('Unexpected watermark helper control: '+name);};
+  page.run=async(op,arg)=>{
+   if(op==='state')return {url:'https://flow.google.com/project/'+SOURCE_PROJECT};
+   if(op==='editor-account')return null;
+   if(op==='exists')return true;
+   if(op==='account')return opened?scenario==='account-changed'?'other@example.test':EMAIL:null;
+   if(op==='visible-watermark'){
+    assert.equal(opened,true);assert.equal(arg.email,EMAIL);reads++;
+    if(scenario==='missing')throw failure('VISIBLE_WATERMARK_UNVERIFIED');
+    if(arg.disable){if(scenario==='mandatory')throw failure('VISIBLE_WATERMARK_REQUIRED');toggles++;if(scenario!=='save-timeout')checked=false;}
+    return {checked,disabled:scenario==='mandatory',mandatory:scenario==='mandatory'};
+   }
+   assert.fail('Unexpected watermark helper operation: '+op);
+  };
+  if(['off','on'].includes(scenario)){await page.requireNoVisibleWatermark(EMAIL);assert.ok(opens>=2);assert.ok(reads>=2);}else await assert.rejects(page.requireNoVisibleWatermark(EMAIL),{code:scenario==='mandatory'?'VISIBLE_WATERMARK_REQUIRED':scenario==='account-changed'?'ACCOUNT_MISMATCH':'VISIBLE_WATERMARK_UNVERIFIED'});
+  assert.equal(opened,false,scenario);assert.equal(toggles,['on','persistence-failed','save-timeout'].includes(scenario)?1:0,scenario);if(scenario==='account-changed')assert.equal(reads,0);
+ }
+});
+
+test('video preparation verifies watermark OFF before reference upload and rechecks before its one paid submit',async t=>{
+ const h=await harness(t,{watermarkChecked:true,onFile:(_file,_bytes,state)=>{assert.equal(state.watermarkChecked,false);assert.ok(state.watermarkReads>0);assert.equal(state.accountOpen,false);}});
+ const prepared=await h.engine.prepare(input({jobId:crypto.randomUUID(),references:[{kind:'image',dataUrl:PNG}]}));assert.equal(h.state.watermarkMutations,1);const readsAfterPrepare=h.state.watermarkReads;
+ h.state.watermarkChecked=true;await h.engine.submit(prepared,{beforeSubmit(){assert.equal(h.state.watermarkChecked,false);assert.ok(h.state.watermarkReads>readsAfterPrepare);assert.equal(h.state.accountOpen,false);assert.equal(h.state.submitted,0);}});assert.equal(h.state.watermarkMutations,2);assert.equal(h.state.submitted,1);await h.engine.release(prepared);
+});
+
+test('video preparation blocks required or unverified watermark before uploads and paid action with its account drawer closed',async t=>{
+ for(const options of [{watermarkChecked:true,watermarkDisabled:true,watermarkMandatory:true},{watermarkUnavailable:true}]){
+  const h=await harness(t,options);await assert.rejects(h.engine.generate(input({jobId:crypto.randomUUID(),references:[{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Watermark failure reached paid boundary')}),error=>['VISIBLE_WATERMARK_REQUIRED','VISIBLE_WATERMARK_UNVERIFIED'].includes(error.code)&&error.unknownOutcome!==true);assert.equal(h.uploads.length,0);assert.equal(h.state.submitted,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);assert.equal(h.state.releases,1);
+ }
+ const veo=await harness(t,{watermarkChecked:true,watermarkDisabled:true,watermarkMandatory:true});await assert.rejects(veo.engine.generate(input({jobId:crypto.randomUUID(),model:'veo-3.1-fast-i2v-8s-landscape',references:[{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Veo watermark failure reached paid boundary')}),{code:'VISIBLE_WATERMARK_REQUIRED'});assert.equal(veo.uploads.length,0);assert.equal(veo.state.submitted,0);
+});
+
+test('watermark policy drift to mandatory ON after preparation blocks normal paid submission and receipt creation',async t=>{
+ const h=await harness(t),jobId=crypto.randomUUID(),prepared=await h.engine.prepare(input({jobId}));h.state.watermarkChecked=true;h.state.watermarkDisabled=true;h.state.watermarkMandatory=true;
+ await assert.rejects(h.engine.submit(prepared,{beforeSubmit:()=>assert.fail('Mandatory watermark reached durable paid callback')}),error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.unknownOutcome===false);assert.equal(h.state.submitted,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts',jobId+'.json')),{code:'ENOENT'});await h.engine.release(prepared);
+});
+
+test('image generation and receipt recovery never read or mutate the video watermark preference',async t=>{
+ const image=await harness(t,{image:true,operation(op){if(op==='visible-watermark')assert.fail('Image generation inspected video watermark policy');}});await image.engine.generate(input({model:'gemini-3.1-flash-image-landscape'}),{beforeSubmit(){}});assert.equal(image.state.submitted,1);
+ const recovery=await harness(t,{recover:true,historyPrompt:input().prompt,ingredients:['https://flow-content.google/image/original-upload'],operation(op){if(op==='visible-watermark')assert.fail('Read-only receipt recovery inspected watermark policy');}}),saved=await savedReceipt(recovery);await recovery.engine.recover(saved.jobId);assert.equal(recovery.state.submitted,0);assert.equal(recovery.state.watermarkReads,0);assert.equal(recovery.state.watermarkMutations,0);
+});
+
+test('Agent Edit checks watermark before source upload and before receipt or its sole Approve including a later mandatory change',async t=>{
+ for(const mandatory of [false,true]){
+ const folder=await temporary(t),source=path.join(folder,'source.mp4');await fs.writeFile(source,MP4);let h,approvals=0,preparedReads=0;
+ const preview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID;
+ const agentEdit={async startAgentSession(){},async configureAgentEdit(){},async verifyAgentEditSettings(){},async attachAgentAsset(){},async prepareAgentProposal(){preparedReads=h.state.watermarkReads;h.state.watermarkChecked=true;h.state.watermarkDisabled=mandatory;h.state.watermarkMandatory=mandatory;return {source:{origin:'https://storage.googleapis.com',path:'/ai-sandbox-videofx/image/'+GUID},quoteCredits:9,permissionTitle:'Would you like me to kick off this 1 video generation, costing 9 credits?'};},async approveAgentEdit(page,binding,{beforeSubmit}){await beforeSubmit();assert.equal(h.state.watermarkChecked,false);assert.ok(h.state.watermarkReads>preparedReads);assert.equal(h.state.accountOpen,false);approvals++;}};
+ h=await harness(t,{edit:true,recover:true,agentEdit,watermarkChecked:true,sourcePoster:'https://flow-content.google/image/'+GUID,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),operation(op,arg,state){if(op==='click'&&arg.name==='Добавить медиа'){assert.equal(state.watermarkChecked,false);assert.ok(state.watermarkReads>0);assert.equal(state.accountOpen,false);}if(op==='agent-scene-result'){state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[preview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:state.url};}}});
+ const jobId=crypto.randomUUID(),running=h.engine.generate(input({jobId,model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),{beforeSubmit(){assert.equal(mandatory,false,'Mandatory Agent watermark reached receipt callback');assert.equal(h.state.watermarkChecked,false);assert.equal(approvals,0);}});
+ if(mandatory){await assert.rejects(running,error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.unknownOutcome===false);await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts',jobId+'.json')),{code:'ENOENT'});}else await running;
+ assert.equal(approvals,mandatory?0:1);assert.equal(h.state.watermarkMutations,mandatory?1:2);assert.equal(h.state.submitted,0);assert.equal(h.state.accountOpen,false);
+ }
 });

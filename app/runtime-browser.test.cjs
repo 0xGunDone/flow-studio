@@ -22,6 +22,30 @@ async function fixture(t,accounts=[account(7)]){
 }
 const localResult=(file,id=7)=>({media:[{path:file,kind:'video',mediaGenerationId:'source-generation-id'}],accountId:id,accountEmail:account(id).email});
 
+test('new server-route videos stop before jobs credential access HTTP or account changes when visible watermark policy cannot be verified',async t=>{
+ const {r,file,events,settle}=await fixture(t);let requests=0,credentials=0,browserCalls=0;
+ t.mock.method(http,'request',()=>{requests++;throw new Error('No server generation request is permitted');});
+ r.command=async()=>{credentials++;throw new Error('No server credentials are needed for a rejected route');};
+ r.attachBrowserEngine({supports:input=>input.model===MODEL,generate:async()=>{browserCalls++;throw new Error('Do not change the selected route');}});
+ for(const model of ['omni-1.1-flash-8s-landscape','veo-3.1-fast-extend-8s-landscape','omni-1.1-flash-edit-landscape']){
+  r.models.push({id:model});const input={model,prompt:'Exact request',accountId:7,...(model.includes('-edit-')?{references:[{kind:'video',path:file}]}:model.includes('-extend-')?{sourceVideoId:'existing-video-id'}:{})};let error;
+  try{r.generate(input);}catch(caught){error=caught;}await settle();
+  assert.equal(error?.code,'VISIBLE_WATERMARK_ROUTE_UNVERIFIED');assert.match(error.message,/видим.*водян|водян.*видим/i);assert.match(error.message,/не запуск/i);
+  assert.equal(r.jobs.length,0);assert.equal(r.jobTasks.size,0);assert.equal(events.some(event=>event.type==='job'),false);assert.equal(r.browserAccountState.size,0);assert.deepEqual(r.accounts,[account(7)]);
+ }
+ assert.equal(requests,0);assert.equal(credentials,0);assert.equal(browserCalls,0);
+});
+
+test('an existing request UUID still returns its exact historical video after its browser route becomes unavailable',async t=>{
+ const {r,file,settle}=await fixture(t);let generations=0;
+ r.attachBrowserEngine({supports:()=>true,generate:async(_input,{beforeSubmit})=>{generations++;await beforeSubmit();return localResult(file);}});
+ const input={model:MODEL,prompt:'Original exact request',accountId:7,requestId:'same-historical-uuid'},first=r.generate(input);await settle();const original=JSON.stringify(r.jobs);
+ r.attachBrowserEngine({supports:()=>false,generate:async()=>assert.fail('Historical UUID must not generate again')});
+ assert.deepEqual(r.generate(input),first);assert.equal(JSON.stringify(r.jobs),original);assert.equal(generations,1);
+ assert.throws(()=>r.generate({...input,requestId:'new-request-uuid'}),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});assert.equal(JSON.stringify(r.jobs),original);assert.equal(generations,1);
+ assert.throws(()=>r.generate({...input,prompt:'Changed prompt'}),/requestId/);
+});
+
 test('supported generation routes automatically, selects one eligible profile and retains normal history/media',async t=>{
  const paused=new Date(Date.now()+60000).toISOString();
  const {r,file,folder,events,settle}=await fixture(t,[account(1,{isActive:false}),account(2,{videoEnabled:false}),account(3,{cooldownUntil:paused}),account(4,{browserReady:false}),account(7)]);

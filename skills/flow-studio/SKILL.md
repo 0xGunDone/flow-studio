@@ -33,7 +33,13 @@ On a first upload, Google may show “Rights to use this image” or separate so
 
 Before submission, `FLOW_UI_TIMEOUT` at `account-button` or `composer-ready` can reflect a product announcement or an empty expanded Agent panel, including an off-viewport layout. The app dismisses only the recognized Omni 1.2 announcement and closes only one verified empty Agent panel; nonempty drafts and references stay untouched. Other onboarding, rights and terms remain user actions. Use a no-spend isolated-browser inspection on the same account for a persistent readiness error; never retry generation diagnostically. See [project readiness](references/generation.md#project-readiness).
 
-The old `inspect_browser`, `prepare_browser`, `submit_browser`, and `cancel_browser_preparation` tools remain legacy foreground diagnostics. They are not needed for standard background generation. Read [references/native-browser.md](references/native-browser.md) only for that legacy route.
+Legacy `prepare_browser`/`native_prepare` and `submit_browser`/`native_submit` are blocked with `VISIBLE_WATERMARK_ROUTE_UNVERIFIED`, including old tokens: no input uploads, preparation token or paid video submission. This route cannot verify official `Visible watermarking: Off`. Only legacy `inspect_browser`/`native_inspect` and `cancel_browser_preparation`/`native_cancel` remain usable for diagnosis and releasing old preparation. They are not a generation fallback. Read [references/native-browser.md](references/native-browser.md) for these limits.
+
+## Visible-watermark default for new videos
+
+New videos require verified official Google `Visible watermarking: Off` by default. Supported browser Omni/Veo/Edit paths check it before input uploads and again before the paid action; an available switch is turned Off and reopened to confirm persistence. Missing, ambiguous, locked or unsaved Off blocks the new request before credits. Server and legacy video submission routes without this verification fail with `VISIBLE_WATERMARK_ROUTE_UNVERIFIED`; never fall back, rotate accounts or change region to evade the policy.
+
+`VISIBLE_WATERMARK_REQUIRED` carries Google's explicit mandatory reason (observed: `Visible watermarking is required in your region`). `VISIBLE_WATERMARK_UNVERIFIED` means Off could not be proved. Preserve the exact returned code/reason, stop before spend and explain the account-specific state; do not infer a global region/model rule. Default local preparation leaves this unchecked. Video `checkBrowser:true` applies/verifies the official account setting without generating or spending generation credits. This account-wide change can affect future work outside the task; image generation itself is unchanged. Read-only recovery of existing media does not alter the setting. Do not replace official verification with removal of visible marks or SynthID from existing files.
 
 ## Preferred video model
 
