@@ -216,6 +216,25 @@ function flowDOM(op,arg={}){
   const emails=[...text(panel).matchAll(/[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)].map(m=>m[0].toLowerCase());
   return [...new Set(emails)].length===1?emails[0]:null;
  }
+ if(op==='visible-watermark'){
+  const panels=[...document.querySelectorAll('[role="dialog"],[aria-label="Настройки аккаунта"],[aria-label="Account settings"]')].filter(visible).filter(panel=>label(panel)==='Настройки аккаунта'||panel.querySelector('[aria-label="Закрыть панель аккаунта"],[aria-label="Close account panel"]'));
+  if(panels.length!==1)error('VISIBLE_WATERMARK_UNVERIFIED','Не удалось однозначно проверить настройки видимого водяного знака. Генерация не запускалась.');
+  const panel=panels[0],emails=[...new Set([...text(panel).matchAll(/[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)].map(match=>match[0].toLowerCase()))];
+  if(typeof arg.email!=='string'||emails.length!==1||emails[0]!==arg.email.toLowerCase())error('ACCOUNT_MISMATCH','Настройки водяного знака открыты под другим Google-аккаунтом.');
+  const hosts=[...panel.querySelectorAll('flow-watermark-toggle')].filter(visible);
+  if(hosts.length!==1)error('VISIBLE_WATERMARK_UNVERIFIED','Google не показал единственную настройку Visible watermarking. Генерация не запускалась.');
+  const host=hosts[0],switches=[...host.querySelectorAll('button[role="switch"][aria-label="Visible watermarking"]')].filter(visible);
+  if(switches.length!==1)error('VISIBLE_WATERMARK_UNVERIFIED','Переключатель видимого водяного знака не подтверждён. Генерация не запускалась.');
+  const control=switches[0],state=control.getAttribute('aria-checked');
+  if(!['true','false'].includes(state))error('VISIBLE_WATERMARK_UNVERIFIED','Google не подтвердил состояние видимого водяного знака. Генерация не запускалась.');
+  const checked=state==='true',disabled=control.disabled===true||control.getAttribute('aria-disabled')==='true',mandatory=[...host.querySelectorAll('.watermark-forced-reason')].filter(visible).some(node=>/Visible watermarking is required in your region/.test(text(node)));
+  if(arg.disable&&checked){
+   if(mandatory)error('VISIBLE_WATERMARK_REQUIRED','Google требует видимый водяной знак для этого аккаунта: Visible watermarking is required in your region. Генерация остановлена до расхода кредитов.');
+   if(disabled)error('VISIBLE_WATERMARK_UNVERIFIED','Google заблокировал включённый Visible watermarking. Генерация остановлена до расхода кредитов.');
+   click(control);
+  }
+  return {checked,disabled,mandatory};
+ }
  if(op==='project'){
   const links=[...document.querySelectorAll('a[href]')].filter(visible).filter(a=>/^\/project\/[A-Za-z0-9_-]+$/.test(a.getAttribute('href')));
   if(!links.length)error('FLOW_PROJECT_REQUIRED','Создайте проект в Flow через окно входа.');
@@ -514,6 +533,33 @@ class FlowPage{
   if(actual!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Окно Flow открыто под другим аккаунтом.');
   await this.click('Закрыть панель аккаунта');await this.until(async()=>!(await this.run('account')));
  }
+ async requireNoVisibleWatermark(email){
+  const initialURL=(await this.run('state')).url;
+  if(/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+\/edit\/[a-f0-9-]{36}$/i.test(initialURL)){
+   await this.verifyAccount(email);
+   if(typeof this.client.withVerificationPage!=='function')throw fail('VISIBLE_WATERMARK_UNVERIFIED','Проверка видимого водяного знака редактора недоступна. Генерация не запускалась.');
+   await this.client.withVerificationPage(async client=>{const page=new FlowPage(client,this.requestSignal,{pollMs:this.pollMs,leaseSignal:this.signal});await page.ready();await page.requireNoVisibleWatermark(email);});
+   if((await this.run('state')).url!==initialURL)throw fail('VISIBLE_WATERMARK_UNVERIFIED','Редактор изменился во время проверки водяного знака. Генерация не запускалась.');
+   return {checked:false};
+  }
+  let announcementDismissed=false;
+  await this.until(async()=>{if(await this.run('exists',{name:'Сведения об аккаунте'}))return true;if(!announcementDismissed&&await this.dismissProductAnnouncement())announcementDismissed=true;return false;},15000,'watermark-account-button');
+  let opened=false;
+  try{
+   await this.click('Сведения об аккаунте');opened=true;
+   const actual=await this.until(()=>this.run('account'),15000,'watermark-account');
+   if(actual!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Настройки водяного знака открыты под другим Google-аккаунтом.');
+   let state=await this.run('visible-watermark',{email});
+   if(state.checked){await this.run('visible-watermark',{email,disable:true});await this.until(async()=>!(await this.run('visible-watermark',{email})).checked,15000,'visible-watermark-off');}
+   await this.click('Закрыть панель аккаунта');opened=false;await this.until(async()=>!await this.run('account'));
+   await this.click('Сведения об аккаунте');opened=true;await this.until(()=>this.run('account'),15000,'watermark-reopen');
+   state=await this.run('visible-watermark',{email});
+   if(state.checked)throw fail('VISIBLE_WATERMARK_UNVERIFIED','Visible watermarking не сохранился выключенным. Генерация остановлена до расхода кредитов.');
+   return {checked:false};
+  }catch(error){if(error.code==='FLOW_UI_TIMEOUT')throw fail('VISIBLE_WATERMARK_UNVERIFIED','Google не подтвердил отключение видимого водяного знака. Генерация остановлена до расхода кредитов.');throw error;}finally{
+   if(opened){await this.click('Закрыть панель аккаунта');await this.until(async()=>!await this.run('account'));}
+  }
+ }
  async project(email){await this.ready();await this.dismissProductAnnouncement();await this.verifyAccount(email);if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url)){await this.until(async()=>(await this.run('state')).projectLinks.length>0,20000,'project-links');await this.run('project');await this.until(async()=>/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url),20000,'project-navigation');}await this.dismissProductAnnouncement();await this.verifyAccount(email);await this.run('close-empty-agent-panel');const mode=await this.until(async()=>{try{return await this.run('composer-mode');}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},20000,'composer-ready');if(mode.agent){await this.run('close-agent');await this.until(async()=>{try{return !(await this.run('composer-mode')).agent;}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},15000,'generation-composer');}if((await this.run('composer-mode')).creative){await this.run('manual-mode');await this.until(async()=>!(await this.run('composer-mode')).creative,15000,'manual-composer');}return (await this.run('state')).url;}
  async radio(name){await this.run('radio',{name,set:true});await this.until(()=>this.run('radio',{name}));}
  async settings(plan){
@@ -612,6 +658,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   try{
    if(lease.email.toLowerCase()!==input.accountEmail.toLowerCase())throw fail('ACCOUNT_MISMATCH','Аккаунт изменился до начала генерации.');
    page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal,confirmUploadRights:typeof confirmUploadRights==='function'?details=>confirmUploadRights({...details,accountId:lease.accountId,accountEmail:lease.email}):undefined});onProgress('Подключаем фоновый браузер…');const projectURL=await page.project(lease.email);
+   if(plan.kind!=='image'){onProgress('Проверяем отключение видимого водяного знака…');await page.requireNoVisibleWatermark(lease.email);}
    if(plan.video&&plan.resolution==='360p'&&agentEdit){const preferences={method:'ingredients',seconds:Math.max(3,Math.min(15,Math.round(videoMetadata.durationSeconds))),aspect:plan.aspect,resolution:'360p'};await page.settings(preferences);await page.verifySettings(preferences);}
    if(plan.video){
     folder=await fs.mkdtemp(path.join(dataDir,'browser-inputs-'));await fs.chmod(folder,0o700);
@@ -647,7 +694,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   if(signal!==page.requestSignal)throw fail('PREPARATION_SIGNAL_CHANGED','Подготовка и отправка должны принадлежать одной задаче.');
   if(result.sourceScene&&agentEdit)return submitAgentEdit(result,{signal,beforeSubmit,onProgress});
   try{
-   await page.verifyAccount(lease.email);await page.verifySettings(plan);const baseline=result.sourceScene?[]:await page.run('baseline',{job});
+   if(plan.kind!=='image')await page.requireNoVisibleWatermark(lease.email);else await page.verifyAccount(lease.email);await page.verifySettings(plan);const baseline=result.sourceScene?[]:await page.run('baseline',{job});
    const c=await page.run('composer');if(!samePrompt(c.prompt,plan.prompt)||JSON.stringify(c.ingredients)!==JSON.stringify(ingredients))throw fail('PREPARED_INPUT_CHANGED','Подготовленный запрос изменился.');
    if(result.sourceScene)await waitForSourceScene(page,result.sourceScene);
    signal?.throwIfAborted();await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL:result.projectURL,ingredients:[...ingredients],baseline,createdAt:new Date().toISOString(),...(result.sourceScene?{sourceScene:result.sourceScene}:{}),...(result.sourceVideo?{sourceVideo:result.sourceVideo,sourceVideoDuration:result.sourceVideoDuration}:{})});await beforeSubmit();signal?.throwIfAborted();
@@ -680,7 +727,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    const seconds=Math.ceil(sourceScene.durationSeconds),rate=plan.resolution==='360p'?1:3,maxCredits=rate*(Math.min(seconds,10)+Math.max(0,seconds-10)*2);
    const expected={projectURL,prompt:plan.prompt,sourceImageResourceId,ingredientImageResourceIds,maxCredits};
    onProgress('Готовим редактирование через Flow Agent…');const verifySettings=()=>agentEdit.verifyAgentEditSettings(page,plan),binding=await agentEdit.prepareAgentProposal(page,expected,{verifySettings});
-   await agentEdit.approveAgentEdit(page,binding,{verifySettings,beforeSubmit:async()=>{await page.verifyAccount(lease.email);await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL,ingredients:[...ingredients],baseline:[],createdAt:new Date().toISOString(),sourceScene,agentProposal:{quoteCredits:binding.quoteCredits,videoCount:1,sourcePreview:binding.source.origin+binding.source.path,approvalText:binding.permissionTitle}});await beforeSubmit();}});approved=true;
+   await agentEdit.approveAgentEdit(page,binding,{verifySettings,beforeSubmit:async()=>{await page.requireNoVisibleWatermark(lease.email);await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL,ingredients:[...ingredients],baseline:[],createdAt:new Date().toISOString(),sourceScene,agentProposal:{quoteCredits:binding.quoteCredits,videoCount:1,sourcePreview:binding.source.origin+binding.source.path,approvalText:binding.permissionTitle}});await beforeSubmit();}});approved=true;
    onProgress('Редактирование отправлено в Flow Agent. Ожидаем видео…');await page.client.send('Page.navigate',{url:sourceScene.url});
    await page.until(async()=>(await page.run('state')).url===sourceScene.url,30000,'agent-output-scene');
    return await observeAgentScene({page,plan,ingredients,lease,projectURL,sourceScene,sourcePreview:binding.source.origin+binding.source.path,onProgress,waitForResult:true});
@@ -754,7 +801,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   if(observationError){options.onProgress?.('Восстанавливаем наблюдение за отправленной задачей. Новая генерация не запускается…');return recover(input.jobId,{signal:options.signal,onProgress:options.onProgress,expected:{accountId:input.accountId,accountEmail:input.accountEmail,model:input.model,prompt:input.prompt},waitForResult:true});}
  }
  async function inspect(accountId,{signal,email}={}){const lease=await accounts.acquireIsolatedGenerationBrowser(accountId,{signal});const page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal});try{const projectURL=await page.project(email||lease.email);await page.click('Триггер настроек');let controls;try{controls=await page.until(async()=>{const c=await page.run('controls');return c.radios.length?c:null;},15000,'settings-inspection');}finally{await page.click('Триггер настроек').catch(()=>{});}return {ready:true,accountId:lease.accountId,accountEmail:lease.email,projectURL,engine:'isolated-browser',usesDesktopFocus:false,controls};}finally{await accounts.releaseIsolatedGenerationBrowser(lease);}}
- async function check(input,options={}){let result;try{result=await prepare(input,options);const cleared=await clearOwned(result.page,result.plan.prompt,result.ingredients);if(!cleared)throw fail('PREPARED_INPUT_CHANGED','Черновик изменился во время проверки. Он сохранён в Flow.');return {ready:true,accountId:result.lease.accountId,accountEmail:result.lease.email,projectURL:result.projectURL,model:result.plan.model,referenceCount:result.ingredients.length,uploadedImages:result.ingredients.length,submitted:false,cleared};}finally{if(result)await release(result);}}
+ async function check(input,options={}){let result;try{result=await prepare(input,options);const cleared=await clearOwned(result.page,result.plan.prompt,result.ingredients);if(!cleared)throw fail('PREPARED_INPUT_CHANGED','Черновик изменился во время проверки. Он сохранён в Flow.');return {ready:true,accountId:result.lease.accountId,accountEmail:result.lease.email,projectURL:result.projectURL,model:result.plan.model,referenceCount:result.ingredients.length,uploadedImages:result.ingredients.length,...(result.plan.kind!=='image'?{visibleWatermark:'off'}:{}),submitted:false,cleared};}finally{if(result)await release(result);}}
  async function recover(jobId,{signal,onProgress=()=>{},expected,waitForResult=false}={}){
   let receipt;try{receipt=await receipts.read(jobId);}catch(error){if(error.code==='ENOENT')throw fail('BROWSER_RECEIPT_MISSING','Для этой старой задачи нет записи отправки. Проверьте результат вручную в Flow. Повторная генерация не запускалась.');throw error;}
   if(expected&&['accountId','accountEmail','model','prompt'].some(key=>expected[key]!==receipt[key]))throw fail('BROWSER_RECEIPT_MISMATCH','Запись отправки не совпадает с исходной задачей.');

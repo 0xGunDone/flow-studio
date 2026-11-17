@@ -299,16 +299,16 @@ test('MCP prepare resolves UI settings without generation and pins a deduplicate
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'flow-mcp-prepare-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const start=path.join(root,'start.png'),end=path.join(root,'end.png');await fs.writeFile(start,'start');await fs.writeFile(end,'end');
   const runtime=new Runtime({});runtime.ready=true;
-  runtime.models=[{id:'veo-3.1-fast-i2v-8s-landscape'},{id:'veo-3.1-fast-8s-landscape'},{id:'veo-3.1-fast'},{id:'omni-1.1-flash-8s-landscape'}];
+  runtime.models=[{id:'veo-3.1-fast-i2v-8s-landscape'},{id:'veo-3.1-fast-8s-landscape'},{id:'veo-3.1-fast'},{id:'omni-1.1-flash-8s-landscape'}];runtime.attachBrowserEngine({supports:input=>/^veo-3\.1-fast/.test(input.model),generate:async()=>assert.fail('runJob fixture owns submission')});
   let generations=0,persists=0;runtime.start=async()=>runtime.snapshot();runtime.persist=async()=>{persists++;};runtime.runJob=async()=>{generations++;};
   const actions=createAgentActions({runtime});
   const bridge=await fakeBridge(t,async(body,_req,res)=>{try{return await actions(body.method,body.params);}catch(error){res.statusCode=400;res.end(JSON.stringify({error:{code:error.code||'request_failed',message:error.message}}));}});
   const client=new BridgeClient({bridgePath:bridge.bridgePath,launch:async()=>{throw Error('Unexpected launch');}});
-  const status=await dispatch(client,'status',{});assert.equal(status.apiVersion,3);assert(status.features.includes('prepare-generation'));assert(status.features.includes('isolated-browser-generation'));
+  const status=await dispatch(client,'status',{});assert.equal(status.apiVersion,3);assert(status.features.includes('prepare-generation'));assert(status.features.includes('isolated-browser-generation'));assert.equal(status.videoWatermarkPolicy,'require_off');assert(status.features.includes('video-visible-watermark-off'));
   const settings={kind:'video',method:'frames',family:'Veo 3.1 Fast',durationSeconds:8,aspectRatio:'16:9'};
   const plan=await dispatch(client,'prepare',{settings,prompt:'Local test only',startFramePath:start,endFramePath:end,accountId:7});
   assert.equal(plan.valid,true);assert.equal(plan.model.id,'veo-3.1-fast-i2v-8s-landscape');assert.equal(plan.method,'frames');
-  assert.equal(plan.inputs.startFrame,true);assert.equal(plan.inputs.endFrame,true);assert.equal(plan.checks.accountAccess,'not_checked');
+  assert.equal(plan.inputs.startFrame,true);assert.equal(plan.inputs.endFrame,true);assert.equal(plan.checks.accountAccess,'not_checked');assert.equal(plan.checks.visibleWatermark,'not_checked');
   assert.equal(plan.generateArguments.settings,undefined);assert.equal(plan.generateArguments.model,plan.model.id);assert.equal(plan.generateArguments.method,'frames');
   assert.equal(plan.generateArguments.accountId,7);assert.equal(plan.model.generationEngine,'isolated-browser');
   assert.equal(JSON.stringify(plan).includes('base64'),false);assert.equal(plan.generateArguments.confirmCreditSpend,undefined);assert.equal(plan.generateArguments.requestId,undefined);
@@ -323,4 +323,14 @@ test('MCP prepare resolves UI settings without generation and pins a deduplicate
   assert.equal(textPlan.model.id,'veo-3.1-fast-8s-landscape','Only known alias resolves to the canonical variant');
   await assert.rejects(dispatch(client,'prepare',{settings:{...settings,durationSeconds:10},prompt:'No available option',startFramePath:start}));
   assert.equal(generations,1);assert.equal(runtime.jobs.length,1);
+});
+
+test('MCP prepare forwards verified off evidence and exact mandatory errors without new generation parameters',async t=>{
+  const model='omni-1.2-flash-3s-landscape',runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{},generate:()=>assert.fail('MCP preparation must not generate'),persist:()=>assert.fail('MCP preparation must not persist')};let state='missing',checks=0;
+  const actions=createAgentActions({runtime,checkIsolatedInputs:async()=>{checks++;if(state==='required')throw Object.assign(new Error('Visible watermarking is required in your region.'),{code:'VISIBLE_WATERMARK_REQUIRED'});return {ready:true,accountId:7,model,uploadedImages:0,submitted:false,cleared:true,...(state==='off'?{visibleWatermark:'off'}:{})};}});
+  const bridge=await fakeBridge(t,async(body,_req,res)=>{try{return await actions(body.method,body.params);}catch(error){res.statusCode=400;res.end(JSON.stringify({error:{code:error.code||'request_failed',message:error.message}}));}}),client=new BridgeClient({bridgePath:bridge.bridgePath,launch:async()=>assert.fail('Existing test bridge must not launch app')}),args={model,method:'text',prompt:'Unchanged prompt',accountId:7,checkBrowser:true};
+  const local=await dispatch(client,'prepare',{...args,checkBrowser:false});assert.equal(local.checks.visibleWatermark,'not_checked');assert.equal(checks,0);
+  await assert.rejects(dispatch(client,'prepare',args),{code:'VISIBLE_WATERMARK_UNVERIFIED'});state='required';await assert.rejects(dispatch(client,'prepare',args),error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.message==='Visible watermarking is required in your region.');
+  state='off';const checked=await dispatch(client,'prepare',args);assert.equal(checked.checks.visibleWatermark,'off');assert.equal(checked.browserCheck.visibleWatermark,'off');assert.equal(checked.browserCheck.submitted,false);assert.equal(Object.hasOwn(checked.generateArguments,'visibleWatermark'),false);assert.equal(Object.hasOwn(checked.generateArguments,'checkBrowser'),false);assert.equal(checks,3);assert.deepEqual(runtime.jobs,[]);
+  const before=bridge.calls.length;await assert.rejects(dispatch(client,'prepare',{...args,visibleWatermark:'off'}),{code:'INVALID_ARGUMENTS'});assert.equal(bridge.calls.length,before,'Policy evidence is output, never a client bypass parameter');
 });

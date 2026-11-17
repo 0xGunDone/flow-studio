@@ -143,43 +143,9 @@ app.whenReady().then(async()=>{
   return {...result,message:result.accountMatch?'Аккаунт подтверждён. Интерфейс прочитан; генерация не запускалась.':'Окно прочитано, аккаунт или редактор не подтверждён. Генерация не запускалась.'};
  });
  handle('inspectBrowser',inspectBrowser);
- const nativeImages=value=>{
-  if(value===undefined)return [];
-  if(!Array.isArray(value)||value.length>7)throw new Error('Поддерживается до семи изображений PNG, JPEG, WEBP или GIF.');
-  return value.map((image,index)=>{
-   if(!image||typeof image!=='object'||Array.isArray(image)||Object.keys(image).some(key=>!['dataUrl','name'].includes(key))||typeof image.name!=='string'||!image.name||image.name.length>256||path.basename(image.name)!==image.name||image.name.includes('\0')||typeof image.dataUrl!=='string'||image.dataUrl.length>28*1024*1024)throw new Error('Некорректное изображение-референс.');
-   const match=/^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image.dataUrl);
-   if(!match)throw new Error('Нужен PNG, JPEG, WEBP или GIF в формате base64.');
-   const bytes=Buffer.from(match[2],'base64');
-   if(!bytes.length||bytes.length>20*1024*1024||bytes.toString('base64')!==match[2])throw new Error('Изображение должно быть корректным base64 размером до 20 МБ.');
-   const valid=match[1]==='png'?bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])):match[1]==='jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:match[1]==='webp'?bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP':['GIF87a','GIF89a'].includes(bytes.toString('ascii',0,6));
-   if(!valid)throw new Error('Содержимое изображения не совпадает с форматом.');
-   const sha256=require('node:crypto').createHash('sha256').update(bytes).digest('hex');
-   return {bytes,originalName:image.name,name:'ref-'+sha256.slice(0,16)+'-'+index+'-'+require('node:crypto').randomUUID().slice(0,8)+'.'+(match[1]==='jpeg'?'jpg':match[1]),sha256};
-  });
- };
  const releasePrepared=async current=>{try{if(current.plan)await nativeBrowser().release(current.plan.lease,{close:false});}finally{if(current.inputFolder)await fs.rm(current.inputFolder,{recursive:true,force:true});}};
- const prepareNativeBrowser=async input=>{
-  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['accountId','model','prompt','images'].includes(k))||!Number.isSafeInteger(input.accountId)||input.accountId<=0||runtime.jobs.some(j=>j.status==='running'))throw new Error('Выберите аккаунт и завершите текущую генерацию.');
-  const images=nativeImages(input.images);
-  if(preparedBrowser){const prior=preparedBrowser;preparedBrowser=null;runtime.nativeBrowserPending=false;await releasePrepared(prior);}
-  const account=(await runtime.refreshAccounts()).find(a=>a.id===input.accountId&&a.isActive);
-  if(!account)throw new Error('Выбранный аккаунт отключён или удалён.');
-  let inputFolder,result;
-  try{
-   const staged=[];
-   if(images.length){
-    inputFolder=await fs.mkdtemp(path.join(dataDir,'native-inputs-'));await fs.chmod(inputFolder,0o700);
-    for(const image of images){const file=path.join(inputFolder,image.name);await fs.writeFile(file,image.bytes,{mode:0o600,flag:'wx'});staged.push({path:file,name:image.name,sha256:image.sha256});}
-   }
-   await handoffChrome();
-   result=await browserAction(browser=>browser.prepare({...input,images:staged,expectedEmail:account.email}));
-   if(result.readyToSubmit!==true||images.length&&(!Array.isArray(result.images)||result.images.length!==staged.length||result.images.some((image,index)=>image.path!==staged[index].path||image.name!==staged[index].name||image.sha256!==staged[index].sha256)))throw new Error('Flow не подтвердил подготовку всех вложений.');
-   const references=images.map(({originalName,sha256})=>({name:originalName,sha256}));
-   const token=require('node:crypto').randomUUID();runtime.nativeBrowserPending=true;preparedBrowser={token,plan:result,inputFolder,references,accountId:account.id,accountEmail:account.email,createdAt:Date.now()};
-   return {token,readyToSubmit:true,projectURL:result.projectURL,model:result.model,settings:result.settings,references,message:images.length?'Запрос подготовлен в Chrome. Вложений подтверждено: '+images.length+'. Кнопка генерации не нажималась.':'Текст и настройки подготовлены в Chrome. Кнопка генерации не нажималась.'};
-  }catch(error){await releasePrepared({plan:result,inputFolder});throw error;}
- };
+ const watermarkRouteUnverified=()=>{throw Object.assign(new Error('Прежний режим запуска через обычный Chrome не проверяет отключение видимого водяного знака. Используйте стандартную генерацию Flow Studio. Генерация не запускалась.'),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});};
+ const prepareNativeBrowser=async()=>watermarkRouteUnverified();
  handle('prepareNativeBrowser',input=>accountAction(()=>prepareNativeBrowser(input)));
  const cancelNativeBrowser=()=>accountAction(async()=>{
   const current=preparedBrowser;preparedBrowser=null;runtime.nativeBrowserPending=false;
@@ -187,25 +153,7 @@ app.whenReady().then(async()=>{
   return {cancelled:true};
  });
  handle('cancelNativeBrowser',cancelNativeBrowser);
- const submitNativeBrowser=input=>accountAction(async()=>{
-  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['token'].includes(k))||typeof input.token!=='string'||input.token!==preparedBrowser?.token)throw new Error('Подготовленный запрос устарел. Подготовьте его снова без генерации.');
-  const current=preparedBrowser;preparedBrowser=null;runtime.nativeBrowserPending=false;
-  try{
-   if(Date.now()-current.createdAt>10*60*1000)throw new Error('Подготовленный запрос устарел. Подготовьте его снова без генерации.');
-   const account=(await runtime.refreshAccounts()).find(a=>a.id===current.accountId&&a.isActive&&a.email?.toLowerCase()===current.accountEmail.toLowerCase());
-   if(!account)throw new Error('Исходный аккаунт изменился или отключён.');
-   if(Date.parse(account.cooldownUntil)>Date.now())throw new Error('Аккаунт на паузе после ошибки. Дождитесь окончания паузы.');
-   await handoffChrome();
-   let persisted=false;
-   const result=await browserAction(browser=>browser.submit(current.plan,{beforeSubmit:async()=>{
-    if(persisted)throw new Error('Запрос уже отправлялся.');persisted=true;
-    const record={version:1,accountId:current.accountId,model:current.plan.model,prompt:current.plan.prompt,projectURL:current.plan.projectURL,settings:current.plan.settings,references:current.references,submitStartedAt:new Date().toISOString(),outcome:'unknown'};
-    const folder=path.join(dataDir,'native-submissions');await fs.mkdir(folder,{recursive:true,mode:0o700});
-    await fs.writeFile(path.join(folder,current.token+'.json'),JSON.stringify(record),{mode:0o600,flag:'wx',flush:true});
-   }}));
-   return {...result,message:'Кнопка генерации нажата один раз. Проверяйте эту задачу в открытом проекте; повторной отправки нет.'};
-  }finally{await releasePrepared(current);}
- });
+ const submitNativeBrowser=()=>accountAction(watermarkRouteUnverified);
  handle('submitNativeBrowser',submitNativeBrowser);
  handle('getProviderSettings',()=>runtime.getProviderSettings());
  handle('saveTwoCaptchaKey',key=>accountAction(()=>runtime.saveTwoCaptchaKey(key)));
@@ -298,9 +246,7 @@ app.whenReady().then(async()=>{
   });
   if(method==='native_prepare')return accountAction(async()=>{
    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).some(key=>!['accountId','model','prompt','referencePaths'].includes(key))||!Number.isSafeInteger(params.accountId)||params.accountId<=0||typeof params.model!=='string'||!/^omni-1\.2-flash-([3-9]|1[0-5])s-(landscape|portrait)(-360p)?$/.test(params.model)||typeof params.prompt!=='string'||!params.prompt.trim()||params.prompt.length>20000||params.prompt.includes('\0')||!Array.isArray(params.referencePaths)||params.referencePaths.length>7||params.referencePaths.some(file=>typeof file!=='string'||!path.isAbsolute(file)||file.length>4096||/[\x00-\x1f\x7f]/.test(file)||!/\.(png|jpe?g|webp|gif)$/i.test(file)))throw new Error('Укажите аккаунт, точную модель Omni 1.2 Flash, описание и до семи абсолютных путей изображений в referencePaths.');
-   const images=await importMedia(params.referencePaths,{allowVideos:false});
-   if(images.some(image=>image.kind!=='image'))throw new Error('Нативная подготовка принимает только изображения.');
-   return prepareNativeBrowser({accountId:params.accountId,model:params.model,prompt:params.prompt,images:images.map(({dataUrl,name})=>({dataUrl,name}))});
+   return watermarkRouteUnverified();
   });
   if(method==='native_submit'){
    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).some(key=>!['token','confirmCreditSpend'].includes(key))||typeof params.token!=='string'||!params.token||params.token.length>128||params.confirmCreditSpend!==true)throw new Error('Для отправки подготовленного запроса нужны token и confirmCreditSpend:true.');

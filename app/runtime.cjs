@@ -521,6 +521,7 @@ class Runtime {
       const existing=this.jobs.find(j=>j.requestId===input.requestId);
       if(existing){if(existing.requestHash!==requestHash)throw new Error('requestId уже использован с другими параметрами.');return {jobId:existing.id};}
     }
+    if(info.kind!=='image'&&!browserEngine)throw Object.assign(new Error('Для выбранного серверного видеорежима нельзя проверить отключение видимого водяного знака Google Flow. Генерация не запускалась.'),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});
     if(this.accountActionPending||this.accountCheckTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
     const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',generationEngine:browserEngine?'isolated-browser':'server',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{}),...(accountId?{accountId}:{}),...(retryOf?{retryOf,accountEmail}:{})};

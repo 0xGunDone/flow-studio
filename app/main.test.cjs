@@ -283,8 +283,8 @@ test('native browser access needs native confirmation and inspection pins active
 });
 
 
-test('native submit rejects unknown preparation token before any browser or generation work',async()=>{
+test('native submit rejects the unverified watermark route before any browser or generation work',async()=>{
  const h=await launch(),event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
- await assert.rejects(h.handlers.get('studio:submitNativeBrowser')(event,{token:'not-issued'}),/устарел/);
+ await assert.rejects(h.handlers.get('studio:submitNativeBrowser')(event,{token:'not-issued'}),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});assert.deepEqual(h.events,[]);assert.deepEqual(h.runtime.jobs,[]);assert.equal(h.runtime.nativeBrowserPending===true,false);
  assert.throws(()=>h.handlers.get('studio:submitNativeBrowser')({sender:{},senderFrame:event.senderFrame},{token:'not-issued'}),/Недопустимый источник/);
 });
