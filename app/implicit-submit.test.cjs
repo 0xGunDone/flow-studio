@@ -11,7 +11,8 @@ async function composer(){
  function node(id){
   if(nodes.has(id))return nodes.get(id);
   const listeners=new Map();
-  const element={id,value:'',disabled:false,valid:true,classList:{toggle(){}},addEventListener(type,fn){listeners.set(type,[...(listeners.get(type)||[]),fn]);},reportValidity(){return this.valid;},
+  const attributes=new Map();
+  const element={id,value:'',disabled:false,valid:true,classList:{toggle(){}},setAttribute(name,value){attributes.set(name,String(value));},removeAttribute(name){attributes.delete(name);},addEventListener(type,fn){listeners.set(type,[...(listeners.get(type)||[]),fn]);},reportValidity(){return this.valid;},
    async dispatch(type,details={}){const event={target:this,currentTarget:this,defaultPrevented:false,preventDefault(){this.defaultPrevented=true;},...details};for(const fn of listeners.get(type)||[])await fn(event);return event;},
    async click(){if(this.disabled)return;const event=await this.dispatch('click');if(this.type==='submit'&&!event.defaultPrevented)await node('generation-form').requestSubmit(this);},
    requestSubmit(submitter){return this.reportValidity()?this.dispatch('submit',{submitter}):Promise.resolve();}};

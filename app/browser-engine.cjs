@@ -12,6 +12,10 @@ const agentEditDefault=require('./browser-agent-edit.cjs');
 const MODEL=/^omni-1\.2-flash-(i2v-)?([3-9]|1[0-5])s-(landscape|portrait)(-360p)?$/;
 const EDIT=/^omni-1\.2-flash-edit-(landscape|portrait)(-360p)?$/;
 const fail=(code,message)=>Object.assign(new Error(message),{code});
+function watermarkCapability({checked,disabled,mandatory}){
+ if(mandatory||(checked===true&&disabled))return 'required';
+ return typeof checked==='boolean'?'optional':'unknown';
+}
 const samePrompt=(a,b)=>a.replace(/\r\n/g,'\n').replace(/\n+/g,'\n')===b.replace(/\r\n/g,'\n').replace(/\n+/g,'\n');
 const exactHistoryPrompt=(actual,expected)=>typeof actual==='string'&&typeof expected==='string'&&samePrompt(actual.trim(),expected.trim());
 async function abortable(work,signal){signal?.throwIfAborted();const running=Promise.resolve().then(()=>{signal?.throwIfAborted();return work();});if(!signal)return running;let onAbort;const cancelled=new Promise((_,reject)=>{onAbort=()=>reject(signal.reason||fail('CANCELLED','Действие отменено.'));signal.addEventListener('abort',onAbort,{once:true});});try{return await Promise.race([running,cancelled]);}finally{signal.removeEventListener('abort',onAbort);}}
@@ -99,6 +103,9 @@ function flowDOM(op,arg={}){
   let xs=all(role,root).filter(el=>label(el)===name);if(role==='textbox'&&name==='Что вы хотите создать?'){const main=xs.filter(el=>!el.closest?.('flow-agent-panel'));if(main.length)xs=main;}if(xs.length!==1)error(xs.length?'CONTROL_AMBIGUOUS':'CONTROL_NOT_FOUND','Не удалось однозначно найти '+name);return xs[0];
  };
  const click=el=>{if(el.disabled||el.getAttribute('aria-disabled')==='true')error('CONTROL_DISABLED','Элемент пока недоступен.');el.click();};
+ if ((op === 'state' || op === 'project') && [...document.querySelectorAll('app-onboarding-dialog')].some(visible)) {
+  error('FLOW_ONBOARDING_REQUIRED', 'Google Flow просит завершить первоначальную настройку аккаунта. Откройте окно Flow Studio для этого аккаунта и пройдите шаги Google.');
+ }
  if(op==='product-announcement'){
   const dialogs=[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible),matches=dialogs.filter(dialog=>[...dialog.querySelectorAll('h1,h2,h3,[role="heading"]')].some(heading=>text(heading)==='Introducing Omni 1.2!'));
   if(!matches.length)return false;
@@ -110,7 +117,17 @@ function flowDOM(op,arg={}){
  const point=el=>{if(el.disabled||el.getAttribute('aria-disabled')==='true')error('CONTROL_DISABLED','Элемент пока недоступен.');const r=el.getBoundingClientRect();if(r.width<=0||r.height<=0)error('CONTROL_HIDDEN','Элемент недоступен в окне Flow.');const x=r.left+r.width/2,y=r.top+r.height/2;const hit=document.elementFromPoint(x,y);if(!hit||!(hit===el||el.contains(hit)))error('CONTROL_OBSCURED','Кнопку Flow перекрывает другой элемент.');return {x,y};};
  const prompt=()=>{const edit=all('textbox').filter(el=>['Describe how to edit this video…','Опишите, как изменить это видео…','Describe how to edit this video...'].includes(el.getAttribute('aria-label')));return edit.length===1?edit[0]:one('textbox','Что вы хотите создать?');};
  const promptValue=()=>{const value=prompt().innerText;return /^[\r\n]*$/.test(value)?'':value;};
- const chips=()=>all('button').filter(el=>label(el)==='Ингредиент').map(el=>{const images=[...el.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];if(images.length!==1)error('INGREDIENT_NOT_VERIFIED','Не удалось прочитать изображение ингредиента.');const u=new URL(images[0].currentSrc||images[0].src);if(u.origin!=='https://flow-content.google'||!/^\/image\/[A-Za-z0-9_-]{1,256}$/.test(u.pathname))error('INGREDIENT_NOT_VERIFIED','Не удалось проверить ресурс ингредиента.');return u.origin+u.pathname;});
+ const frameImageAddress=value=>typeof value==='string'&&!/[\r\n]/.test(value)&&/^https:\/\/flow\.google\.com\/asb\/[A-Za-z0-9_=\-]{1,4096}$/.test(value)?value:null;
+ const chips=()=>all('button').filter(el=>label(el)==='Ингредиент').map(el=>{
+  const images=[...el.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];
+  if(images.length!==1)error('INGREDIENT_NOT_VERIFIED','Не удалось прочитать изображение ингредиента.');
+  const source=images[0].currentSrc||images[0].src;
+  const frameAddress=el.closest?.('.frame-trigger')?frameImageAddress(source):null;
+  if(frameAddress)return frameAddress;
+  const u=new URL(source);
+  if(u.origin!=='https://flow-content.google'||u.username||u.password||!/^\/image\/[A-Za-z0-9_-]{1,256}$/.test(u.pathname))error('INGREDIENT_NOT_VERIFIED','Не удалось проверить ресурс ингредиента.');
+  return u.origin+u.pathname;
+ });
  const blocked=[...document.querySelectorAll('[role="dialog"]')].filter(visible).some(el=>/подтвердите|verify|captcha|войти|sign in|consent/i.test(label(el)));
  if(blocked||document.querySelector('input[type="password"]'))error('FLOW_VERIFICATION_REQUIRED','Подтвердите вход или проверку Google в окне входа Flow Studio.');
  const uploadRights=()=>{const dialogs=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')].filter(visible).filter(el=>all('button',el).some(button=>['I agree','Я согласен','Принимаю'].includes(label(button))));if(dialogs.length!==1)return null;const dialog=dialogs[0];const value=text(dialog);if(value.length>8192||!/Rights to use this (?:image|video)|Права на использование (?:этого )?(?:изображения|видео)/i.test(value))return null;return {dialog,text:value};};
@@ -224,15 +241,12 @@ function flowDOM(op,arg={}){
   const hosts=[...panel.querySelectorAll('flow-watermark-toggle')].filter(visible);
   if(hosts.length!==1)error('VISIBLE_WATERMARK_UNVERIFIED','Google не показал единственную настройку Visible watermarking. Генерация не запускалась.');
   const host=hosts[0],switches=[...host.querySelectorAll('button[role="switch"][aria-label="Visible watermarking"]')].filter(visible);
-  if(switches.length!==1)error('VISIBLE_WATERMARK_UNVERIFIED','Переключатель видимого водяного знака не подтверждён. Генерация не запускалась.');
-  const control=switches[0],state=control.getAttribute('aria-checked');
-  if(!['true','false'].includes(state))error('VISIBLE_WATERMARK_UNVERIFIED','Google не подтвердил состояние видимого водяного знака. Генерация не запускалась.');
-  const checked=state==='true',disabled=control.disabled===true||control.getAttribute('aria-disabled')==='true',mandatory=[...host.querySelectorAll('.watermark-forced-reason')].filter(visible).some(node=>/Visible watermarking is required in your region/.test(text(node)));
-  if(arg.disable&&checked){
-   if(mandatory)error('VISIBLE_WATERMARK_REQUIRED','Google требует видимый водяной знак для этого аккаунта: Visible watermarking is required in your region. Генерация остановлена до расхода кредитов.');
-   if(disabled)error('VISIBLE_WATERMARK_UNVERIFIED','Google заблокировал включённый Visible watermarking. Генерация остановлена до расхода кредитов.');
-   click(control);
-  }
+  const mandatory=[...host.querySelectorAll('.watermark-forced-reason')].filter(visible).some(node=>/Visible watermarking is required in your region/.test(text(node)));
+  const control=switches.length===1?switches[0]:null,state=control?.getAttribute('aria-checked');
+  const checked=state==='true'?true:state==='false'?false:null;
+  if(checked===null&&!mandatory)error('VISIBLE_WATERMARK_UNVERIFIED','Google не подтвердил состояние видимого водяного знака. Генерация не запускалась.');
+  const disabled=control?.disabled===true||control?.getAttribute('aria-disabled')==='true';
+  if(typeof arg.setChecked==='boolean'&&checked!==null&&checked!==arg.setChecked&&!disabled&&!mandatory)click(control);
   return {checked,disabled,mandatory};
  }
  if(op==='project'){
@@ -274,8 +288,18 @@ function flowDOM(op,arg={}){
   const xs=[...new Set([...all('option'),...all('button')])].filter(el=>!el.closest?.('flow-navigation-rail,flow-navigation-rail-thumbnail')).filter(el=>[arg.name,arg.name+' Изображение',arg.name+' Image'].includes(label(el).replace(/\s+/g,' ')));
   if(xs.length>1)error('INGREDIENT_AMBIGUOUS','Повтор имени загруженного изображения.');
   if(arg.select&&xs.length===1)click(xs[0]);
-  const preview=[...document.querySelectorAll('img')].find(el=>visible(el)&&['Предпросмотр ресурса "'+arg.name+'"','Asset preview "'+arg.name+'"','Preview of '+arg.name].includes(el.alt));
-  return {exists:xs.length===1,preview:preview?(preview.currentSrc||preview.src):null,ingredients:chips()};
+  const previews=[...document.querySelectorAll('img')].filter(el=>visible(el)&&['Предпросмотр ресурса "'+arg.name+'"','Asset preview "'+arg.name+'"','Preview of '+arg.name].includes(el.alt));
+  if(previews.length>1)error('INGREDIENT_AMBIGUOUS','Найдено несколько предпросмотров загруженного изображения.');
+  const preview=previews[0];
+  const previewURL=preview?.complete&&preview.naturalWidth>0?(preview.currentSrc||preview.src):null;
+  const pane=preview?.closest?.('flow-add-menu-detail-pane'),picker=pane?.closest?.('flow-add-menu-popover-content');
+  const framePreview=picker&&xs[0]?.closest?.('flow-add-menu-popover-content')===picker&&xs[0].getAttribute('aria-selected')==='true'?frameImageAddress(previewURL):null;
+  if(arg.addFrame){
+   if(!framePreview||framePreview!==arg.framePreview)error('INGREDIENT_NOT_VERIFIED','Предпросмотр выбранного кадра изменился до добавления.');
+   click(one('button','Добавить в запрос',pane));
+   return true;
+  }
+  return {exists:xs.length===1,preview:previewURL,framePreview,ingredients:chips()};
  }
  if(op==='baseline')return all('group').map(el=>{const poster=el.querySelector('img')?.getAttribute('src')||'';if(el.querySelector('flow-pending-tile')&&!poster)error('FLOW_EXISTING_GENERATION','В проекте уже есть незавершённая генерация. Дождитесь результата перед новым запуском.');el.setAttribute('data-flow-studio-baseline',arg.job);return {name:label(el),poster};});
  if(op==='bind-result'){
@@ -387,7 +411,8 @@ function flowDOM(op,arg={}){
     sourcesReady=sourcesReady&&button.getAttribute('aria-busy')==='false'&&Boolean(videos.length||previews.length)&&(!videos.length||Boolean(video))&&(!previews.length||Boolean(preview));
    }else{
     const images=[...button.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];
-    ingredients.push(images.length===1?canonical(images[0].currentSrc||images[0].src,'image'):null);
+    const source=images.length===1?images[0].currentSrc||images[0].src:null;
+    ingredients.push(canonical(source,'image')||(entry.tagName==='FLOW-EDITOR-HISTORY-STEP-VIDEO'?frameImageAddress(source):null));
    }
   }
   return {ingredients,sourceVideos,sourcePreviews,ingredientsReady:ingredients.every(Boolean)&&sourcesReady};
@@ -533,31 +558,52 @@ class FlowPage{
   if(actual!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Окно Flow открыто под другим аккаунтом.');
   await this.click('Закрыть панель аккаунта');await this.until(async()=>!(await this.run('account')));
  }
- async requireNoVisibleWatermark(email){
+ async visibleWatermark(email,mode){
   const initialURL=(await this.run('state')).url;
   if(/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+\/edit\/[a-f0-9-]{36}$/i.test(initialURL)){
-   await this.verifyAccount(email);
-   if(typeof this.client.withVerificationPage!=='function')throw fail('VISIBLE_WATERMARK_UNVERIFIED','Проверка видимого водяного знака редактора недоступна. Генерация не запускалась.');
-   await this.client.withVerificationPage(async client=>{const page=new FlowPage(client,this.requestSignal,{pollMs:this.pollMs,leaseSignal:this.signal});await page.ready();await page.requireNoVisibleWatermark(email);});
+   if(mode)await this.verifyAccount(email);
+   if(typeof this.client.withVerificationPage!=='function')throw fail('VISIBLE_WATERMARK_UNVERIFIED','Проверка видимого водяного знака редактора недоступна.');
+   const state=await this.client.withVerificationPage(async client=>{const page=new FlowPage(client,this.requestSignal,{pollMs:this.pollMs,leaseSignal:this.signal});await page.ready();return page.visibleWatermark(email,mode);});
    if((await this.run('state')).url!==initialURL)throw fail('VISIBLE_WATERMARK_UNVERIFIED','Редактор изменился во время проверки водяного знака. Генерация не запускалась.');
-   return {checked:false};
+   return state;
   }
-  let announcementDismissed=false;
-  await this.until(async()=>{if(await this.run('exists',{name:'Сведения об аккаунте'}))return true;if(!announcementDismissed&&await this.dismissProductAnnouncement())announcementDismissed=true;return false;},15000,'watermark-account-button');
-  let opened=false;
-  try{
+  const target=mode==='with',label=target?'On':'Off';
+  let opened=false,announcementDismissed=false,originalError;
+  const open=async stage=>{
    await this.click('Сведения об аккаунте');opened=true;
-   const actual=await this.until(()=>this.run('account'),15000,'watermark-account');
+   const actual=await this.until(()=>this.run('account'),15000,stage);
    if(actual!==email.toLowerCase())throw fail('ACCOUNT_MISMATCH','Настройки водяного знака открыты под другим Google-аккаунтом.');
-   let state=await this.run('visible-watermark',{email});
-   if(state.checked){await this.run('visible-watermark',{email,disable:true});await this.until(async()=>!(await this.run('visible-watermark',{email})).checked,15000,'visible-watermark-off');}
+  };
+  const close=async()=>{
    await this.click('Закрыть панель аккаунта');opened=false;await this.until(async()=>!await this.run('account'));
-   await this.click('Сведения об аккаунте');opened=true;await this.until(()=>this.run('account'),15000,'watermark-reopen');
-   state=await this.run('visible-watermark',{email});
-   if(state.checked)throw fail('VISIBLE_WATERMARK_UNVERIFIED','Visible watermarking не сохранился выключенным. Генерация остановлена до расхода кредитов.');
-   return {checked:false};
-  }catch(error){if(error.code==='FLOW_UI_TIMEOUT')throw fail('VISIBLE_WATERMARK_UNVERIFIED','Google не подтвердил отключение видимого водяного знака. Генерация остановлена до расхода кредитов.');throw error;}finally{
-   if(opened){await this.click('Закрыть панель аккаунта');await this.until(async()=>!await this.run('account'));}
+  };
+  const read=async setChecked=>{
+   const state=await this.run('visible-watermark',{email,setChecked});
+   const capability=watermarkCapability(state);
+   if(mode==='without'&&capability==='required')throw fail('VISIBLE_WATERMARK_REQUIRED',state.mandatory?'Google требует видимый водяной знак для этого аккаунта: Visible watermarking is required in your region. Генерация остановлена до расхода кредитов.':'Google заблокировал включённый Visible watermarking для этого аккаунта. Генерация остановлена до расхода кредитов.');
+   if(mode&&state.checked!==target&&(state.disabled||state.mandatory))throw Object.assign(fail('VISIBLE_WATERMARK_UNVERIFIED','Google не подтвердил Visible watermarking: '+label+'. Генерация остановлена до расхода кредитов.'),{visibleWatermarkCapability:capability});
+   return state;
+  };
+  try{
+   await this.until(async()=>{if(await this.run('exists',{name:'Сведения об аккаунте'}))return true;if(mode&&!announcementDismissed&&await this.dismissProductAnnouncement())announcementDismissed=true;return false;},15000,'watermark-account-button');
+   await open('watermark-account');
+   let state=await read();
+   if(!mode)return state;
+   if(state.checked!==target){
+    await read(target);
+    await this.until(async()=>(await read()).checked===target,15000,'visible-watermark-state');
+   }
+   await close();
+   await open('watermark-reopen');
+   state=await read();
+   if(state.checked!==target)throw fail('VISIBLE_WATERMARK_UNVERIFIED','Flow не сохранил настройку Visible watermarking: '+label+'. Генерация остановлена до расхода кредитов.');
+   return state;
+  }catch(error){
+   originalError=error;
+   if(error.code==='FLOW_UI_TIMEOUT')throw fail('VISIBLE_WATERMARK_UNVERIFIED',mode?'Google не подтвердил Visible watermarking: '+label+'. Генерация остановлена до расхода кредитов.':'Не удалось прочитать настройку Visible watermarking.');
+   throw error;
+  }finally{
+   if(opened&&!this.signal?.aborted){try{await close();}catch(error){if(!originalError)throw error;}}
   }
  }
  async project(email){await this.ready();await this.dismissProductAnnouncement();await this.verifyAccount(email);if(!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url)){await this.until(async()=>(await this.run('state')).projectLinks.length>0,20000,'project-links');await this.run('project');await this.until(async()=>/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test((await this.run('state')).url),20000,'project-navigation');}await this.dismissProductAnnouncement();await this.verifyAccount(email);await this.run('close-empty-agent-panel');const mode=await this.until(async()=>{try{return await this.run('composer-mode');}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},20000,'composer-ready');if(mode.agent){await this.run('close-agent');await this.until(async()=>{try{return !(await this.run('composer-mode')).agent;}catch(e){if(e.code==='CONTROL_NOT_FOUND')return false;throw e;}},15000,'generation-composer');}if((await this.run('composer-mode')).creative){await this.run('manual-mode');await this.until(async()=>!(await this.run('composer-mode')).creative,15000,'manual-composer');}return (await this.run('state')).url;}
@@ -633,12 +679,27 @@ class FlowPage{
    await this.run('accept-upload-rights',{text:rights.text});await this.until(async()=>!(await this.run('upload-rights-pending')),10000,'upload-rights-close');await waitForAsset();
   }
   await this.run('asset',{name:file.name,select:true});
-  const selected=await this.until(async()=>{const a=await this.run('asset',{name:file.name});return a.preview||a.ingredients.length===expected.length+1?a:null;},15000,'asset-selection');
-  let identity=mediaIdentity(selected.preview);
-  if(selected.ingredients.length===expected.length){if(!identity)throw fail('INGREDIENT_NOT_VERIFIED','Не удалось проверить ресурс загруженного изображения.');await this.click('Добавить в запрос');}
+  let selected;
+  try{
+   selected=await this.until(async()=>{
+    const asset=await this.run('asset',{name:file.name});
+    const identity=mediaIdentity(asset.preview);
+    if(asset.ingredients.length===expected.length+1)return {identity};
+    if(!asset.exists||asset.ingredients.length!==expected.length)return null;
+    if(identity)return {identity,addToPrompt:true};
+    return frameRole&&asset.framePreview?{framePreview:asset.framePreview}:null;
+   },15000,'asset-preview');
+  }catch(error){
+   if(error.code!=='FLOW_UI_TIMEOUT')throw error;
+   throw fail('INGREDIENT_NOT_VERIFIED','Flow не показал подтверждённый предпросмотр загруженного изображения. Генерация не запускалась.');
+  }
+  if(selected.framePreview)await this.run('asset',{name:file.name,addFrame:true,framePreview:selected.framePreview});
+  if(selected.addToPrompt)await this.click('Добавить в запрос');
   const composer=await this.until(async()=>{const c=await this.run('composer');return c.ingredients.length===expected.length+1?c:null;},15000,'ingredient-chip');
   if(JSON.stringify(composer.ingredients.slice(0,-1))!==JSON.stringify(expected))throw fail('INGREDIENT_CHANGED','Предыдущие ингредиенты изменились.');
-  identity=frameRole?composer.ingredients.at(-1):identity||composer.ingredients.at(-1);if(!mediaIdentity(identity)||composer.ingredients.at(-1)!==identity)throw fail('INGREDIENT_CHANGED','Вложенный ресурс не совпадает с выбранным файлом.');
+  const attached=composer.ingredients.at(-1),identity=frameRole?attached:selected.identity||attached;
+  const verified=selected.framePreview?identity===selected.framePreview:mediaIdentity(identity)===identity;
+  if(!identity||attached!==identity||!verified)throw fail('INGREDIENT_CHANGED','Вложенный ресурс не совпадает с выбранным файлом.');
   return Object.freeze([...expected,identity]);
  }
 }
@@ -646,11 +707,29 @@ class FlowPage{
 function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bindingTimeoutMs=60000,inspectVideo,agentEdit=agentEditDefault,observationRefreshMs=30000}){
  if(!accounts?.acquireIsolatedGenerationBrowser||!path.isAbsolute(dataDir||''))throw new TypeError('Managed accounts and absolute dataDir required.');
  const prepared=new WeakSet(),used=new WeakSet(),receipts=createReceiptStore(dataDir);
+ const watermarkDetails=(lease,visibleWatermarkCapability)=>({accountId:lease.accountId,accountEmail:lease.email,visibleWatermarkCapability});
+ async function verifyVideoWatermark(page,lease,mode,onWatermarkCapability){
+  let state;
+  try{state=await page.visibleWatermark(lease.email,mode);}
+  catch(error){
+   if(error.code==='VISIBLE_WATERMARK_REQUIRED')await onWatermarkCapability?.(watermarkDetails(lease,'required'));
+   else if(error.code==='VISIBLE_WATERMARK_UNVERIFIED')await onWatermarkCapability?.(watermarkDetails(lease,error.visibleWatermarkCapability||'unknown'));
+   throw error;
+  }
+  await onWatermarkCapability?.(watermarkDetails(lease,watermarkCapability(state)));
+  return state.checked?'on':'off';
+ }
+ async function inspectCapability(page,email){
+  try{return watermarkCapability(await page.visibleWatermark(email));}
+  catch(error){if(error.code==='VISIBLE_WATERMARK_UNVERIFIED')return 'unknown';throw error;}
+ }
  async function diagnose(page,jobId,error){try{const folder=path.join(dataDir,'browser-diagnostics');await fs.mkdir(folder,{recursive:true,mode:0o700});const detail={at:new Date().toISOString(),code:error.code,message:error.message,state:await page.run('failure-state')};await fs.writeFile(path.join(folder,jobId+'.json'),JSON.stringify(detail,null,2),{mode:0o600});const shot=await page.client.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});if(shot.data)await fs.writeFile(path.join(folder,jobId+'.png'),Buffer.from(shot.data,'base64'),{mode:0o600});}catch{}}
  async function waitForSourceScene(page,expected,projectURL){return page.until(async()=>{try{return await page.run('source-scene',{sourceScene:expected,projectURL,loading:true});}catch(error){if(error.code==='SOURCE_VIDEO_NOT_READY')return false;throw error;}},30000,'source-video-scene');}
- async function prepare(input,{signal,onProgress=()=>{}}={}){
+ async function prepare(input,{signal,onProgress=()=>{},onWatermarkCapability}={}){
   const plan=planFor(input);
   if(!Number.isSafeInteger(input.accountId)||input.accountId<=0||typeof input.accountEmail!=='string')throw fail('ACCOUNT_REQUIRED','Выберите подключённый аккаунт для фоновой генерации.');
+  const videoWatermark=plan.kind==='image'?undefined:input.videoWatermark===undefined?'with':input.videoWatermark;
+  if(plan.kind!=='image'&&!['with','without'].includes(videoWatermark))throw fail('INVALID_ARGUMENTS','Для водяного знака видео выберите with или without.');
   const decoded=plan.refs.map(ref=>decodeImage(ref.dataUrl));
   let videoMetadata;
   if(plan.video){if(typeof inspectVideo!=='function')throw fail('VIDEO_METADATA_UNAVAILABLE','Обновите локальный движок проверки видео.');videoMetadata=await inspectVideo({path:plan.video.path,signal});if(!Number.isFinite(videoMetadata?.durationSeconds)||videoMetadata.durationSeconds<=0||videoMetadata.durationSeconds>15.02||!['video/mp4','video/quicktime','video/x-m4v'].includes(videoMetadata.mimeType))throw fail('VIDEO_METADATA_INVALID','Не удалось подтвердить исходное видео длительностью до 15 секунд.');const expected=plan.resolution==='360p'?(plan.aspect==='9:16'?[360,640]:[640,360]):plan.aspect==='9:16'?[720,1280]:[1280,720];if(videoMetadata.width!==expected[0]||videoMetadata.height!==expected[1])throw fail('MODEL_SETTINGS_NOT_VERIFIED','Для выбранного режима редактирования исходное видео должно иметь формат '+expected[0]+'×'+expected[1]+'. Измените выбранную модель или подготовьте исходник нужного размера.');}
@@ -658,7 +737,8 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   try{
    if(lease.email.toLowerCase()!==input.accountEmail.toLowerCase())throw fail('ACCOUNT_MISMATCH','Аккаунт изменился до начала генерации.');
    page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal,confirmUploadRights:typeof confirmUploadRights==='function'?details=>confirmUploadRights({...details,accountId:lease.accountId,accountEmail:lease.email}):undefined});onProgress('Подключаем фоновый браузер…');const projectURL=await page.project(lease.email);
-   if(plan.kind!=='image'){onProgress('Проверяем отключение видимого водяного знака…');await page.requireNoVisibleWatermark(lease.email);}
+   let visibleWatermark;
+   if(videoWatermark){onProgress('Проверяем настройку видимого водяного знака…');visibleWatermark=await verifyVideoWatermark(page,lease,videoWatermark,onWatermarkCapability);}
    if(plan.video&&plan.resolution==='360p'&&agentEdit){const preferences={method:'ingredients',seconds:Math.max(3,Math.min(15,Math.round(videoMetadata.durationSeconds))),aspect:plan.aspect,resolution:'360p'};await page.settings(preferences);await page.verifySettings(preferences);}
    if(plan.video){
     folder=await fs.mkdtemp(path.join(dataDir,'browser-inputs-'));await fs.chmod(folder,0o700);
@@ -683,18 +763,18 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
     imageAssetNames.push(name);await fs.writeFile(file,image.bytes,{flag:'wx',mode:0o600});onProgress('Прикрепляем изображение '+(i+1)+' из '+plan.refs.length+'…');ingredients=await page.upload({path:file,name},ingredients,plan.method==='frames'?(i===0?'Старт':'Конец'):undefined);
    }
    await page.verifySettings(plan);await page.verifyAccount(lease.email);const c=await page.run('composer');if(!samePrompt(c.prompt,plan.prompt)||JSON.stringify(c.ingredients)!==JSON.stringify(ingredients))throw fail('PREPARED_INPUT_CHANGED','Flow изменил подготовленный запрос.');
-   const result=Object.freeze({lease,page,plan,ingredients,projectURL,folder,jobId:input.jobId,...(sourceScene?{sourceScene,sourceAssetName,imageAssetNames}:{})});prepared.add(result);return result;
+   const result=Object.freeze({lease,page,plan,ingredients,projectURL,folder,jobId:input.jobId,...(visibleWatermark?{videoWatermark,visibleWatermark}:{}),...(sourceScene?{sourceScene,sourceAssetName,imageAssetNames}:{})});prepared.add(result);return result;
   }catch(error){if(page&&!page.signal?.aborted)await diagnose(page,input.jobId||'preparation',error);if(ownedDraft&&!signal?.aborted)await clearOwned(page,plan.prompt,ingredients).catch(()=>{});try{if(folder)await fs.rm(folder,{recursive:true,force:true});}finally{await accounts.releaseIsolatedGenerationBrowser(lease).catch(()=>{});}throw error;}
  }
  async function clearOwned(page,prompt,ingredients){if(!await page.run('clear-owned',{prompt,ingredients}))return false;await page.until(async()=>{const c=await page.run('composer');return samePrompt(c.prompt,prompt)&&c.ingredients.length===0;},15000,'clear-owned-ingredients');await page.fillPrompt('');try{await page.until(async()=>{const c=await page.run('composer');return c.prompt===''&&c.ingredients.length===0;},15000,'clear-owned');}catch(error){try{const c=await page.run('composer');error.message+=' '+JSON.stringify({promptLength:c.prompt.length,ingredientCount:c.ingredients.length});}catch{}throw error;}return true;}
  async function release(result){try{await accounts.releaseIsolatedGenerationBrowser(result.lease);}finally{if(result.folder)await fs.rm(result.folder,{recursive:true,force:true});}}
- async function submit(result,{signal,beforeSubmit,onProgress=()=>{}}={}){
+ async function submit(result,{signal,beforeSubmit,onProgress=()=>{},onWatermarkCapability}={}){
   if(!prepared.has(result)||used.has(result)||typeof beforeSubmit!=='function')throw fail('PREPARATION_REQUIRED','Нужна неиспользованная подготовка запроса.');used.add(result);
   const {page,plan,ingredients,lease}=result,job=result.jobId||crypto.randomUUID();let clicked=false;
   if(signal!==page.requestSignal)throw fail('PREPARATION_SIGNAL_CHANGED','Подготовка и отправка должны принадлежать одной задаче.');
-  if(result.sourceScene&&agentEdit)return submitAgentEdit(result,{signal,beforeSubmit,onProgress});
+  if(result.sourceScene&&agentEdit)return submitAgentEdit(result,{signal,beforeSubmit,onProgress,onWatermarkCapability});
   try{
-   if(plan.kind!=='image')await page.requireNoVisibleWatermark(lease.email);else await page.verifyAccount(lease.email);await page.verifySettings(plan);const baseline=result.sourceScene?[]:await page.run('baseline',{job});
+   if(result.videoWatermark)await verifyVideoWatermark(page,lease,result.videoWatermark,onWatermarkCapability);else await page.verifyAccount(lease.email);await page.verifySettings(plan);const baseline=result.sourceScene?[]:await page.run('baseline',{job});
    const c=await page.run('composer');if(!samePrompt(c.prompt,plan.prompt)||JSON.stringify(c.ingredients)!==JSON.stringify(ingredients))throw fail('PREPARED_INPUT_CHANGED','Подготовленный запрос изменился.');
    if(result.sourceScene)await waitForSourceScene(page,result.sourceScene);
    signal?.throwIfAborted();await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL:result.projectURL,ingredients:[...ingredients],baseline,createdAt:new Date().toISOString(),...(result.sourceScene?{sourceScene:result.sourceScene}:{}),...(result.sourceVideo?{sourceVideo:result.sourceVideo,sourceVideoDuration:result.sourceVideoDuration}:{})});await beforeSubmit();signal?.throwIfAborted();
@@ -710,7 +790,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    return await collectResult({page,plan,ingredients,lease,job,projectURL:result.projectURL,onProgress,sourceVideo:result.sourceVideo,sourceScene:result.sourceScene});
   }catch(error){if(!clicked&&!signal?.aborted)await clearOwned(page,plan.prompt,ingredients).catch(()=>{});if(!page.signal?.aborted)await diagnose(page,job,error);error.unknownOutcome=clicked&&!error.generationTerminal;throw error;}
  }
- async function submitAgentEdit(result,{signal,beforeSubmit,onProgress}){
+ async function submitAgentEdit(result,{signal,beforeSubmit,onProgress,onWatermarkCapability}){
   const {page,plan,ingredients,lease,sourceScene,projectURL}=result,job=result.jobId||crypto.randomUUID();let approved=false;const selectionNonces=[];
   const resourceId=value=>{const match=/\/image\/([A-Za-z0-9_-]{1,256})$/.exec(value||'');if(!match)throw fail('SOURCE_VIDEO_NOT_VERIFIED','Не удалось прочитать ресурс исходника Agent.');return match[1];};
   try{
@@ -727,7 +807,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    const seconds=Math.ceil(sourceScene.durationSeconds),rate=plan.resolution==='360p'?1:3,maxCredits=rate*(Math.min(seconds,10)+Math.max(0,seconds-10)*2);
    const expected={projectURL,prompt:plan.prompt,sourceImageResourceId,ingredientImageResourceIds,maxCredits};
    onProgress('Готовим редактирование через Flow Agent…');const verifySettings=()=>agentEdit.verifyAgentEditSettings(page,plan),binding=await agentEdit.prepareAgentProposal(page,expected,{verifySettings});
-   await agentEdit.approveAgentEdit(page,binding,{verifySettings,beforeSubmit:async()=>{await page.requireNoVisibleWatermark(lease.email);await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL,ingredients:[...ingredients],baseline:[],createdAt:new Date().toISOString(),sourceScene,agentProposal:{quoteCredits:binding.quoteCredits,videoCount:1,sourcePreview:binding.source.origin+binding.source.path,approvalText:binding.permissionTitle}});await beforeSubmit();}});approved=true;
+   await agentEdit.approveAgentEdit(page,binding,{verifySettings,beforeSubmit:async()=>{await verifyVideoWatermark(page,lease,result.videoWatermark,onWatermarkCapability);await receipts.write(job,{model:plan.model,prompt:plan.prompt,accountId:lease.accountId,accountEmail:lease.email,projectURL,ingredients:[...ingredients],baseline:[],createdAt:new Date().toISOString(),sourceScene,agentProposal:{quoteCredits:binding.quoteCredits,videoCount:1,sourcePreview:binding.source.origin+binding.source.path,approvalText:binding.permissionTitle}});await beforeSubmit();}});approved=true;
    onProgress('Редактирование отправлено в Flow Agent. Ожидаем видео…');await page.client.send('Page.navigate',{url:sourceScene.url});
    await page.until(async()=>(await page.run('state')).url===sourceScene.url,30000,'agent-output-scene');
    return await observeAgentScene({page,plan,ingredients,lease,projectURL,sourceScene,sourcePreview:binding.source.origin+binding.source.path,onProgress,waitForResult:true});
@@ -800,8 +880,27 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
   }
   if(observationError){options.onProgress?.('Восстанавливаем наблюдение за отправленной задачей. Новая генерация не запускается…');return recover(input.jobId,{signal:options.signal,onProgress:options.onProgress,expected:{accountId:input.accountId,accountEmail:input.accountEmail,model:input.model,prompt:input.prompt},waitForResult:true});}
  }
- async function inspect(accountId,{signal,email}={}){const lease=await accounts.acquireIsolatedGenerationBrowser(accountId,{signal});const page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal});try{const projectURL=await page.project(email||lease.email);await page.click('Триггер настроек');let controls;try{controls=await page.until(async()=>{const c=await page.run('controls');return c.radios.length?c:null;},15000,'settings-inspection');}finally{await page.click('Триггер настроек').catch(()=>{});}return {ready:true,accountId:lease.accountId,accountEmail:lease.email,projectURL,engine:'isolated-browser',usesDesktopFocus:false,controls};}finally{await accounts.releaseIsolatedGenerationBrowser(lease);}}
- async function check(input,options={}){let result;try{result=await prepare(input,options);const cleared=await clearOwned(result.page,result.plan.prompt,result.ingredients);if(!cleared)throw fail('PREPARED_INPUT_CHANGED','Черновик изменился во время проверки. Он сохранён в Flow.');return {ready:true,accountId:result.lease.accountId,accountEmail:result.lease.email,projectURL:result.projectURL,model:result.plan.model,referenceCount:result.ingredients.length,uploadedImages:result.ingredients.length,...(result.plan.kind!=='image'?{visibleWatermark:'off'}:{}),submitted:false,cleared};}finally{if(result)await release(result);}}
+ async function inspect(accountId,{signal,email}={}){
+  const lease=await accounts.acquireIsolatedGenerationBrowser(accountId,{signal});
+  try{
+   if(email!==undefined&&(typeof email!=='string'||email.toLowerCase()!==lease.email.toLowerCase()))throw fail('ACCOUNT_MISMATCH','Аккаунт изменился до проверки настроек.');
+   const page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal}),projectURL=await page.project(lease.email);
+   await page.click('Триггер настроек');
+   let controls;
+   try{controls=await page.until(async()=>{const c=await page.run('controls');return c.radios.length?c:null;},15000,'settings-inspection');}
+   finally{await page.click('Триггер настроек').catch(()=>{});}
+   return {ready:true,...watermarkDetails(lease,await inspectCapability(page,lease.email)),projectURL,engine:'isolated-browser',usesDesktopFocus:false,controls};
+  }finally{await accounts.releaseIsolatedGenerationBrowser(lease);}
+ }
+ async function inspectWatermark(accountId,{signal,email}={}){
+  const lease=await accounts.acquireIsolatedGenerationBrowser(accountId,{signal});
+  try{
+   if(email!==undefined&&(typeof email!=='string'||email.toLowerCase()!==lease.email.toLowerCase()))throw fail('ACCOUNT_MISMATCH','Аккаунт изменился до проверки настроек.');
+   const page=new FlowPage(lease.client,signal,{pollMs,leaseSignal:lease.signal});await page.ready();
+   return watermarkDetails(lease,await inspectCapability(page,lease.email));
+  }finally{await accounts.releaseIsolatedGenerationBrowser(lease);}
+ }
+ async function check(input,options={}){let result;try{result=await prepare(input,options);const cleared=await clearOwned(result.page,result.plan.prompt,result.ingredients);if(!cleared)throw fail('PREPARED_INPUT_CHANGED','Черновик изменился во время проверки. Он сохранён в Flow.');return {ready:true,accountId:result.lease.accountId,accountEmail:result.lease.email,projectURL:result.projectURL,model:result.plan.model,referenceCount:result.ingredients.length,uploadedImages:result.ingredients.length,...(result.visibleWatermark?{visibleWatermark:result.visibleWatermark}:{}),submitted:false,cleared};}finally{if(result)await release(result);}}
  async function recover(jobId,{signal,onProgress=()=>{},expected,waitForResult=false}={}){
   let receipt;try{receipt=await receipts.read(jobId);}catch(error){if(error.code==='ENOENT')throw fail('BROWSER_RECEIPT_MISSING','Для этой старой задачи нет записи отправки. Проверьте результат вручную в Flow. Повторная генерация не запускалась.');throw error;}
   if(expected&&['accountId','accountEmail','model','prompt'].some(key=>expected[key]!==receipt[key]))throw fail('BROWSER_RECEIPT_MISMATCH','Запись отправки не совпадает с исходной задачей.');
@@ -840,7 +939,7 @@ function createBrowserEngine({accounts,dataDir,pollMs=250,confirmUploadRights,bi
    const folder=await fs.mkdtemp(path.join(dataDir,'browser-result-'));await fs.chmod(folder,0o700);try{const detail=matched.history,filename=await downloadOriginal(lease.client,page,folder,plan.resolution,page.signal,plan.kind,{kind:plan.kind,poster:matched.candidate.poster,prompt:detail.prompt,ingredients:detail.ingredients,sourceVideos:detail.sourceVideos||[],url:detail.url,...(receipt.sourceScene?{sourceScene:receipt.sourceScene}:{})});return {media:[{kind:plan.kind||'video',path:path.join(folder,filename)}],accountId:lease.accountId,accountEmail:lease.email,projectURL:receipt.projectURL};}catch(error){await fs.rm(folder,{recursive:true,force:true});throw error;}
   }catch(error){if(page&&!page.signal?.aborted)await diagnose(page,jobId,error);error.unknownOutcome=!error.generationTerminal;throw error;}finally{await accounts.releaseIsolatedGenerationBrowser(lease);}
  }
- return {supports:input=>input?.model==='omni-1.2-flash'||MODEL.test(input?.model||'')||EDIT.test(input?.model||'')||supportsImageModel(input)||supportsVeoModel(input),prepare,submit,release,generate,inspect,check,recover};
+ return {supports:input=>input?.model==='omni-1.2-flash'||MODEL.test(input?.model||'')||EDIT.test(input?.model||'')||supportsImageModel(input)||supportsVeoModel(input),prepare,submit,release,generate,inspect,inspectWatermark,check,recover};
 }
 
 async function downloadOriginal(client,page,folder,resolution,signal,kind='video',binding){

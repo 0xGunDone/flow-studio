@@ -10,6 +10,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 
 const METHODS = new Set(['status', 'models', 'prepare', 'generate', 'job', 'recover', 'wait', 'history', 'save', 'open_folder', 'accounts', 'set_account_active', 'check_account', 'check_enabled_accounts', 'reset_cooldown', 'upload_rights_status', 'upload_rights_respond', 'login_start', 'login_complete', 'login_cancel', 'cancel', 'native_inspect', 'native_prepare', 'native_submit', 'native_cancel', 'isolated_inspect']);
 const RETRYABLE_METHODS = new Set(['status', 'models', 'prepare', 'job', 'wait', 'history', 'accounts', 'generate']);
+const VIDEO_WATERMARK_FEATURE = 'video-watermark-selection';
 const defaultBridgePath = path.join(os.homedir(), 'Library', 'Application Support', 'Flow Studio', 'agent-bridge.json');
 const appPaths = ['/Applications/Flow Studio.app',path.join(os.homedir(), 'Applications', 'Flow Studio.app')];
 
@@ -132,6 +133,19 @@ class BridgeClient {
     throw new BridgeError('BRIDGE_UNAVAILABLE', `Flow Studio did not become available within ${this.startupTimeoutMs / 1000} seconds (${lastError?.code || 'BRIDGE_UNAVAILABLE'}).`);
   }
 
+  async verifyVideoWatermarkSupport(bridge, params, signal) {
+    const status = await this.request(bridge, '/rpc', JSON.stringify({ method: 'status', params: {} }), 120000, signal);
+    const features = status?.result?.features;
+    if (Array.isArray(features) && features.includes(VIDEO_WATERMARK_FEATURE)) return;
+
+    if (params?.model && !params.settings && !params.method && params.videoWatermark === undefined) {
+      const catalog = await this.request(bridge, '/rpc', JSON.stringify({ method: 'models', params: { kind: 'image' } }), 120000, signal);
+      const models = catalog?.result?.models;
+      if (Array.isArray(models) && models.some(model => model?.id === params.model && model.kind === 'image')) return;
+    }
+    throw new BridgeError('FLOW_STUDIO_UPDATE_REQUIRED', 'The connected app does not advertise video-watermark-selection. Update the installed Flow Studio app before using video watermark settings.');
+  }
+
   async call(method, params, { signal } = {}) {
     if (!METHODS.has(method)) throw new BridgeError('UNKNOWN_METHOD', `Unknown Flow Studio method: ${method}`);
     if (method === 'generate' && (params?.confirmCreditSpend !== true || typeof params.requestId !== 'string' || !params.requestId.trim())) {
@@ -143,15 +157,18 @@ class BridgeClient {
     const body = JSON.stringify({ method, params });
     if (Buffer.byteLength(body, 'utf8') > 512 * 1024) throw new BridgeError('REQUEST_TOO_LARGE', 'Bridge request exceeds 512 KiB; pass local paths, not image data.');
     const timeoutMs = method === 'check_enabled_accounts' || method === 'prepare' && params?.checkBrowser === true ? 600000 : method === 'wait' ? 65000 : ['status', 'models', 'prepare', 'generate', 'recover', 'accounts', 'check_account', 'login_start', 'login_complete', 'native_inspect', 'native_prepare', 'native_submit', 'native_cancel','isolated_inspect'].includes(method) ? 120000 : 60000;
+    const browserCheck = method === 'prepare' && params?.checkBrowser === true;
+    const possibleVideo = params?.videoWatermark !== undefined || params?.settings?.kind !== 'image' && params?.method !== 'image';
     for (let attempt = 0; attempt < 2; attempt++) {
       if (signal?.aborted) throw new BridgeError('REQUEST_CANCELLED', 'Bridge request cancelled.');
       const bridge = await this.connect();
       try {
+        if (possibleVideo && (method === 'generate' || browserCheck)) await this.verifyVideoWatermarkSupport(bridge, params, signal);
         const response = await this.request(bridge, '/rpc', body, timeoutMs, signal);
         if (!response || !Object.prototype.hasOwnProperty.call(response, 'result')) throw new BridgeError('BRIDGE_PROTOCOL', 'Flow Studio response has no result.');
         return response.result;
       } catch (error) {
-        if (attempt || method === 'prepare' && params?.checkBrowser === true || !RETRYABLE_METHODS.has(method) || !['BRIDGE_TRANSPORT', 'BRIDGE_TIMEOUT'].includes(error.code)) throw error;
+        if (attempt || browserCheck || !RETRYABLE_METHODS.has(method) || !['BRIDGE_TRANSPORT', 'BRIDGE_TIMEOUT'].includes(error.code)) throw error;
         // Reuse the exact serialized request: durable requestId deduplication prevents a second paid job.
       }
     }

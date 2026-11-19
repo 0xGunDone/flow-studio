@@ -44,7 +44,8 @@ async function fakeBridge(t, handler = body => ({ method: body.method, params: b
 }
 
 test('official SDK stdio initializes, lists strict tools, validates and calls local bridge', async t => {
-  const bridge = await fakeBridge(t, body => body.method === 'status' ? { ready: true, modelsCount: 6, accounts: [], runningJobs: [], countHistory: 2 } : { jobId: 'fake-job', job: { id: 'fake-job', status: 'running' } });
+  const bridge = await fakeBridge(t, body => body.method === 'status' ? { ready: true, modelsCount: 6, accounts: [], runningJobs: [], countHistory: 2, features:['video-watermark-selection'] } : { jobId: 'fake-job', job: { id: 'fake-job', status: 'running' } });
+  const requests = () => bridge.calls.filter(call => call.method !== 'status');
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(__dirname, 'mcp-server.cjs')],
@@ -71,6 +72,9 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   assert.equal(generate.inputSchema.properties.accountId.minimum, 1);
   assert.equal(generate.inputSchema.properties.accountId.maximum, Number.MAX_SAFE_INTEGER);
   assert.equal(generate.inputSchema.required.includes('accountId'), false);
+  assert.deepEqual(generate.inputSchema.properties.videoWatermark.enum,['with','without']);
+  assert.equal(generate.inputSchema.required.includes('videoWatermark'),false);
+  assert.equal(generate.inputSchema.properties.settings.properties.videoWatermark,undefined);
   assert.ok(tools.find(tool => tool.name === 'flow_studio_list_models').inputSchema.properties.mode.enum.includes('edit'));
   assert.ok(generate.inputSchema.required.includes('requestId'));
   assert.equal(generate.inputSchema.required.includes('model'),false);
@@ -80,6 +84,7 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   assert.equal(prepare.inputSchema.properties.confirmCreditSpend,undefined);
   assert.equal(prepare.inputSchema.properties.requestId,undefined);
   assert.equal(prepare.inputSchema.properties.accountId.minimum,1);
+  assert.deepEqual(prepare.inputSchema.properties.videoWatermark.enum,['with','without']);
   assert.equal(prepare.inputSchema.properties.checkBrowser.type,'boolean');assert.equal(generate.inputSchema.properties.checkBrowser,undefined);
   assert.match(generate.description,/isolated background browser/);
   assert.match(tools.find(tool=>tool.name==='flow_studio_prepare_browser').description,/Legacy diagnostic/);
@@ -104,6 +109,9 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
     { ...valid, method:'extend',referencePaths:['/tmp/image.png'],sourceVideoId:'video-id' },
     { ...valid, confirmCreditSpend: false },
     { ...valid, requestId: '' },{...valid,checkBrowser:true},{...valid,checkBrowser:false},
+    { ...valid, method:'image', videoWatermark:'with' },
+    { ...valid, videoWatermark:'off' },
+    { ...valid, videoWatermark:null },
     ...[null,0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'7'].map(accountId=>({...valid,accountId})),
     { ...valid, referencePaths: ['/tmp/reference.png'], startFramePath: '/tmp/start.png' },
     { ...valid, endFramePath: '/tmp/end.png' },
@@ -125,24 +133,24 @@ test('official SDK stdio initializes, lists strict tools, validates and calls lo
   assert.equal(bridge.calls.length, 1, 'invalid input must never reach generation backend');
   const started = await client.callTool({ name: 'flow_studio_generate', arguments: valid });
   assert.equal(started.structuredContent.jobId, 'fake-job');
-  assert.deepEqual(bridge.calls[1], { method: 'generate', params: valid });
+  assert.deepEqual(requests()[0], { method: 'generate', params: valid });
   const mixed = { ...valid, model: 'omni-1.1-flash-edit-landscape', videoPaths: ['/tmp/source.MOV'], referencePaths: Array(5).fill('/tmp/image.png'), accountId:7, requestId: 'fake-edit-id' };
   assert.equal((await client.callTool({ name: 'flow_studio_generate', arguments: mixed })).isError, undefined);
-  assert.deepEqual(bridge.calls[2], { method: 'generate', params: mixed });
+  assert.deepEqual(requests()[1], { method: 'generate', params: mixed });
   const images = { ...valid, model: 'omni-1.1-flash-8s-landscape', referencePaths: Array(7).fill('/tmp/image.png'), requestId: 'fake-seven-id' };
   assert.equal((await client.callTool({ name: 'flow_studio_generate', arguments: images })).isError, undefined);
-  assert.deepEqual(bridge.calls[3], { method: 'generate', params: images });
-  const plan={settings,prompt:'prepare only',startFramePath:'/tmp/start.png',endFramePath:'/tmp/end.png',accountId:7};
+  assert.deepEqual(requests()[2], { method: 'generate', params: images });
+  const plan={settings,prompt:'prepare only',startFramePath:'/tmp/start.png',endFramePath:'/tmp/end.png',accountId:7,videoWatermark:'without'};
   assert.equal((await client.callTool({name:'flow_studio_prepare_generation',arguments:plan})).isError,undefined);
-  assert.deepEqual(bridge.calls[4],{method:'prepare',params:plan});
+  assert.deepEqual(requests()[3],{method:'prepare',params:plan});
   const selected={...plan,requestId:'settings-stable',confirmCreditSpend:true};
   assert.equal((await client.callTool({name:'flow_studio_generate',arguments:selected})).isError,undefined);
-  assert.deepEqual(bridge.calls[5],{method:'generate',params:selected});
-  for(const bad of [{...plan,confirmCreditSpend:true},{...plan,requestId:'not-for-prepare'},{...plan,settings:{...settings,unexpected:true}},...[null,0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'7'].map(accountId=>({...plan,accountId}))])assert.equal((await client.callTool({name:'flow_studio_prepare_generation',arguments:bad})).isError,true);
-  assert.equal(bridge.calls.length,6,'Invalid preparation never reaches the bridge');
+  assert.deepEqual(requests()[4],{method:'generate',params:selected});
+  for(const bad of [{...plan,confirmCreditSpend:true},{...plan,requestId:'not-for-prepare'},{...plan,videoWatermark:'on'},{...plan,settings:{...settings,videoWatermark:'without'}},...[null,0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'7'].map(accountId=>({...plan,accountId}))])assert.equal((await client.callTool({name:'flow_studio_prepare_generation',arguments:bad})).isError,true);
+  assert.equal(requests().length,5,'Invalid preparation never reaches the bridge');
   const filters={kind:'video',method:'ingredients',family:'Omni 1.1 Flash',durationSeconds:8,aspectRatio:'9:16',resolution:'standard'};
   assert.equal((await client.callTool({name:'flow_studio_list_models',arguments:filters})).isError,undefined);
-  assert.deepEqual(bridge.calls[6],{method:'models',params:filters});
+  assert.deepEqual(requests()[5],{method:'models',params:filters});
   const unknown = await client.callTool({ name: 'flow_studio_arbitrary_method', arguments: {} });
   assert.equal(unknown.isError, true);
   assert.equal(stderr, '', 'stdio server must emit no diagnostic noise during normal calls');
@@ -160,10 +168,13 @@ test('CLI --call uses same bridge validation; --list-tools works offline', async
     return true;
   });
   const listed = await run(process.execPath, [...args, '--list-tools'], { env: { ...env, FLOW_STUDIO_BRIDGE_FILE: '/missing/bridge.json' } });
-  assert.equal(JSON.parse(listed.stdout).tools.length, definitions.length);
+  const tools=JSON.parse(listed.stdout).tools;
+  assert.equal(tools.length, definitions.length);
+  for(const method of ['prepare','generate'])assert.ok(tools.find(tool=>tool.method===method).parameters.includes('videoWatermark'));
   const plan={settings:{kind:'image',method:'image',family:'Nano Banana 2.1',aspectRatio:'1:1'},prompt:'plan only',referencePaths:['/tmp/image.png']};
   const prepared=await run(process.execPath,[...args,'--call','prepare',JSON.stringify(plan)],{env});
   assert.deepEqual(JSON.parse(prepared.stdout),{result:{method:'prepare',params:plan}});
+  await assert.rejects(run(process.execPath,[...args,'--call','prepare',JSON.stringify({...plan,videoWatermark:'without'})],{env}),error=>JSON.parse(error.stdout).error.code==='INVALID_ARGUMENTS');
   assert.equal(bridge.calls.length, 2);
 });
 
@@ -174,8 +185,8 @@ test('isolated inspection accepts one exact account and keeps cancellation on sh
   const signal=new AbortController().signal,result=await dispatch(client,'isolated_inspect',{accountId:7},{signal});
   assert.equal(result.ready,true);assert.equal(result.usesDesktopFocus,false);assert.deepEqual(calls[0],['isolated_inspect',{accountId:7},{signal}]);
   const definition=definitions.find(item=>item.method==='isolated_inspect');assert.equal(definition.name,'flow_studio_inspect_isolated_browser');
-  assert.equal(definition.annotations.readOnlyHint,true);assert.equal(definition.annotations.destructiveHint,false);assert.equal(definition.annotations.idempotentHint,false);
-  assert.match(definition.description,/without desktop focus/);assert.match(definition.description,/Does not upload/);assert.match(definition.description,/spend generation credits/);
+  assert.equal(definition.annotations.readOnlyHint,false);assert.equal(definition.annotations.destructiveHint,false);assert.equal(definition.annotations.idempotentHint,false);
+  assert.match(definition.description,/without desktop focus/);assert.match(definition.description,/updates its local cache/);assert.match(definition.description,/Does not upload/);assert.match(definition.description,/spend generation credits/);
   const cancelled=await dispatch(client,'cancel',{jobId:'pending'});assert.equal(cancelled.job.status,'running');assert.equal(cancelled.job.unknownOutcome,true);assert.deepEqual(calls[1].slice(0,2),['cancel',{jobId:'pending'}]);
 });
 test('optional browser prepare is strict and strips no paid fields into ordinary generate schema',async()=>{
@@ -189,7 +200,10 @@ test('optional browser prepare is strict and strips no paid fields into ordinary
 test('browser upload preparation uses one 600s bridge call and never retries transport errors',async()=>{
  const input={model:'omni-1.2-flash-8s-landscape',prompt:'test',accountId:7,checkBrowser:true};
  for(const code of ['BRIDGE_TRANSPORT','BRIDGE_TIMEOUT']){
-  const client=new BridgeClient(),calls=[];client.connect=async()=>({});client.request=async(...args)=>{calls.push(args);throw Object.assign(new Error('Synthetic transport failure'),{code});};
+  const client=new BridgeClient(),calls=[];client.connect=async()=>({});client.request=async(...args)=>{
+   if(JSON.parse(args[2]).method==='status')return {result:{features:['video-watermark-selection']}};
+   calls.push(args);throw Object.assign(new Error('Synthetic transport failure'),{code});
+  };
   await assert.rejects(client.call('prepare',input),{code});assert.equal(calls.length,1);assert.equal(calls[0][3],600000);
  }
  for(const local of [{model:input.model,prompt:input.prompt},{...input,checkBrowser:false}]){
@@ -200,7 +214,9 @@ test('browser upload preparation uses one 600s bridge call and never retries tra
 test('browser preparation can finish after consent crosses the old 120s transport deadline',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
  let finish,requestSignal,calls=0;
- const client=new BridgeClient({fetch:async(_url,options)=>{calls++;requestSignal=options.signal;return new Promise((resolve,reject)=>{
+ const client=new BridgeClient({fetch:async(_url,options)=>{
+  if(JSON.parse(options.body).method==='status')return {ok:true,text:async()=>JSON.stringify({result:{features:['video-watermark-selection']}})};
+  calls++;requestSignal=options.signal;return new Promise((resolve,reject)=>{
   finish=()=>resolve({ok:true,text:async()=>JSON.stringify({result:{valid:true,checks:{browser:'passed'}}})});
   requestSignal.addEventListener('abort',()=>reject(requestSignal.reason),{once:true});
  });}});client.connect=async()=>({port:12345,token:'fixture'});
@@ -278,6 +294,7 @@ test('startup launches app once, retries fresh bridge file, and remains bounded'
 test('lost generation response retries exact requestId; app errors and unsafe mutations never retry', async t => {
   let generated = 0;
   const bridge = await fakeBridge(t, (body, req, res) => {
+    if (body.method === 'status') return { features: ['video-watermark-selection'] };
     if (body.method === 'generate' && ++generated === 1) { req.socket.destroy(); return; }
     if (body.method === 'generate') return { jobId: 'same-durable-job' };
     if (body.method === 'save') { req.socket.destroy(); return; }
@@ -285,14 +302,33 @@ test('lost generation response retries exact requestId; app errors and unsafe mu
     res.end(JSON.stringify({ error: { code: 'MODEL_DENIED', message: 'Requested model is unavailable.' } }));
   });
   const client = new BridgeClient({ bridgePath: bridge.bridgePath, launch: async () => { throw new Error('Unexpected launch'); } });
-  const params = { model: 'requested-model', prompt: 'fake', confirmCreditSpend: true, requestId: 'stable-id' };
+  const params = { model: 'requested-model', prompt: 'fake', confirmCreditSpend: true, requestId: 'stable-id', videoWatermark: 'without' };
   assert.deepEqual(await dispatch(client, 'generate', params), { jobId: 'same-durable-job' });
   assert.equal(generated, 2);
-  assert.deepEqual(bridge.calls[0], bridge.calls[1]);
+  assert.deepEqual(bridge.calls.map(call=>call.method), ['status','generate','status','generate']);
+  assert.deepEqual(bridge.calls[1], bridge.calls[3]);
   await assert.rejects(dispatch(client, 'save', { jobId: 'same-durable-job', outputPath: '/tmp/fake.png' }), { code: 'BRIDGE_TRANSPORT' });
   assert.equal(bridge.calls.filter(call => call.method === 'save').length, 1);
   await assert.rejects(client.call('models', {}), { code: 'MODEL_DENIED' });
   assert.equal(bridge.calls.filter(call => call.method === 'models').length, 1);
+});
+
+test('updated adapter blocks video against an old app while keeping image generation compatible',async t=>{
+  const image='example-existing-image-model',video='omni-1.2-flash-8s-landscape';
+  const bridge=await fakeBridge(t,body=>{
+    if(body.method==='status')return {apiVersion:3,features:['video-visible-watermark-off']};
+    if(body.method==='models')return {models:[{id:image,kind:'image'}]};
+    return {method:body.method,params:body.params};
+  });
+  const client=new BridgeClient({bridgePath:bridge.bridgePath,launch:async()=>assert.fail('Existing test bridge must not launch app')});
+  const base={prompt:'Exact request',confirmCreditSpend:true,requestId:'legacy-bridge-test'};
+  await assert.rejects(dispatch(client,'generate',{...base,model:video}),{code:'FLOW_STUDIO_UPDATE_REQUIRED'});
+  await assert.rejects(dispatch(client,'generate',{...base,model:video,videoWatermark:'without'}),{code:'FLOW_STUDIO_UPDATE_REQUIRED'});
+  await assert.rejects(dispatch(client,'prepare',{model:video,prompt:base.prompt,accountId:7,checkBrowser:true,videoWatermark:'with'}),{code:'FLOW_STUDIO_UPDATE_REQUIRED'});
+  assert.ok(bridge.calls.every(call=>['status','models'].includes(call.method)));
+  for(const args of [{...base,model:image},{...base,model:image,method:'image'},{...base,settings:{kind:'image',method:'image',family:'Example image family',aspectRatio:'1:1'}}]){
+    assert.deepEqual(await dispatch(client,'generate',args),{method:'generate',params:args});
+  }
 });
 
 test('MCP prepare resolves UI settings without generation and pins a deduplicated authorized request',async t=>{
@@ -304,12 +340,13 @@ test('MCP prepare resolves UI settings without generation and pins a deduplicate
   const actions=createAgentActions({runtime});
   const bridge=await fakeBridge(t,async(body,_req,res)=>{try{return await actions(body.method,body.params);}catch(error){res.statusCode=400;res.end(JSON.stringify({error:{code:error.code||'request_failed',message:error.message}}));}});
   const client=new BridgeClient({bridgePath:bridge.bridgePath,launch:async()=>{throw Error('Unexpected launch');}});
-  const status=await dispatch(client,'status',{});assert.equal(status.apiVersion,3);assert(status.features.includes('prepare-generation'));assert(status.features.includes('isolated-browser-generation'));assert.equal(status.videoWatermarkPolicy,'require_off');assert(status.features.includes('video-visible-watermark-off'));
+  const status=await dispatch(client,'status',{});assert.equal(status.apiVersion,3);assert(status.features.includes('prepare-generation'));assert(status.features.includes('isolated-browser-generation'));assert.equal(status.videoWatermarkPolicy,'selectable');assert(status.features.includes('video-watermark-selection'));
   const settings={kind:'video',method:'frames',family:'Veo 3.1 Fast',durationSeconds:8,aspectRatio:'16:9'};
   const plan=await dispatch(client,'prepare',{settings,prompt:'Local test only',startFramePath:start,endFramePath:end,accountId:7});
   assert.equal(plan.valid,true);assert.equal(plan.model.id,'veo-3.1-fast-i2v-8s-landscape');assert.equal(plan.method,'frames');
   assert.equal(plan.inputs.startFrame,true);assert.equal(plan.inputs.endFrame,true);assert.equal(plan.checks.accountAccess,'not_checked');assert.equal(plan.checks.visibleWatermark,'not_checked');
   assert.equal(plan.generateArguments.settings,undefined);assert.equal(plan.generateArguments.model,plan.model.id);assert.equal(plan.generateArguments.method,'frames');
+  assert.equal(plan.generateArguments.videoWatermark,'with');
   assert.equal(plan.generateArguments.accountId,7);assert.equal(plan.model.generationEngine,'isolated-browser');
   assert.equal(JSON.stringify(plan).includes('base64'),false);assert.equal(plan.generateArguments.confirmCreditSpend,undefined);assert.equal(plan.generateArguments.requestId,undefined);
   assert.equal(generations,0);assert.equal(persists,0);assert.equal(runtime.jobs.length,0);
@@ -318,6 +355,7 @@ test('MCP prepare resolves UI settings without generation and pins a deduplicate
   assert.equal(first.jobId,again.jobId);assert.equal(generations,1);assert.equal(runtime.jobs.length,1);
   await assert.rejects(dispatch(client,'generate',{...args,prompt:'Changed prompt'}),/requestId/);
   await assert.rejects(dispatch(client,'generate',{...args,accountId:8}),/requestId/);
+  await assert.rejects(dispatch(client,'generate',{...args,videoWatermark:'without'}),/requestId/);
   assert.equal(generations,1);
   const textPlan=await dispatch(client,'prepare',{settings:{...settings,method:'text'},prompt:'Text only'});
   assert.equal(textPlan.model.id,'veo-3.1-fast-8s-landscape','Only known alias resolves to the canonical variant');
@@ -325,12 +363,25 @@ test('MCP prepare resolves UI settings without generation and pins a deduplicate
   assert.equal(generations,1);assert.equal(runtime.jobs.length,1);
 });
 
-test('MCP prepare forwards verified off evidence and exact mandatory errors without new generation parameters',async t=>{
-  const model='omni-1.2-flash-3s-landscape',runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{},generate:()=>assert.fail('MCP preparation must not generate'),persist:()=>assert.fail('MCP preparation must not persist')};let state='missing',checks=0;
-  const actions=createAgentActions({runtime,checkIsolatedInputs:async()=>{checks++;if(state==='required')throw Object.assign(new Error('Visible watermarking is required in your region.'),{code:'VISIBLE_WATERMARK_REQUIRED'});return {ready:true,accountId:7,model,uploadedImages:0,submitted:false,cleared:true,...(state==='off'?{visibleWatermark:'off'}:{})};}});
+test('MCP prepare forwards verified watermark modes and exact mandatory errors without generating',async t=>{
+  const model='omni-1.2-flash-3s-landscape',runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{},generate:()=>assert.fail('MCP preparation must not generate'),persist:()=>assert.fail('MCP preparation must not persist')};
+  let state;const modes=[];
+  const actions=createAgentActions({runtime,checkIsolatedInputs:async({videoWatermark})=>{
+    modes.push(videoWatermark);
+    if(state==='required'&&videoWatermark==='without')throw Object.assign(new Error('Visible watermarking is required in your region.'),{code:'VISIBLE_WATERMARK_REQUIRED'});
+    return {ready:true,accountId:7,model,uploadedImages:0,submitted:false,cleared:true,visibleWatermark:state};
+  }});
   const bridge=await fakeBridge(t,async(body,_req,res)=>{try{return await actions(body.method,body.params);}catch(error){res.statusCode=400;res.end(JSON.stringify({error:{code:error.code||'request_failed',message:error.message}}));}}),client=new BridgeClient({bridgePath:bridge.bridgePath,launch:async()=>assert.fail('Existing test bridge must not launch app')}),args={model,method:'text',prompt:'Unchanged prompt',accountId:7,checkBrowser:true};
-  const local=await dispatch(client,'prepare',{...args,checkBrowser:false});assert.equal(local.checks.visibleWatermark,'not_checked');assert.equal(checks,0);
-  await assert.rejects(dispatch(client,'prepare',args),{code:'VISIBLE_WATERMARK_UNVERIFIED'});state='required';await assert.rejects(dispatch(client,'prepare',args),error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.message==='Visible watermarking is required in your region.');
-  state='off';const checked=await dispatch(client,'prepare',args);assert.equal(checked.checks.visibleWatermark,'off');assert.equal(checked.browserCheck.visibleWatermark,'off');assert.equal(checked.browserCheck.submitted,false);assert.equal(Object.hasOwn(checked.generateArguments,'visibleWatermark'),false);assert.equal(Object.hasOwn(checked.generateArguments,'checkBrowser'),false);assert.equal(checks,3);assert.deepEqual(runtime.jobs,[]);
+  const without={...args,videoWatermark:'without'};
+  const local=await dispatch(client,'prepare',{...without,checkBrowser:false});assert.equal(local.checks.visibleWatermark,'not_checked');assert.equal(local.generateArguments.videoWatermark,'without');assert.deepEqual(modes,[]);
+  await assert.rejects(dispatch(client,'prepare',args),{code:'VISIBLE_WATERMARK_UNVERIFIED'});
+  state='required';await assert.rejects(dispatch(client,'prepare',without),error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.message==='Visible watermarking is required in your region.');
+  for(const [request,evidence,mode] of [[args,'on','with'],[without,'off','without']]){
+    state=evidence;
+    const checked=await dispatch(client,'prepare',request);
+    assert.equal(checked.checks.visibleWatermark,evidence);assert.equal(checked.browserCheck.visibleWatermark,evidence);assert.equal(checked.browserCheck.submitted,false);
+    assert.equal(checked.generateArguments.videoWatermark,mode);assert.equal(Object.hasOwn(checked.generateArguments,'visibleWatermark'),false);assert.equal(Object.hasOwn(checked.generateArguments,'checkBrowser'),false);
+  }
+  assert.deepEqual(modes,['with','without','with','without']);assert.deepEqual(runtime.jobs,[]);
   const before=bridge.calls.length;await assert.rejects(dispatch(client,'prepare',{...args,visibleWatermark:'off'}),{code:'INVALID_ARGUMENTS'});assert.equal(bridge.calls.length,before,'Policy evidence is output, never a client bypass parameter');
 });

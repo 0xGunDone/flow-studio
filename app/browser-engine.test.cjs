@@ -127,8 +127,9 @@ async function harness(t, options = {}) {
       assert.equal(state.accountOpen,true,'Visible watermark state must be read only in the open account drawer');state.watermarkReads++;
       if(arg.email?.toLowerCase()!==(options.visibleEmail||EMAIL).toLowerCase())throw failure('ACCOUNT_MISMATCH');
       if(options.watermarkUnavailable)throw failure('VISIBLE_WATERMARK_UNVERIFIED');
-      if(arg.disable&&state.watermarkChecked){if(state.watermarkDisabled||state.watermarkMandatory)throw failure('VISIBLE_WATERMARK_REQUIRED');state.watermarkChecked=false;state.watermarkMutations++;}
-      return {checked:state.watermarkChecked,disabled:state.watermarkDisabled,mandatory:state.watermarkMandatory};
+      const preference={checked:state.watermarkChecked,disabled:state.watermarkDisabled,mandatory:state.watermarkMandatory};
+      if(typeof arg.setChecked==='boolean'&&arg.setChecked!==preference.checked&&!preference.disabled&&!preference.mandatory){state.watermarkChecked=arg.setChecked;state.watermarkMutations++;}
+      return preference;
     }
     if (op === 'editor-account') return state.videoEditor&&!options.noEditorAvatar?options.visibleEmail||EMAIL:null;
     if (op === 'project') { state.url = 'https://flow.google.com/project/' + (options.edit ? SOURCE_PROJECT : 'project-owned'); return true; }
@@ -787,6 +788,45 @@ test('two-frame no-spend check uploads Start then End and verifies canonical cro
   assert.deepEqual(await fs.readdir(h.dataDir), []);
 });
 
+test('marked five-second Frames check waits through the placeholder and confirms the selected Flow preview', async t => {
+  let previewReads = 0;
+  const framePreview = 'https://flow.google.com/asb/private-preview=w1280';
+  const h = await harness(t, {
+    watermarkChecked: true, watermarkDisabled: true, watermarkMandatory: true,
+    async operation(op, arg, state) {
+      if (op === 'asset' && arg.addFrame) {
+        assert.ok(previewReads >= 2);
+        assert.ok(state.pickerOpen);
+        assert.equal(arg.framePreview, framePreview);
+        state.ingredients.push(framePreview);
+        state.pickerOpen = false;
+        return true;
+      }
+      if (op === 'asset' && !arg.select && state.selected && state.pickerOpen) {
+        previewReads++;
+        if (previewReads === 1) {
+          return { exists: true, preview: 'data:image/gif;base64,AAAA', ingredients: [] };
+        }
+        return { exists: true, preview: framePreview, framePreview, ingredients: [] };
+      }
+      if (op === 'click' && arg.name === 'Добавить в запрос') assert.fail('Frame preview must use its own picker action');
+    },
+  });
+  const result = await h.engine.check(input({
+    model: 'omni-1.2-flash-i2v-5s-landscape', videoWatermark: 'with',
+    references: [{ kind: 'image', dataUrl: PNG }],
+  }));
+  assert.equal(result.visibleWatermark, 'on');
+  assert.equal(result.uploadedImages, 1);
+  assert.equal(result.cleared, true);
+  assert.deepEqual(h.state.frameRoles, ['Старт']);
+  assert.equal(h.uploads.length, 1);
+  assert.equal(h.ops.filter(op => op.op === 'asset' && op.arg.addFrame).length, 1);
+  assert.deepEqual(h.ops.find(op => op.op === 'clear-owned').arg.ingredients, [framePreview]);
+  assert.equal(h.ops.some(op => op.op === 'submit'), false);
+  assert.equal(h.state.submitted, 0);
+});
+
 test('image engine shares one-submit transaction and ordered1/2ref uploads while returning validated PNG', async t => {
   for (const refs of [[PNG], [PNG, GIF]]) {
     const h = await harness(t, { image: true }), model = 'gemini-3.1-flash-image-square'; let durable = 0;
@@ -819,6 +859,7 @@ test('fresh about:blank and transient context wait before identity checks withou
   const inspected = await h.engine.inspect(7, { email: EMAIL });
   assert.equal(inspected.ready, true); assert.equal(inspected.usesDesktopFocus, false);
   assert.equal(inspected.engine, 'isolated-browser');
+  assert.equal(inspected.visibleWatermarkCapability, 'optional'); assert.equal(h.state.watermarkMutations,0);
   assert.equal(h.commands.filter(c => c.params?.expression === 'location.href').length, 3);
   assert.equal(h.state.submitted, 0); assert.equal(h.state.releases, 1);
   const login = await harness(t, { startup: ['https://accounts.google.com/ServiceLogin'] });
@@ -922,6 +963,26 @@ test('controls inventory exposes capped canonical known labels and omits private
   assert.deepEqual(Object.keys(result).sort(), ['buttons', 'radios', 'textboxes', 'ranges'].sort());
   assert.equal(JSON.stringify(result).includes(privateValue), false);
   assert.equal(JSON.stringify(result).includes('arbitrary-filename.png'), false);
+});
+
+test('visible Flow onboarding blocks project discovery and navigation without clicking', () => {
+  let shown = true;
+  let clicks = 0;
+  const onboarding = { getClientRects: () => shown ? [1] : [] };
+  const project = { getClientRects: () => [1], getAttribute: name => name === 'href' ? '/project/existing' : null, click: () => { clicks++; } };
+  const context = {
+    location: { origin: 'https://flow.google.com', href: 'https://flow.google.com/' },
+    document: { querySelector: () => null, querySelectorAll: selector => selector === 'app-onboarding-dialog' ? [onboarding] : selector === 'a[href]' ? [project] : [] },
+    getComputedStyle: () => ({ visibility: 'visible' }),
+  };
+  const run = op => vm.runInNewContext(`(${flowDOM.toString()})(${JSON.stringify(op)})`, context);
+  assert.throws(() => run('state'), /FLOW_ONBOARDING_REQUIRED/);
+  assert.throws(() => run('project'), /FLOW_ONBOARDING_REQUIRED/);
+  assert.equal(clicks, 0);
+  shown = false;
+  assert.equal(run('state').projectLinks[0].href, '/project/existing');
+  assert.equal(run('project'), true);
+  assert.equal(clicks, 1);
 });
 
 test('English account controls work and project links use canonical paths independent of translated labels', () => {
@@ -1558,10 +1619,10 @@ test('portrait History download follows only its own aria-controlled More option
   value.prompt+=' changed';assert.throws(()=>h.run('image-download-option',{binding,menuId:menu.menuId,resolution:'1K',click:true}),/RESULT_INPUT_MISMATCH/);assert.equal(value.downloadOptionClicks,1);
 });
 
-test('English uploaded asset matches filename newline Image and exact Preview of filename alt', () => {
+test('English uploaded asset requires a loaded, uniquely named Preview of filename', () => {
   const filename = 'ref-cafe123456789abc-0-abc12345.png'; let selected = 0;
   const option = { innerText: filename + '\nImage', getAttribute: () => null, getClientRects: () => [1], click: () => { selected++; } };
-  const preview = { alt: 'Preview of ' + filename, currentSrc: 'https://flow-content.google/image/upload-owned?signature=fixture', getClientRects: () => [1] };
+  const preview = { alt: 'Preview of ' + filename, currentSrc: 'https://flow-content.google/image/upload-owned?signature=fixture', complete: true, naturalWidth: 1280, getClientRects: () => [1] };
   const unrelated = { alt: 'Preview of other.png', currentSrc: 'https://flow-content.google/image/other', getClientRects: () => [1] };
   const context = {
     location: { origin: 'https://flow.google.com' }, getComputedStyle: () => ({ visibility: 'visible' }),
@@ -1571,8 +1632,55 @@ test('English uploaded asset matches filename newline Image and exact Preview of
   const state = run({ name: filename });
   assert.equal(state.exists, true); assert.equal(state.preview, preview.currentSrc); assert.equal(selected, 0);
   assert.equal(run({ name: filename, select: true }).exists, true); assert.equal(selected, 1);
+  preview.complete = false;
+  assert.equal(run({ name: filename }).preview, null);
+  preview.complete = true; preview.naturalWidth = 0;
+  assert.equal(run({ name: filename }).preview, null);
+  preview.naturalWidth = 1280; unrelated.alt = preview.alt;
+  assert.throws(() => run({ name: filename }), /INGREDIENT_AMBIGUOUS/);
+  unrelated.alt = 'Preview of other.png';
   preview.alt += '.different';
   assert.equal(run({ name: filename }).preview, null); assert.equal(selected, 1);
+});
+
+test('opaque frame preview requires the selected exact row and its own picker action', () => {
+  const filename = 'ref-exact-frame.png';
+  const alias = 'https://flow.google.com/asb/opaque-preview=w1280';
+  let selected = true, clicks = 0;
+  const button = { innerText: 'Add to prompt', getAttribute: () => null, getClientRects: () => [1], click: () => { clicks++; } };
+  const picker = {};
+  const pane = { closest: () => picker, querySelectorAll: () => [button] };
+  const row = {
+    innerText: filename, getClientRects: () => [1],
+    closest: selector => selector === 'flow-add-menu-popover-content' ? picker : null,
+    getAttribute: key => key === 'aria-selected' ? String(selected) : null,
+  };
+  const preview = {
+    alt: 'Preview of ' + filename, complete: true, naturalWidth: 1280, currentSrc: alias,
+    closest: selector => selector === 'flow-add-menu-detail-pane' ? pane : null, getClientRects: () => [1],
+  };
+  const context = {
+    location: { origin: 'https://flow.google.com' }, URL, getComputedStyle: () => ({ visibility: 'visible' }),
+    document: { querySelector: () => null, querySelectorAll: selector => selector === 'img' ? [preview] : selector === 'button,[role="button"]' ? [row] : [] },
+  };
+  const run = (arg = {}) => vm.runInNewContext(evaluatePrefix + '("asset",' + JSON.stringify({ name: filename, ...arg }) + ')', context);
+  for (const source of ['data:image/gif;base64,AAAA', 'https://flow.google.com.evil.test/asb/private-preview', alias + '#changed', alias + '?source=other', alias + '%2fother']) {
+    preview.currentSrc = source;
+    assert.equal(run().framePreview, null);
+    assert.throws(() => run({ addFrame: true }), /INGREDIENT_NOT_VERIFIED/);
+  }
+  preview.currentSrc = alias;
+  selected = false;
+  assert.throws(() => run({ addFrame: true }), /INGREDIENT_NOT_VERIFIED/);
+  selected = true;
+  pane.closest = () => ({});
+  assert.throws(() => run({ addFrame: true }), /INGREDIENT_NOT_VERIFIED/);
+  assert.equal(clicks, 0);
+  pane.closest = () => picker;
+  assert.equal(run().framePreview, alias);
+  assert.throws(() => run({ addFrame: true, framePreview: alias + 'wrong' }), /INGREDIENT_NOT_VERIFIED/);
+  assert.equal(run({ addFrame: true, framePreview: alias }), true);
+  assert.equal(clicks, 1);
 });
 
 test('frame picker selects exact filename button and Image ingredient chip exposes canonical source to composer and history', () => {
@@ -1591,6 +1699,12 @@ test('frame picker selects exact filename button and Image ingredient chip expos
   assert.equal(JSON.stringify(run('composer').ingredients), '["https://flow-content.google/image/frame-cropped"]');
   const history=historyDOMFixture([{prompt:'Frame prompt',poster:'frame-result',ingredients:[image.currentSrc]}]).run('history',{poster:'frame-result'});
   assert.equal(JSON.stringify(history.ingredients), '["https://flow-content.google/image/frame-cropped"]'); assert.equal(history.ingredientsReady, true);
+  image.currentSrc='https://flow.google.com/asb/opaque-preview=w1280';
+  assert.throws(() => run('composer'), /INGREDIENT_NOT_VERIFIED/);
+  chip.closest=selector=>selector==='.frame-trigger'?{}:null;
+  assert.equal(run('composer').ingredients[0], image.currentSrc);
+  const aliasHistory=historyDOMFixture([{prompt:'Frame prompt',poster:'frame-result',ingredients:[image.currentSrc]}]).run('history',{poster:'frame-result'});
+  assert.equal(aliasHistory.ingredients[0], image.currentSrc); assert.equal(aliasHistory.ingredientsReady, true);
   assert.equal(run('asset', { name: filename + '-other' }).exists, false); assert.equal(selected, 1);
 });
 
@@ -1645,7 +1759,7 @@ test('one and two ingredients retain uploaded byte digests, canonical resource o
 test('no-spend check uploads two exact ordered refs, clears owned draft, and releases all files without mouse submission', async t => {
   const h = await harness(t), references = [{ kind: 'image', dataUrl: PNG }, { kind: 'image', dataUrl: GIF }];
   const result = await h.engine.check(input({ references }));
-  assert.deepEqual(result, { ready: true, accountId: 7, accountEmail: EMAIL, projectURL: 'https://flow.google.com/project/project-owned', model: input().model, referenceCount: 2, uploadedImages: 2, visibleWatermark:'off', submitted: false, cleared: true });
+  assert.deepEqual(result, { ready: true, accountId: 7, accountEmail: EMAIL, projectURL: 'https://flow.google.com/project/project-owned', model: input().model, referenceCount: 2, uploadedImages: 2, visibleWatermark:'on', submitted: false, cleared: true });
   assert.equal(h.uploads.length, 2);
   for (let i = 0; i < references.length; i++) assert.deepEqual(h.uploads[i].bytes, Buffer.from(references[i].dataUrl.split(',')[1], 'base64'));
   assert.deepEqual(h.ops.filter(op => op.op === 'clear-owned').map(op => op.arg), [{ prompt: input().prompt, ingredients: h.uploads.map(upload => upload.identity) }]);
@@ -2843,7 +2957,7 @@ test('account wait never dismisses a reappearing announcement twice and never op
 function watermarkDOMFixture(options={}){
  let checked=Object.hasOwn(options,'checked')?options.checked:'false',disabled=options.disabled??false,mandatory=options.mandatory??false;const clicks=[];
  let panel,host;const element=(tag,attributes={},extra={})=>Object.defineProperties({tagName:tag.toUpperCase(),getAttribute:key=>attributes[key]??null,getClientRects:()=>[1],getBoundingClientRect:()=>({left:900,top:100,width:300,height:600,right:1200,bottom:700}),closest:selector=>selector==='[aria-hidden="true"],[inert]'?null:selector.includes('flow-watermark-toggle')?host:selector.includes('dialog')||selector.includes('Account settings')?panel:null,querySelectorAll:()=>[],querySelector:()=>null},Object.getOwnPropertyDescriptors(extra));
- const close=element('button',{'aria-label':'Close account panel'},{click:()=>assert.fail('DOM watermark operation must not close or switch account')}),toggle=element('button',{role:'switch','aria-label':'Visible watermarking'},{get disabled(){return disabled;},getAttribute:key=>key==='role'?'switch':key==='aria-label'?'Visible watermarking':key==='aria-checked'?checked:key==='aria-disabled'?String(options.ariaDisabled??false):null,click(){clicks.push('watermark');checked='false';}}),foreign=element('button',{role:'switch','aria-label':'Visible watermarking'},{click:()=>assert.fail('Foreign watermark control received click')}),reason=element('div',{}, {get innerText(){return mandatory?'Visible watermarking is required in your region':'';},get textContent(){return this.innerText;}}),email=element('span',{}, {innerText:options.email||EMAIL,textContent:options.email||EMAIL});
+ const close=element('button',{'aria-label':'Close account panel'},{click:()=>assert.fail('DOM watermark operation must not close or switch account')}),toggle=element('button',{role:'switch','aria-label':'Visible watermarking'},{get disabled(){return disabled;},getAttribute:key=>key==='role'?'switch':key==='aria-label'?'Visible watermarking':key==='aria-checked'?checked:key==='aria-disabled'?String(options.ariaDisabled??false):null,click(){clicks.push('watermark');checked=checked==='true'?'false':'true';}}),foreign=element('button',{role:'switch','aria-label':'Visible watermarking'},{click:()=>assert.fail('Foreign watermark control received click')}),reason=element('div',{}, {get innerText(){return mandatory?'Visible watermarking is required in your region':'';},get textContent(){return this.innerText;}}),email=element('span',{}, {innerText:options.email||EMAIL,textContent:options.email||EMAIL});
  host=element('flow-watermark-toggle',{}, {contains:node=>node===toggle||node===reason});
  host.querySelectorAll=selector=>selector.includes('watermark-forced-reason')?mandatory?[reason]:[]:selector.includes('switch')?Array(options.switchCount??1).fill(toggle):[];
  host.querySelector=selector=>host.querySelectorAll(selector)[0]||null;
@@ -2854,57 +2968,121 @@ function watermarkDOMFixture(options={}){
  return {clicks,run:arg=>vm.runInNewContext('('+flowDOM.toString()+')("visible-watermark",'+JSON.stringify({email:EMAIL,...arg})+')',context)};
 }
 
-test('visible watermark DOM reads exact owned OFF state without a click and disables enabled ON only once',()=>{
- const off=watermarkDOMFixture();assert.deepEqual(JSON.parse(JSON.stringify(off.run())),{checked:false,disabled:false,mandatory:false});assert.deepEqual(off.clicks,[]);off.run({disable:true});assert.deepEqual(off.clicks,[]);
- const on=watermarkDOMFixture({checked:'true'});assert.deepEqual(JSON.parse(JSON.stringify(on.run())),{checked:true,disabled:false,mandatory:false});assert.deepEqual(on.clicks,[]);on.run({disable:true});assert.deepEqual(on.clicks,['watermark']);assert.equal(on.run().checked,false);on.run({disable:true});assert.deepEqual(on.clicks,['watermark']);
- const mandatory=watermarkDOMFixture({checked:'true',disabled:true,mandatory:true});assert.deepEqual(JSON.parse(JSON.stringify(mandatory.run())),{checked:true,disabled:true,mandatory:true});assert.deepEqual(mandatory.clicks,[]);
+test('visible watermark DOM reads the owned switch and clicks only to change an available state',()=>{
+ for(const checked of [false,true]){
+  const h=watermarkDOMFixture({checked:String(checked)});
+  assert.deepEqual(JSON.parse(JSON.stringify(h.run())),{checked,disabled:false,mandatory:false});
+  h.run({setChecked:checked});assert.deepEqual(h.clicks,[]);
+  h.run({setChecked:!checked});assert.equal(h.run().checked,!checked);
+  h.run({setChecked:!checked});assert.deepEqual(h.clicks,['watermark']);
+ }
+ for(const options of [{checked:'true',mandatory:true},{checked:'true',disabled:true},{checked:'true',ariaDisabled:true},{checked:'false',disabled:true}]){
+  const h=watermarkDOMFixture(options);h.run({setChecked:options.checked==='false'});assert.deepEqual(h.clicks,[],JSON.stringify(options));
+ }
+ const explicit=watermarkDOMFixture({switchCount:0,mandatory:true});
+ assert.deepEqual(JSON.parse(JSON.stringify(explicit.run({setChecked:true}))),{checked:null,disabled:false,mandatory:true});assert.deepEqual(explicit.clicks,[]);
 });
 
-test('visible watermark DOM rejects mandatory ON and unknown ownership or state without clicking any switch',()=>{
- for(const options of [{checked:'true',disabled:true,mandatory:true},{checked:'true',disabled:true},{checked:'true',ariaDisabled:true},{email:'other@example.test'},{extraEmail:true},{panelCount:0},{panelCount:2},{hostCount:0},{hostCount:2},{switchCount:0},{switchCount:2},{checked:'mixed'},{checked:null}]){
-  const h=watermarkDOMFixture(options);assert.throws(()=>h.run({disable:true}),error=>/VISIBLE_WATERMARK_REQUIRED|VISIBLE_WATERMARK_UNVERIFIED|ACCOUNT_MISMATCH/.test(error.message),JSON.stringify(options));assert.deepEqual(h.clicks,[],JSON.stringify(options));
+test('visible watermark DOM rejects unknown switch ownership or state without clicking',()=>{
+ for(const options of [{email:'other@example.test'},{extraEmail:true},{panelCount:0},{panelCount:2},{hostCount:0},{hostCount:2},{switchCount:0},{switchCount:2},{checked:'mixed'},{checked:null}]){
+  const h=watermarkDOMFixture(options);assert.throws(()=>h.run({setChecked:false}),error=>/VISIBLE_WATERMARK_UNVERIFIED|ACCOUNT_MISMATCH/.test(error.message),JSON.stringify(options));assert.deepEqual(h.clicks,[],JSON.stringify(options));
  }
 });
 
-test('watermark helper closes the bound drawer on failure and rejects a preference that returns ON after reopening',async()=>{
- for(const scenario of ['off','on','mandatory','missing','account-changed','persistence-failed','save-timeout']){
-  let opened=false,opens=0,toggles=0,checked=scenario!=='off',reads=0;const page=new FlowPage({send:()=>assert.fail('Watermark helper must use the owned Flow page only')});
+test('watermark helper closes the drawer and verifies the chosen state persisted when reopened',async()=>{
+ for(const mode of ['with','without'])for(const scenario of ['already-set','switch','missing','account-changed','persistence-failed','save-timeout']){
+  const target=mode==='with';let opened=false,opens=0,toggles=0,checked=scenario==='already-set'?target:!target,reads=0;
+  const page=new FlowPage({send:()=>assert.fail('Watermark helper must use the owned Flow page only')});
   page.until=async(fn,_timeout,stage)=>{for(let attempt=0;attempt<3;attempt++){const value=await fn();if(value)return value;}throw failure('FLOW_UI_TIMEOUT',stage);};
-  page.click=async name=>{if(name==='Сведения об аккаунте'){opened=true;opens++;if(scenario==='persistence-failed'&&opens===2)checked=true;}else if(name==='Закрыть панель аккаунта')opened=false;else assert.fail('Unexpected watermark helper control: '+name);};
+  page.click=async name=>{if(name==='Сведения об аккаунте'){opened=true;opens++;if(scenario==='persistence-failed'&&opens===2)checked=!target;}else if(name==='Закрыть панель аккаунта')opened=false;else assert.fail('Unexpected watermark helper control: '+name);};
   page.run=async(op,arg)=>{
    if(op==='state')return {url:'https://flow.google.com/project/'+SOURCE_PROJECT};
-   if(op==='editor-account')return null;
    if(op==='exists')return true;
    if(op==='account')return opened?scenario==='account-changed'?'other@example.test':EMAIL:null;
    if(op==='visible-watermark'){
     assert.equal(opened,true);assert.equal(arg.email,EMAIL);reads++;
     if(scenario==='missing')throw failure('VISIBLE_WATERMARK_UNVERIFIED');
-    if(arg.disable){if(scenario==='mandatory')throw failure('VISIBLE_WATERMARK_REQUIRED');toggles++;if(scenario!=='save-timeout')checked=false;}
-    return {checked,disabled:scenario==='mandatory',mandatory:scenario==='mandatory'};
+    const state={checked,disabled:false,mandatory:false};
+    if(typeof arg.setChecked==='boolean'){assert.equal(arg.setChecked,target);toggles++;if(scenario!=='save-timeout')checked=target;}
+    return state;
    }
    assert.fail('Unexpected watermark helper operation: '+op);
   };
-  if(['off','on'].includes(scenario)){await page.requireNoVisibleWatermark(EMAIL);assert.ok(opens>=2);assert.ok(reads>=2);}else await assert.rejects(page.requireNoVisibleWatermark(EMAIL),{code:scenario==='mandatory'?'VISIBLE_WATERMARK_REQUIRED':scenario==='account-changed'?'ACCOUNT_MISMATCH':'VISIBLE_WATERMARK_UNVERIFIED'});
-  assert.equal(opened,false,scenario);assert.equal(toggles,['on','persistence-failed','save-timeout'].includes(scenario)?1:0,scenario);if(scenario==='account-changed')assert.equal(reads,0);
+  if(['already-set','switch'].includes(scenario)){assert.equal((await page.visibleWatermark(EMAIL,mode)).checked,target);assert.equal(opens,2);assert.ok(reads>=2);}
+  else await assert.rejects(page.visibleWatermark(EMAIL,mode),{code:scenario==='account-changed'?'ACCOUNT_MISMATCH':'VISIBLE_WATERMARK_UNVERIFIED'});
+  assert.equal(opened,false,scenario);assert.equal(toggles,['switch','persistence-failed','save-timeout'].includes(scenario)?1:0,scenario);if(scenario==='account-changed')assert.equal(reads,0);
  }
 });
 
-test('video preparation verifies watermark OFF before reference upload and rechecks before its one paid submit',async t=>{
- const h=await harness(t,{watermarkChecked:true,onFile:(_file,_bytes,state)=>{assert.equal(state.watermarkChecked,false);assert.ok(state.watermarkReads>0);assert.equal(state.accountOpen,false);}});
- const prepared=await h.engine.prepare(input({jobId:crypto.randomUUID(),references:[{kind:'image',dataUrl:PNG}]}));assert.equal(h.state.watermarkMutations,1);const readsAfterPrepare=h.state.watermarkReads;
- h.state.watermarkChecked=true;await h.engine.submit(prepared,{beforeSubmit(){assert.equal(h.state.watermarkChecked,false);assert.ok(h.state.watermarkReads>readsAfterPrepare);assert.equal(h.state.accountOpen,false);assert.equal(h.state.submitted,0);}});assert.equal(h.state.watermarkMutations,2);assert.equal(h.state.submitted,1);await h.engine.release(prepared);
-});
-
-test('video preparation blocks required or unverified watermark before uploads and paid action with its account drawer closed',async t=>{
- for(const options of [{watermarkChecked:true,watermarkDisabled:true,watermarkMandatory:true},{watermarkUnavailable:true}]){
-  const h=await harness(t,options);await assert.rejects(h.engine.generate(input({jobId:crypto.randomUUID(),references:[{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Watermark failure reached paid boundary')}),error=>['VISIBLE_WATERMARK_REQUIRED','VISIBLE_WATERMARK_UNVERIFIED'].includes(error.code)&&error.unknownOutcome!==true);assert.equal(h.uploads.length,0);assert.equal(h.state.submitted,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);assert.equal(h.state.releases,1);
+test('video uses default ON or explicit OFF before upload and verifies the same choice before one paid submit',async t=>{
+ for(const videoWatermark of [undefined,'without']){
+  const target=videoWatermark!=='without',capabilities=[],onWatermarkCapability=details=>capabilities.push(details);
+  const h=await harness(t,{watermarkChecked:!target,onFile:(_file,_bytes,state)=>{assert.equal(state.watermarkChecked,target);assert.ok(state.watermarkReads>0);assert.equal(state.accountOpen,false);}});
+  const prepared=await h.engine.prepare(input({jobId:crypto.randomUUID(),videoWatermark,references:[{kind:'image',dataUrl:PNG}]}),{onWatermarkCapability});
+  assert.equal(h.state.watermarkMutations,1);const readsAfterPrepare=h.state.watermarkReads;
+  h.state.watermarkChecked=!target;
+  await h.engine.submit(prepared,{onWatermarkCapability,beforeSubmit(){assert.equal(h.state.watermarkChecked,target);assert.ok(h.state.watermarkReads>readsAfterPrepare);assert.equal(h.state.accountOpen,false);assert.equal(h.state.submitted,0);}});
+  assert.deepEqual(capabilities,Array(2).fill({accountId:7,accountEmail:EMAIL,visibleWatermarkCapability:'optional'}));
+  assert.equal(h.state.watermarkMutations,2);assert.equal(h.state.submitted,1);await h.engine.release(prepared);
  }
- const veo=await harness(t,{watermarkChecked:true,watermarkDisabled:true,watermarkMandatory:true});await assert.rejects(veo.engine.generate(input({jobId:crypto.randomUUID(),model:'veo-3.1-fast-i2v-8s-landscape',references:[{kind:'image',dataUrl:PNG}]}),{beforeSubmit:()=>assert.fail('Veo watermark failure reached paid boundary')}),{code:'VISIBLE_WATERMARK_REQUIRED'});assert.equal(veo.uploads.length,0);assert.equal(veo.state.submitted,0);
 });
 
-test('watermark policy drift to mandatory ON after preparation blocks normal paid submission and receipt creation',async t=>{
- const h=await harness(t),jobId=crypto.randomUUID(),prepared=await h.engine.prepare(input({jobId}));h.state.watermarkChecked=true;h.state.watermarkDisabled=true;h.state.watermarkMandatory=true;
- await assert.rejects(h.engine.submit(prepared,{beforeSubmit:()=>assert.fail('Mandatory watermark reached durable paid callback')}),error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.unknownOutcome===false);assert.equal(h.state.submitted,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts',jobId+'.json')),{code:'ENOENT'});await h.engine.release(prepared);
+test('mandatory ON satisfies default video policy, while locked OFF and missing state block ON before upload',async t=>{
+ const required=await harness(t,{watermarkChecked:true,watermarkMandatory:true,watermarkDisabled:true});
+ const capabilities=[];
+ await required.engine.generate(input(),{onWatermarkCapability:details=>capabilities.push(details.visibleWatermarkCapability),beforeSubmit(){assert.equal(required.state.watermarkChecked,true);}});
+ assert.deepEqual(capabilities,['required','required']);assert.equal(required.state.submitted,1);assert.equal(required.state.watermarkMutations,0);
+ for(const [options,capability] of [[{watermarkDisabled:true},'optional'],[{watermarkUnavailable:true},'unknown']]){
+  const h=await harness(t,options),reported=[];
+  await assert.rejects(h.engine.generate(input({references:[{kind:'image',dataUrl:PNG}]}),{onWatermarkCapability:details=>reported.push(details.visibleWatermarkCapability),beforeSubmit:()=>assert.fail('Unverified ON reached paid boundary')}),{code:'VISIBLE_WATERMARK_UNVERIFIED'});
+  assert.deepEqual(reported,[capability]);assert.equal(h.uploads.length,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);assert.equal(h.state.releases,1);
+ }
+});
+
+test('explicit OFF blocks mandatory watermark before uploads and reports Google evidence',async t=>{
+ for(const [model,options,reason] of [
+  [input().model,{watermarkChecked:true,watermarkDisabled:true},/заблокировал включённый/],
+  ['veo-3.1-fast-i2v-8s-landscape',{watermarkChecked:true,watermarkMandatory:true},/Visible watermarking is required in your region/],
+ ]){
+  const h=await harness(t,options),capabilities=[];
+  await assert.rejects(h.engine.generate(input({model,videoWatermark:'without',jobId:crypto.randomUUID(),references:[{kind:'image',dataUrl:PNG}]}),{onWatermarkCapability:details=>capabilities.push(details.visibleWatermarkCapability),beforeSubmit:()=>assert.fail('Required watermark reached paid boundary')}),{code:'VISIBLE_WATERMARK_REQUIRED',message:reason});
+  assert.deepEqual(capabilities,['required']);assert.equal(h.uploads.length,0);assert.equal(h.state.submitted,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);assert.equal(h.state.releases,1);
+ }
+});
+
+test('explicit OFF drift to mandatory ON blocks normal submission and receipt before spend and refreshes capability',async t=>{
+ const h=await harness(t),jobId=crypto.randomUUID(),prepared=await h.engine.prepare(input({jobId,videoWatermark:'without'}));
+ h.state.watermarkChecked=true;h.state.watermarkDisabled=true;
+ const capabilities=[];
+ await assert.rejects(h.engine.submit(prepared,{onWatermarkCapability:details=>capabilities.push(details.visibleWatermarkCapability),beforeSubmit:()=>assert.fail('Mandatory watermark reached durable paid callback')}),error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.unknownOutcome===false);
+ assert.deepEqual(capabilities,['required']);assert.equal(h.state.submitted,0);assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);
+ await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts',jobId+'.json')),{code:'ENOENT'});await h.engine.release(prepared);
+});
+
+test('read-only watermark inspection needs only the owned account drawer and reports capability',async t=>{
+ for(const [options,visibleWatermarkCapability] of [
+  [{watermarkChecked:true,watermarkDisabled:true},'required'],
+  [{watermarkMandatory:true,watermarkChecked:null},'required'],
+  [{watermarkChecked:true},'optional'],
+  [{watermarkDisabled:true},'optional'],
+  [{watermarkUnavailable:true},'unknown'],
+ ]){
+  const h=await harness(t,options);
+  assert.deepEqual(await h.engine.inspectWatermark(7,{email:EMAIL.toUpperCase()}),{accountId:7,accountEmail:EMAIL,visibleWatermarkCapability});
+  for(const {op,arg} of h.ops){assert.ok(['state','exists','click','account','visible-watermark'].includes(op),op);if(op==='click')assert.ok(['Сведения об аккаунте','Закрыть панель аккаунта'].includes(arg.name),arg.name);if(op==='visible-watermark')assert.equal(Object.hasOwn(arg,'setChecked'),false);}
+  assert.equal(h.state.watermarkMutations,0);assert.equal(h.state.accountOpen,false);assert.equal(h.state.releases,1);
+ }
+ const h=await harness(t,{visibleEmail:'other@example.test'});
+ await assert.rejects(h.engine.inspectWatermark(7),{code:'ACCOUNT_MISMATCH'});
+ assert.equal(h.state.watermarkReads,0);assert.equal(h.state.accountOpen,false);assert.equal(h.state.releases,1);
+ const editor=await harness(t,{watermarkUnavailable:true});
+ const inspected=await editor.engine.inspect(7);assert.equal(inspected.ready,true);assert.equal(inspected.visibleWatermarkCapability,'unknown');assert.equal(editor.state.acquisitions,1);
+});
+
+test('no-spend video browser check returns verified OFF for explicit without',async t=>{
+ const h=await harness(t,{watermarkChecked:true}),capabilities=[];
+ const checked=await h.engine.check(input({videoWatermark:'without'}),{onWatermarkCapability:details=>capabilities.push(details.visibleWatermarkCapability)});
+ assert.equal(checked.visibleWatermark,'off');assert.equal(checked.submitted,false);assert.deepEqual(capabilities,['optional']);assert.equal(h.state.watermarkMutations,1);
 });
 
 test('image generation and receipt recovery never read or mutate the video watermark preference',async t=>{
@@ -2918,8 +3096,9 @@ test('Agent Edit checks watermark before source upload and before receipt or its
  const preview='https://storage.googleapis.com/ai-sandbox-videofx/image/'+GUID;
  const agentEdit={async startAgentSession(){},async configureAgentEdit(){},async verifyAgentEditSettings(){},async attachAgentAsset(){},async prepareAgentProposal(){preparedReads=h.state.watermarkReads;h.state.watermarkChecked=true;h.state.watermarkDisabled=mandatory;h.state.watermarkMandatory=mandatory;return {source:{origin:'https://storage.googleapis.com',path:'/ai-sandbox-videofx/image/'+GUID},quoteCredits:9,permissionTitle:'Would you like me to kick off this 1 video generation, costing 9 credits?'};},async approveAgentEdit(page,binding,{beforeSubmit}){await beforeSubmit();assert.equal(h.state.watermarkChecked,false);assert.ok(h.state.watermarkReads>preparedReads);assert.equal(h.state.accountOpen,false);approvals++;}};
  h=await harness(t,{edit:true,recover:true,agentEdit,watermarkChecked:true,sourcePoster:'https://flow-content.google/image/'+GUID,historyPoster:'https://flow-content.google/image/result-owned',inspectVideo:async()=>({durationSeconds:3,mimeType:'video/mp4',width:1280,height:720}),operation(op,arg,state){if(op==='click'&&arg.name==='Добавить медиа'){assert.equal(state.watermarkChecked,false);assert.ok(state.watermarkReads>0);assert.equal(state.accountOpen,false);}if(op==='agent-scene-result'){state.opened=true;return {ready:true,prompt:input().prompt,ingredients:[],sourceVideos:[],sourcePreviews:[preview],ingredientsReady:true,posters:['https://flow-content.google/image/result-owned'],url:state.url};}}});
- const jobId=crypto.randomUUID(),running=h.engine.generate(input({jobId,model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),{beforeSubmit(){assert.equal(mandatory,false,'Mandatory Agent watermark reached receipt callback');assert.equal(h.state.watermarkChecked,false);assert.equal(approvals,0);}});
+ const capabilities=[],jobId=crypto.randomUUID(),running=h.engine.generate(input({jobId,videoWatermark:'without',model:'omni-1.2-flash-edit-landscape',references:[{kind:'video',path:source}]}),{onWatermarkCapability:details=>capabilities.push(details.visibleWatermarkCapability),beforeSubmit(){assert.equal(mandatory,false,'Mandatory Agent watermark reached receipt callback');assert.equal(h.state.watermarkChecked,false);assert.equal(approvals,0);}});
  if(mandatory){await assert.rejects(running,error=>error.code==='VISIBLE_WATERMARK_REQUIRED'&&error.unknownOutcome===false);await assert.rejects(fs.access(path.join(h.dataDir,'browser-receipts',jobId+'.json')),{code:'ENOENT'});}else await running;
+ assert.deepEqual(capabilities,['optional',mandatory?'required':'optional']);
  assert.equal(approvals,mandatory?0:1);assert.equal(h.state.watermarkMutations,mandatory?1:2);assert.equal(h.state.submitted,0);assert.equal(h.state.accountOpen,false);
  }
 });

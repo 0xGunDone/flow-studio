@@ -22,6 +22,47 @@ async function fixture(t,accounts=[account(7)]){
 }
 const localResult=(file,id=7)=>({media:[{path:file,kind:'video',mediaGenerationId:'source-generation-id'}],accountId:id,accountEmail:account(id).email});
 
+test('video watermark choice routes before submission, preserves a pinned account, and survives retry', async t => {
+ const {r,file,settle}=await fixture(t,[account(5,{browserReady:true}),account(6,{visibleWatermarkCapability:'required',browserReady:true}),account(7,{visibleWatermarkCapability:'optional',browserReady:true}),account(8,{visibleWatermarkCapability:'optional',browserReady:false})]);
+ const attempts=[];
+ r.attachBrowserEngine({supports:()=>true,generate:async (input,{beforeSubmit})=>{
+  attempts.push([input.accountId,input.videoWatermark]);await beforeSubmit();return localResult(file,input.accountId);
+ }});
+ const base={model:MODEL,prompt:'A sample'};
+ const marked=r.generate({...base,requestId:'marked'});await settle();
+ assert.equal(r.publicJob(r.jobs[0]).videoWatermark,'with');
+ assert.deepEqual(r.generate({...base,requestId:'marked',videoWatermark:'with'}),marked);
+ assert.throws(()=>r.generate({...base,requestId:'marked',videoWatermark:'without'}),/requestId/);
+ const unmarked=r.generate({...base,videoWatermark:'without'});await settle();
+ await r.retryGeneration({jobId:unmarked.jobId,requestId:'unmarked-repeat'});await settle();
+ r.generate({...base,accountId:5,videoWatermark:'without'});await settle();
+ assert.equal(r.jobs[0].errorCode,'VISIBLE_WATERMARK_UNVERIFIED');
+ r.generate({...base,accountId:6,videoWatermark:'without'});await settle();
+ assert.equal(r.jobs[0].errorCode,'VISIBLE_WATERMARK_REQUIRED');
+ assert.equal(r.jobs[0].accountId,6);
+ r.accounts[2].browserReady=false;
+ r.generate({...base,videoWatermark:'without'});await settle();
+ assert.equal(r.jobs[0].errorCode,'VISIBLE_WATERMARK_ACCOUNT_UNAVAILABLE');
+ assert.equal(r.jobs[0].unknownOutcome,false);
+ assert.deepEqual(attempts,[[6,'with'],[7,'without'],[7,'without']]);
+});
+
+test('watermark account observations persist and are discarded on email change', async t => {
+ const {r,folder}=await fixture(t);
+ r.refreshAccounts=Runtime.prototype.refreshAccounts.bind(r);
+ let email=account(7).email;
+ const rows=async()=>[{id:7,email,is_active:true,video_enabled:true}];
+ r.request=rows;await r.refreshAccounts();
+ await r.rememberVisibleWatermark({accountId:7,accountEmail:email.toUpperCase(),visibleWatermarkCapability:'optional'});
+ assert.equal(r.accounts[0].visibleWatermarkCapability,'optional');
+ await assert.rejects(r.rememberVisibleWatermark({accountId:7,accountEmail:'wrong@example.test',visibleWatermarkCapability:'required'}),{code:'ACCOUNT_MISMATCH'});
+ const restarted=new Runtime({dataDir:folder});restarted.request=rows;await restarted.initializeHistory();await restarted.refreshAccounts();
+ assert.equal(restarted.accounts[0].visibleWatermarkCapability,'optional');
+ email='replacement@example.test';await restarted.refreshAccounts();
+ assert.equal(restarted.accounts[0].visibleWatermarkCapability,'unknown');
+ assert.equal(restarted.accountWatermarks.size,0);
+});
+
 test('new server-route videos stop before jobs credential access HTTP or account changes when visible watermark policy cannot be verified',async t=>{
  const {r,file,events,settle}=await fixture(t);let requests=0,credentials=0,browserCalls=0;
  t.mock.method(http,'request',()=>{requests++;throw new Error('No server generation request is permitted');});

@@ -96,14 +96,16 @@ app.whenReady().then(async()=>{
  const inspectIsolatedBrowser=id=>accountAction(async()=>{
   if(!Number.isSafeInteger(id)||id<=0||runtime.jobs.some(j=>j.status==='running'))throw new Error('Выберите аккаунт после завершения генерации.');
   const account=(await runtime.refreshAccounts()).find(a=>a.id===id&&a.isActive);if(!account)throw new Error('Аккаунт недоступен.');
-  return isolatedEngine.inspect(id,{email:account.email});
+  const result=await isolatedEngine.inspect(id,{email:account.email});
+  if(result.visibleWatermarkCapability)await runtime.rememberVisibleWatermark(result);
+  return result;
  });
  handle('inspectIsolatedBrowser',inspectIsolatedBrowser);
  const checkIsolatedInputs=input=>accountAction(async()=>{
   if(!Number.isSafeInteger(input?.accountId)||input.accountId<=0||runtime.jobs.some(j=>j.status==='running'))throw new Error('Выберите аккаунт после завершения генерации.');
   const account=(await runtime.refreshAccounts()).find(a=>a.id===input.accountId&&a.isActive);
   if(!account)throw new Error('Аккаунт недоступен.');
-  return isolatedEngine.check({...input,accountEmail:account.email});
+  return isolatedEngine.check({...input,accountEmail:account.email},{onWatermarkCapability:state=>runtime.rememberVisibleWatermark(state)});
  });
  const accountAction=fn=>{
   if(accountTask||runtime.accountActionPending||shutdownTask||runtime.closing||runtime.retryTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
@@ -167,7 +169,21 @@ app.whenReady().then(async()=>{
  handle('refreshAccounts',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return runtime.refreshAccounts();});
  handle('addAccount',()=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');return accountManager.addAccount();});
  handle('reconnectAccount',id=>{if(accountTask)throw new Error('Дождитесь завершения действия с аккаунтами.');if(!runtime.accounts.some(a=>a.id===id))throw new Error('Аккаунт не найден');return accountManager.reconnectAccount(id);});
- const checkAccount=async id=>{await managedAccounts.syncAccountNow(id);return runtime.checkAccount(id);};
+ const checkAccount=async id=>{
+  await managedAccounts.syncAccountNow(id);
+  const result=await runtime.checkAccount(id);
+  const account=runtime.accounts.find(item=>item.id===id);
+  if(!account?.browserReady || typeof isolatedEngine.inspectWatermark!=='function')return result;
+  let observed;
+  try{observed=await isolatedEngine.inspectWatermark(id,{email:account.email,signal:runtime.startController.signal});}
+  catch(error){
+   runtime.startController.signal.throwIfAborted();
+   if(error.code==='ACCOUNT_MISMATCH')throw error;
+   observed={accountId:id,accountEmail:account.email,visibleWatermarkCapability:'unknown'};
+  }
+  await runtime.rememberVisibleWatermark(observed);
+  return {...result,visibleWatermarkCapability:observed.visibleWatermarkCapability};
+ };
  handle('checkAccount',id=>accountAction(()=>checkAccount(id)));
  handle('checkEnabledAccounts',()=>accountAction(()=>{
   if(runtime.jobs.some(job=>job.status==='running'))throw new Error('Дождитесь завершения генерации перед проверкой аккаунтов.');
@@ -238,12 +254,10 @@ app.whenReady().then(async()=>{
    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).length!==1||!Object.hasOwn(params,'accountId'))throw new Error('Для проверки Chrome укажите только accountId.');
    return inspectBrowser(params.accountId);
   }
-  if(method==='isolated_inspect')return accountAction(async()=>{
+  if(method==='isolated_inspect'){
    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).length!==1||!Number.isSafeInteger(params.accountId)||params.accountId<=0)throw new Error('Укажите accountId подключённого аккаунта.');
-   if(runtime.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
-   const account=(await runtime.refreshAccounts()).find(a=>a.id===params.accountId&&a.isActive);if(!account)throw new Error('Аккаунт недоступен.');
-   return isolatedEngine.inspect(account.id,{email:account.email});
-  });
+   return inspectIsolatedBrowser(params.accountId);
+  }
   if(method==='native_prepare')return accountAction(async()=>{
    if(!params||typeof params!=='object'||Array.isArray(params)||Object.keys(params).some(key=>!['accountId','model','prompt','referencePaths'].includes(key))||!Number.isSafeInteger(params.accountId)||params.accountId<=0||typeof params.model!=='string'||!/^omni-1\.2-flash-([3-9]|1[0-5])s-(landscape|portrait)(-360p)?$/.test(params.model)||typeof params.prompt!=='string'||!params.prompt.trim()||params.prompt.length>20000||params.prompt.includes('\0')||!Array.isArray(params.referencePaths)||params.referencePaths.length>7||params.referencePaths.some(file=>typeof file!=='string'||!path.isAbsolute(file)||file.length>4096||/[\x00-\x1f\x7f]/.test(file)||!/\.(png|jpe?g|webp|gif)$/i.test(file)))throw new Error('Укажите аккаунт, точную модель Omni 1.2 Flash, описание и до семи абсолютных путей изображений в referencePaths.');
    return watermarkRouteUnverified();
