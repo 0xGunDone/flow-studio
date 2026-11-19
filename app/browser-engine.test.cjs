@@ -788,6 +788,34 @@ test('two-frame no-spend check uploads Start then End and verifies canonical cro
   assert.deepEqual(await fs.readdir(h.dataDir), []);
 });
 
+test('marked five-second Frames check waits through the upload placeholder before adding the start frame', async t => {
+  let previewReads = 0;
+  const h = await harness(t, {
+    watermarkChecked: true, watermarkDisabled: true, watermarkMandatory: true,
+    operation(op, arg, state) {
+      if (op === 'asset' && !arg.select && state.selected && state.pickerOpen) {
+        previewReads++;
+        if (previewReads === 1) {
+          return { exists: true, preview: 'data:image/gif;base64,AAAA', ingredients: [] };
+        }
+      }
+      if (op === 'click' && arg.name === 'Добавить в запрос') assert.ok(previewReads >= 2);
+    },
+  });
+  const result = await h.engine.check(input({
+    model: 'omni-1.2-flash-i2v-5s-landscape', videoWatermark: 'with',
+    references: [{ kind: 'image', dataUrl: PNG }],
+  }));
+  assert.equal(result.visibleWatermark, 'on');
+  assert.equal(result.uploadedImages, 1);
+  assert.equal(result.cleared, true);
+  assert.deepEqual(h.state.frameRoles, ['Старт']);
+  assert.equal(h.uploads.length, 1);
+  assert.equal(h.ops.filter(op => op.op === 'click' && op.arg.name === 'Добавить в запрос').length, 1);
+  assert.equal(h.ops.some(op => op.op === 'submit'), false);
+  assert.equal(h.state.submitted, 0);
+});
+
 test('image engine shares one-submit transaction and ordered1/2ref uploads while returning validated PNG', async t => {
   for (const refs of [[PNG], [PNG, GIF]]) {
     const h = await harness(t, { image: true }), model = 'gemini-3.1-flash-image-square'; let durable = 0;
@@ -1580,10 +1608,10 @@ test('portrait History download follows only its own aria-controlled More option
   value.prompt+=' changed';assert.throws(()=>h.run('image-download-option',{binding,menuId:menu.menuId,resolution:'1K',click:true}),/RESULT_INPUT_MISMATCH/);assert.equal(value.downloadOptionClicks,1);
 });
 
-test('English uploaded asset matches filename newline Image and exact Preview of filename alt', () => {
+test('English uploaded asset requires a loaded, uniquely named Preview of filename', () => {
   const filename = 'ref-cafe123456789abc-0-abc12345.png'; let selected = 0;
   const option = { innerText: filename + '\nImage', getAttribute: () => null, getClientRects: () => [1], click: () => { selected++; } };
-  const preview = { alt: 'Preview of ' + filename, currentSrc: 'https://flow-content.google/image/upload-owned?signature=fixture', getClientRects: () => [1] };
+  const preview = { alt: 'Preview of ' + filename, currentSrc: 'https://flow-content.google/image/upload-owned?signature=fixture', complete: true, naturalWidth: 1280, getClientRects: () => [1] };
   const unrelated = { alt: 'Preview of other.png', currentSrc: 'https://flow-content.google/image/other', getClientRects: () => [1] };
   const context = {
     location: { origin: 'https://flow.google.com' }, getComputedStyle: () => ({ visibility: 'visible' }),
@@ -1593,6 +1621,13 @@ test('English uploaded asset matches filename newline Image and exact Preview of
   const state = run({ name: filename });
   assert.equal(state.exists, true); assert.equal(state.preview, preview.currentSrc); assert.equal(selected, 0);
   assert.equal(run({ name: filename, select: true }).exists, true); assert.equal(selected, 1);
+  preview.complete = false;
+  assert.equal(run({ name: filename }).preview, null);
+  preview.complete = true; preview.naturalWidth = 0;
+  assert.equal(run({ name: filename }).preview, null);
+  preview.naturalWidth = 1280; unrelated.alt = preview.alt;
+  assert.throws(() => run({ name: filename }), /INGREDIENT_AMBIGUOUS/);
+  unrelated.alt = 'Preview of other.png';
   preview.alt += '.different';
   assert.equal(run({ name: filename }).preview, null); assert.equal(selected, 1);
 });

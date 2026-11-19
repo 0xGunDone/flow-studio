@@ -78,6 +78,8 @@ For extend, obtain `sourceVideoId` from existing job `media[index].mediaGenerati
 
 ## Optional no-spend browser check
 
+`INGREDIENT_NOT_VERIFIED` is a pre-submit failure to confirm an uploaded image preview or attachment. Flow Studio waits for a loaded, identifiable preview of the selected file. For a requested browser diagnostic, use the same account, settings, and inputs with `checkBrowser:true`. Preserve the exact failure and use job history to verify the submission state before any retry.
+
 `prepare_generation` defaults to local validation. For an explicitly requested upload check, add `checkBrowser:true` and an exact positive `accountId` to a catalog-supported Nano Banana, Omni 1.2, or Veo preparation. Requested image references, explicit frame roles, or an Edit source video are uploaded to Google in the managed browser; the owned composer and settings are checked, then the owned composer is cleared and the browser is released. It never clicks Generate or creates a job. Successful output includes `checks.browser: "passed"`, `checks.upload`, and `browserCheck` with `submitted:false`, `cleared:true`, and uploaded image count. This does not prove credit balance or paid generation acceptance. Never automatically retry this check after failure. `generateArguments` omits `checkBrowser`; the `generate` tool rejects that flag. The bridge response timeout is 600 seconds for `checkBrowser:true` and 120 seconds for ordinary local preparation; allow the same wait in the MCP client, including human rights consent. Expiry never authorizes automatic upload retry.
 
 ## Visible-watermark verification before new video spend
