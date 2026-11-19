@@ -281,7 +281,24 @@ function flowDOM(op,arg={}){
   const previews=[...document.querySelectorAll('img')].filter(el=>visible(el)&&['Предпросмотр ресурса "'+arg.name+'"','Asset preview "'+arg.name+'"','Preview of '+arg.name].includes(el.alt));
   if(previews.length>1)error('INGREDIENT_AMBIGUOUS','Найдено несколько предпросмотров загруженного изображения.');
   const preview=previews[0];
-  return {exists:xs.length===1,preview:preview?.complete&&preview.naturalWidth>0?(preview.currentSrc||preview.src):null,ingredients:chips()};
+  const previewURL=preview?.complete&&preview.naturalWidth>0?(preview.currentSrc||preview.src):null;
+  const pane=preview?.closest?.('flow-add-menu-detail-pane'),picker=pane?.closest?.('flow-add-menu-popover-content');
+  // An opaque Flow preview proves readiness only in the selected frame picker.
+  // The resulting chip still has to expose a canonical image identity.
+  const ownFramePreview=()=>{
+   if(!previewURL)return false;
+   try{
+    const url=new URL(previewURL);
+    return url.origin==='https://flow.google.com'&&!url.username&&!url.password&&!url.search&&!url.hash&&/^\/asb\/[^/]{1,4096}$/.test(url.pathname)&&!/%(?:2f|5c)/i.test(url.pathname);
+   }catch{return false;}
+  };
+  const framePreviewReady=Boolean(picker&&xs[0]?.closest?.('flow-add-menu-popover-content')===picker&&xs[0].getAttribute('aria-selected')==='true'&&ownFramePreview());
+  if(arg.addFrame){
+   if(!framePreviewReady)error('INGREDIENT_NOT_VERIFIED','Предпросмотр выбранного кадра изменился до добавления.');
+   click(one('button','Добавить в запрос',pane));
+   return true;
+  }
+  return {exists:xs.length===1,preview:previewURL,framePreviewReady,ingredients:chips()};
  }
  if(op==='baseline')return all('group').map(el=>{const poster=el.querySelector('img')?.getAttribute('src')||'';if(el.querySelector('flow-pending-tile')&&!poster)error('FLOW_EXISTING_GENERATION','В проекте уже есть незавершённая генерация. Дождитесь результата перед новым запуском.');el.setAttribute('data-flow-studio-baseline',arg.job);return {name:label(el),poster};});
  if(op==='bind-result'){
@@ -665,14 +682,17 @@ class FlowPage{
    selected=await this.until(async()=>{
     const asset=await this.run('asset',{name:file.name});
     const identity=mediaIdentity(asset.preview);
-    if(asset.ingredients.length===expected.length+1)return {identity,needsAdd:false};
-    return asset.exists&&asset.ingredients.length===expected.length&&identity?{identity,needsAdd:true}:null;
+    if(asset.ingredients.length===expected.length+1)return {identity};
+    if(!asset.exists||asset.ingredients.length!==expected.length)return null;
+    if(identity)return {identity,addThrough:'picker'};
+    return frameRole&&asset.framePreviewReady?{addThrough:'frame-preview'}:null;
    },15000,'asset-preview');
   }catch(error){
    if(error.code!=='FLOW_UI_TIMEOUT')throw error;
    throw fail('INGREDIENT_NOT_VERIFIED','Flow не показал подтверждённый предпросмотр загруженного изображения. Генерация не запускалась.');
   }
-  if(selected.needsAdd)await this.click('Добавить в запрос');
+  if(selected.addThrough==='frame-preview')await this.run('asset',{name:file.name,addFrame:true});
+  if(selected.addThrough==='picker')await this.click('Добавить в запрос');
   const composer=await this.until(async()=>{const c=await this.run('composer');return c.ingredients.length===expected.length+1?c:null;},15000,'ingredient-chip');
   if(JSON.stringify(composer.ingredients.slice(0,-1))!==JSON.stringify(expected))throw fail('INGREDIENT_CHANGED','Предыдущие ингредиенты изменились.');
   const attached=composer.ingredients.at(-1),identity=frameRole?attached:selected.identity||attached;
