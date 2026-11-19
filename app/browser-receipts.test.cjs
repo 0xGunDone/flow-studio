@@ -25,6 +25,15 @@ test('invalid key, schema, secrets, noncanonical ingredients and oversized basel
  for(const patch of [{schema:2},{jobId:randomUUID()},{nonce:'wrong'},{cookies:'private'},{accountId:0},{accountEmail:'wrong'},{projectURL:'https://evil.test/project/a'},{ingredients:['https://flow-content.google/image/a?token=private']},{ingredients:['https://flow-content.google/video/a']},{baseline:[{path:'/private/result'}]},{baseline:[{id:'../escape'}]},{baseline:Array.from({length:150},()=>({name:'x'.repeat(20000)}))}])await assert.rejects(store.write(id,{...record(),...patch}),{code:'BROWSER_RECEIPT_INVALID'});
  await assert.rejects(fs.access(path.join(dir,'browser-receipts')),{code:'ENOENT'});
 });
+test('a Frames receipt retains the exact first-party frame address for result verification',async t=>{
+ const {store,id}=await fixture(t),address='https://flow.google.com/asb/opaque-preview=w1280',frames={...record(),model:'omni-1.2-flash-i2v-5s-landscape'};
+ await assert.rejects(store.write(id,{...record(),ingredients:[address]}),{code:'BROWSER_RECEIPT_INVALID'});
+ for(const invalid of [address+'?extra=private',address+'#fragment',address.replace('flow.google.com','evil.example')]){
+  await assert.rejects(store.write(id,{...frames,ingredients:[invalid]}),{code:'BROWSER_RECEIPT_INVALID'});
+ }
+ await store.write(id,{...frames,ingredients:[address]});
+ assert.deepEqual((await store.read(id)).ingredients,[address]);
+});
 test('read rejects unsafe permissions symlink hardlink corruption and mismatched stored key',async t=>{
  const {dir,store,id}=await fixture(t);await store.write(id,record());const file=path.join(dir,'browser-receipts',id+'.json'),bytes=await fs.readFile(file);
  await fs.chmod(file,0o644);await assert.rejects(store.read(id),{code:'BROWSER_RECEIPT_UNSAFE'});await fs.chmod(file,0o600);

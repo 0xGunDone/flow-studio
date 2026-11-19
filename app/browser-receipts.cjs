@@ -2,6 +2,7 @@
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const {randomUUID}=require('node:crypto');
+const {modelSettings}=require('./renderer.js');
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const validId=value=>typeof value==='string'&&value.length===36&&UUID.test(value);
 const MAX_BYTES=2*1024*1024;
@@ -11,7 +12,9 @@ function validate(jobId,value){
  if(!validId(jobId)||!plain(value)||Object.keys(value).some(key=>!['schema','jobId','nonce','model','prompt','accountId','accountEmail','projectURL','ingredients','baseline','createdAt','sourceVideo','sourceVideoDuration','sourceScene','agentProposal'].includes(key)))throw fail('Некорректная запись отправки браузера.');
  const record={schema:1,jobId,nonce:jobId,...value};
  if(record.schema!==1||record.jobId!==jobId||!validId(record.nonce)||typeof record.model!=='string'||!record.model||record.model.length>200||typeof record.prompt!=='string'||!record.prompt.trim()||record.prompt.length>20000||!Number.isSafeInteger(record.accountId)||record.accountId<=0||typeof record.accountEmail!=='string'||record.accountEmail.length>320||!/^[^\s@]+@[^\s@]+$/.test(record.accountEmail)||typeof record.projectURL!=='string'||/[\r\n]/.test(record.projectURL)||!/^https:\/\/flow\.google\.com\/project\/[A-Za-z0-9_-]+$/.test(record.projectURL)||typeof record.createdAt!=='string'||!Number.isFinite(Date.parse(record.createdAt)))throw fail('Некорректные данные отправки браузера.');
- if(!Array.isArray(record.ingredients)||record.ingredients.length>7||record.ingredients.some(value=>typeof value!=='string'||/[\r\n]/.test(value)||!/^https:\/\/flow-content\.google\/image\/[A-Za-z0-9_-]{1,256}$/.test(value)))throw fail('Некорректные ингредиенты записи отправки.');
+ const frames=modelSettings({id:record.model}).methods.includes('frames');
+ const verifiedIngredient=value=>typeof value==='string'&&!/[\r\n]/.test(value)&&(/^https:\/\/flow-content\.google\/image\/[A-Za-z0-9_-]{1,256}$/.test(value)||frames&&/^https:\/\/flow\.google\.com\/asb\/[A-Za-z0-9_=\-]{1,4096}$/.test(value));
+ if(!Array.isArray(record.ingredients)||record.ingredients.length>7||record.ingredients.some(value=>!verifiedIngredient(value)))throw fail('Некорректные ингредиенты записи отправки.');
  if(record.sourceVideo!==undefined||record.sourceVideoDuration!==undefined){if(typeof record.sourceVideo!=='string'||/[\r\n]/.test(record.sourceVideo)||!/^https:\/\/flow-content\.google\/video\/[A-Za-z0-9_-]{1,256}$/.test(record.sourceVideo)||typeof record.sourceVideoDuration!=='number'||!Number.isFinite(record.sourceVideoDuration)||record.sourceVideoDuration<=0||record.sourceVideoDuration>15.02||record.ingredients.length>5)throw fail('Некорректное исходное видео записи отправки.');}
  if(record.sourceScene!==undefined){
   const scene=record.sourceScene,model=/^omni-1\.2-flash-edit-(landscape|portrait)(-360p)?$/.exec(record.model);

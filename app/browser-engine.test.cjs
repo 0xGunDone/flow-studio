@@ -790,13 +790,15 @@ test('two-frame no-spend check uploads Start then End and verifies canonical cro
 
 test('marked five-second Frames check waits through the placeholder and confirms the selected Flow preview', async t => {
   let previewReads = 0;
+  const framePreview = 'https://flow.google.com/asb/private-preview=w1280';
   const h = await harness(t, {
     watermarkChecked: true, watermarkDisabled: true, watermarkMandatory: true,
     async operation(op, arg, state) {
       if (op === 'asset' && arg.addFrame) {
         assert.ok(previewReads >= 2);
         assert.ok(state.pickerOpen);
-        state.ingredients.push(state.selected.identity + '-crop');
+        assert.equal(arg.framePreview, framePreview);
+        state.ingredients.push(framePreview);
         state.pickerOpen = false;
         return true;
       }
@@ -805,7 +807,7 @@ test('marked five-second Frames check waits through the placeholder and confirms
         if (previewReads === 1) {
           return { exists: true, preview: 'data:image/gif;base64,AAAA', ingredients: [] };
         }
-        return { exists: true, preview: 'https://flow.google.com/asb/private-preview', framePreviewReady: true, ingredients: [] };
+        return { exists: true, preview: framePreview, framePreview, ingredients: [] };
       }
       if (op === 'click' && arg.name === 'Добавить в запрос') assert.fail('Frame preview must use its own picker action');
     },
@@ -820,7 +822,7 @@ test('marked five-second Frames check waits through the placeholder and confirms
   assert.deepEqual(h.state.frameRoles, ['Старт']);
   assert.equal(h.uploads.length, 1);
   assert.equal(h.ops.filter(op => op.op === 'asset' && op.arg.addFrame).length, 1);
-  assert.deepEqual(h.ops.find(op => op.op === 'clear-owned').arg.ingredients, [h.uploads[0].identity + '-crop']);
+  assert.deepEqual(h.ops.find(op => op.op === 'clear-owned').arg.ingredients, [framePreview]);
   assert.equal(h.ops.some(op => op.op === 'submit'), false);
   assert.equal(h.state.submitted, 0);
 });
@@ -1643,7 +1645,7 @@ test('English uploaded asset requires a loaded, uniquely named Preview of filena
 
 test('opaque frame preview requires the selected exact row and its own picker action', () => {
   const filename = 'ref-exact-frame.png';
-  const alias = 'https://flow.google.com/asb/opaque.preview=';
+  const alias = 'https://flow.google.com/asb/opaque-preview=w1280';
   let selected = true, clicks = 0;
   const button = { innerText: 'Add to prompt', getAttribute: () => null, getClientRects: () => [1], click: () => { clicks++; } };
   const picker = {};
@@ -1664,7 +1666,7 @@ test('opaque frame preview requires the selected exact row and its own picker ac
   const run = (arg = {}) => vm.runInNewContext(evaluatePrefix + '("asset",' + JSON.stringify({ name: filename, ...arg }) + ')', context);
   for (const source of ['data:image/gif;base64,AAAA', 'https://flow.google.com.evil.test/asb/private-preview', alias + '#changed', alias + '?source=other', alias + '%2fother']) {
     preview.currentSrc = source;
-    assert.equal(run().framePreviewReady, false);
+    assert.equal(run().framePreview, null);
     assert.throws(() => run({ addFrame: true }), /INGREDIENT_NOT_VERIFIED/);
   }
   preview.currentSrc = alias;
@@ -1675,8 +1677,9 @@ test('opaque frame preview requires the selected exact row and its own picker ac
   assert.throws(() => run({ addFrame: true }), /INGREDIENT_NOT_VERIFIED/);
   assert.equal(clicks, 0);
   pane.closest = () => picker;
-  assert.equal(run().framePreviewReady, true);
-  assert.equal(run({ addFrame: true }), true);
+  assert.equal(run().framePreview, alias);
+  assert.throws(() => run({ addFrame: true, framePreview: alias + 'wrong' }), /INGREDIENT_NOT_VERIFIED/);
+  assert.equal(run({ addFrame: true, framePreview: alias }), true);
   assert.equal(clicks, 1);
 });
 
@@ -1696,6 +1699,12 @@ test('frame picker selects exact filename button and Image ingredient chip expos
   assert.equal(JSON.stringify(run('composer').ingredients), '["https://flow-content.google/image/frame-cropped"]');
   const history=historyDOMFixture([{prompt:'Frame prompt',poster:'frame-result',ingredients:[image.currentSrc]}]).run('history',{poster:'frame-result'});
   assert.equal(JSON.stringify(history.ingredients), '["https://flow-content.google/image/frame-cropped"]'); assert.equal(history.ingredientsReady, true);
+  image.currentSrc='https://flow.google.com/asb/opaque-preview=w1280';
+  assert.throws(() => run('composer'), /INGREDIENT_NOT_VERIFIED/);
+  chip.closest=selector=>selector==='.frame-trigger'?{}:null;
+  assert.equal(run('composer').ingredients[0], image.currentSrc);
+  const aliasHistory=historyDOMFixture([{prompt:'Frame prompt',poster:'frame-result',ingredients:[image.currentSrc]}]).run('history',{poster:'frame-result'});
+  assert.equal(aliasHistory.ingredients[0], image.currentSrc); assert.equal(aliasHistory.ingredientsReady, true);
   assert.equal(run('asset', { name: filename + '-other' }).exists, false); assert.equal(selected, 1);
 });
 

@@ -117,7 +117,17 @@ function flowDOM(op,arg={}){
  const point=el=>{if(el.disabled||el.getAttribute('aria-disabled')==='true')error('CONTROL_DISABLED','Элемент пока недоступен.');const r=el.getBoundingClientRect();if(r.width<=0||r.height<=0)error('CONTROL_HIDDEN','Элемент недоступен в окне Flow.');const x=r.left+r.width/2,y=r.top+r.height/2;const hit=document.elementFromPoint(x,y);if(!hit||!(hit===el||el.contains(hit)))error('CONTROL_OBSCURED','Кнопку Flow перекрывает другой элемент.');return {x,y};};
  const prompt=()=>{const edit=all('textbox').filter(el=>['Describe how to edit this video…','Опишите, как изменить это видео…','Describe how to edit this video...'].includes(el.getAttribute('aria-label')));return edit.length===1?edit[0]:one('textbox','Что вы хотите создать?');};
  const promptValue=()=>{const value=prompt().innerText;return /^[\r\n]*$/.test(value)?'':value;};
- const chips=()=>all('button').filter(el=>label(el)==='Ингредиент').map(el=>{const images=[...el.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];if(images.length!==1)error('INGREDIENT_NOT_VERIFIED','Не удалось прочитать изображение ингредиента.');const u=new URL(images[0].currentSrc||images[0].src);if(u.origin!=='https://flow-content.google'||!/^\/image\/[A-Za-z0-9_-]{1,256}$/.test(u.pathname))error('INGREDIENT_NOT_VERIFIED','Не удалось проверить ресурс ингредиента.');return u.origin+u.pathname;});
+ const frameImageAddress=value=>typeof value==='string'&&!/[\r\n]/.test(value)&&/^https:\/\/flow\.google\.com\/asb\/[A-Za-z0-9_=\-]{1,4096}$/.test(value)?value:null;
+ const chips=()=>all('button').filter(el=>label(el)==='Ингредиент').map(el=>{
+  const images=[...el.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];
+  if(images.length!==1)error('INGREDIENT_NOT_VERIFIED','Не удалось прочитать изображение ингредиента.');
+  const source=images[0].currentSrc||images[0].src;
+  const frameAddress=el.closest?.('.frame-trigger')?frameImageAddress(source):null;
+  if(frameAddress)return frameAddress;
+  const u=new URL(source);
+  if(u.origin!=='https://flow-content.google'||u.username||u.password||!/^\/image\/[A-Za-z0-9_-]{1,256}$/.test(u.pathname))error('INGREDIENT_NOT_VERIFIED','Не удалось проверить ресурс ингредиента.');
+  return u.origin+u.pathname;
+ });
  const blocked=[...document.querySelectorAll('[role="dialog"]')].filter(visible).some(el=>/подтвердите|verify|captcha|войти|sign in|consent/i.test(label(el)));
  if(blocked||document.querySelector('input[type="password"]'))error('FLOW_VERIFICATION_REQUIRED','Подтвердите вход или проверку Google в окне входа Flow Studio.');
  const uploadRights=()=>{const dialogs=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')].filter(visible).filter(el=>all('button',el).some(button=>['I agree','Я согласен','Принимаю'].includes(label(button))));if(dialogs.length!==1)return null;const dialog=dialogs[0];const value=text(dialog);if(value.length>8192||!/Rights to use this (?:image|video)|Права на использование (?:этого )?(?:изображения|видео)/i.test(value))return null;return {dialog,text:value};};
@@ -283,22 +293,13 @@ function flowDOM(op,arg={}){
   const preview=previews[0];
   const previewURL=preview?.complete&&preview.naturalWidth>0?(preview.currentSrc||preview.src):null;
   const pane=preview?.closest?.('flow-add-menu-detail-pane'),picker=pane?.closest?.('flow-add-menu-popover-content');
-  // An opaque Flow preview proves readiness only in the selected frame picker.
-  // The resulting chip still has to expose a canonical image identity.
-  const ownFramePreview=()=>{
-   if(!previewURL)return false;
-   try{
-    const url=new URL(previewURL);
-    return url.origin==='https://flow.google.com'&&!url.username&&!url.password&&!url.search&&!url.hash&&/^\/asb\/[^/]{1,4096}$/.test(url.pathname)&&!/%(?:2f|5c)/i.test(url.pathname);
-   }catch{return false;}
-  };
-  const framePreviewReady=Boolean(picker&&xs[0]?.closest?.('flow-add-menu-popover-content')===picker&&xs[0].getAttribute('aria-selected')==='true'&&ownFramePreview());
+  const framePreview=picker&&xs[0]?.closest?.('flow-add-menu-popover-content')===picker&&xs[0].getAttribute('aria-selected')==='true'?frameImageAddress(previewURL):null;
   if(arg.addFrame){
-   if(!framePreviewReady)error('INGREDIENT_NOT_VERIFIED','Предпросмотр выбранного кадра изменился до добавления.');
+   if(!framePreview||framePreview!==arg.framePreview)error('INGREDIENT_NOT_VERIFIED','Предпросмотр выбранного кадра изменился до добавления.');
    click(one('button','Добавить в запрос',pane));
    return true;
   }
-  return {exists:xs.length===1,preview:previewURL,framePreviewReady,ingredients:chips()};
+  return {exists:xs.length===1,preview:previewURL,framePreview,ingredients:chips()};
  }
  if(op==='baseline')return all('group').map(el=>{const poster=el.querySelector('img')?.getAttribute('src')||'';if(el.querySelector('flow-pending-tile')&&!poster)error('FLOW_EXISTING_GENERATION','В проекте уже есть незавершённая генерация. Дождитесь результата перед новым запуском.');el.setAttribute('data-flow-studio-baseline',arg.job);return {name:label(el),poster};});
  if(op==='bind-result'){
@@ -410,7 +411,8 @@ function flowDOM(op,arg={}){
     sourcesReady=sourcesReady&&button.getAttribute('aria-busy')==='false'&&Boolean(videos.length||previews.length)&&(!videos.length||Boolean(video))&&(!previews.length||Boolean(preview));
    }else{
     const images=[...button.querySelectorAll('img[alt="Изображение ингредиента"],img[alt="Ingredient image"]')];
-    ingredients.push(images.length===1?canonical(images[0].currentSrc||images[0].src,'image'):null);
+    const source=images.length===1?images[0].currentSrc||images[0].src:null;
+    ingredients.push(canonical(source,'image')||(entry.tagName==='FLOW-EDITOR-HISTORY-STEP-VIDEO'?frameImageAddress(source):null));
    }
   }
   return {ingredients,sourceVideos,sourcePreviews,ingredientsReady:ingredients.every(Boolean)&&sourcesReady};
@@ -684,19 +686,20 @@ class FlowPage{
     const identity=mediaIdentity(asset.preview);
     if(asset.ingredients.length===expected.length+1)return {identity};
     if(!asset.exists||asset.ingredients.length!==expected.length)return null;
-    if(identity)return {identity,addThrough:'picker'};
-    return frameRole&&asset.framePreviewReady?{addThrough:'frame-preview'}:null;
+    if(identity)return {identity,addToPrompt:true};
+    return frameRole&&asset.framePreview?{framePreview:asset.framePreview}:null;
    },15000,'asset-preview');
   }catch(error){
    if(error.code!=='FLOW_UI_TIMEOUT')throw error;
    throw fail('INGREDIENT_NOT_VERIFIED','Flow не показал подтверждённый предпросмотр загруженного изображения. Генерация не запускалась.');
   }
-  if(selected.addThrough==='frame-preview')await this.run('asset',{name:file.name,addFrame:true});
-  if(selected.addThrough==='picker')await this.click('Добавить в запрос');
+  if(selected.framePreview)await this.run('asset',{name:file.name,addFrame:true,framePreview:selected.framePreview});
+  if(selected.addToPrompt)await this.click('Добавить в запрос');
   const composer=await this.until(async()=>{const c=await this.run('composer');return c.ingredients.length===expected.length+1?c:null;},15000,'ingredient-chip');
   if(JSON.stringify(composer.ingredients.slice(0,-1))!==JSON.stringify(expected))throw fail('INGREDIENT_CHANGED','Предыдущие ингредиенты изменились.');
   const attached=composer.ingredients.at(-1),identity=frameRole?attached:selected.identity||attached;
-  if(!identity||mediaIdentity(identity)!==identity||attached!==identity)throw fail('INGREDIENT_CHANGED','Вложенный ресурс не совпадает с выбранным файлом.');
+  const verified=selected.framePreview?identity===selected.framePreview:mediaIdentity(identity)===identity;
+  if(!identity||attached!==identity||!verified)throw fail('INGREDIENT_CHANGED','Вложенный ресурс не совпадает с выбранным файлом.');
   return Object.freeze([...expected,identity]);
  }
 }
