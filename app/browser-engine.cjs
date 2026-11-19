@@ -99,6 +99,9 @@ function flowDOM(op,arg={}){
   let xs=all(role,root).filter(el=>label(el)===name);if(role==='textbox'&&name==='Что вы хотите создать?'){const main=xs.filter(el=>!el.closest?.('flow-agent-panel'));if(main.length)xs=main;}if(xs.length!==1)error(xs.length?'CONTROL_AMBIGUOUS':'CONTROL_NOT_FOUND','Не удалось однозначно найти '+name);return xs[0];
  };
  const click=el=>{if(el.disabled||el.getAttribute('aria-disabled')==='true')error('CONTROL_DISABLED','Элемент пока недоступен.');el.click();};
+ if ((op === 'state' || op === 'project') && [...document.querySelectorAll('app-onboarding-dialog')].some(visible)) {
+  error('FLOW_ONBOARDING_REQUIRED', 'Google Flow просит завершить первоначальную настройку аккаунта. Откройте окно Flow Studio для этого аккаунта и пройдите шаги Google.');
+ }
  if(op==='product-announcement'){
   const dialogs=[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible),matches=dialogs.filter(dialog=>[...dialog.querySelectorAll('h1,h2,h3,[role="heading"]')].some(heading=>text(heading)==='Introducing Omni 1.2!'));
   if(!matches.length)return false;

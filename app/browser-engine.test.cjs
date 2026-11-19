@@ -924,6 +924,26 @@ test('controls inventory exposes capped canonical known labels and omits private
   assert.equal(JSON.stringify(result).includes('arbitrary-filename.png'), false);
 });
 
+test('visible Flow onboarding blocks project discovery and navigation without clicking', () => {
+  let shown = true;
+  let clicks = 0;
+  const onboarding = { getClientRects: () => shown ? [1] : [] };
+  const project = { getClientRects: () => [1], getAttribute: name => name === 'href' ? '/project/existing' : null, click: () => { clicks++; } };
+  const context = {
+    location: { origin: 'https://flow.google.com', href: 'https://flow.google.com/' },
+    document: { querySelector: () => null, querySelectorAll: selector => selector === 'app-onboarding-dialog' ? [onboarding] : selector === 'a[href]' ? [project] : [] },
+    getComputedStyle: () => ({ visibility: 'visible' }),
+  };
+  const run = op => vm.runInNewContext(`(${flowDOM.toString()})(${JSON.stringify(op)})`, context);
+  assert.throws(() => run('state'), /FLOW_ONBOARDING_REQUIRED/);
+  assert.throws(() => run('project'), /FLOW_ONBOARDING_REQUIRED/);
+  assert.equal(clicks, 0);
+  shown = false;
+  assert.equal(run('state').projectLinks[0].href, '/project/existing');
+  assert.equal(run('project'), true);
+  assert.equal(clicks, 1);
+});
+
 test('English account controls work and project links use canonical paths independent of translated labels', () => {
   const clicked = [];
   const element = (name, extra = {}) => ({ innerText: name, getAttribute: attr => attr === 'aria-label' ? name : null, getClientRects: () => [1], click: () => clicked.push(name), ...extra });

@@ -575,7 +575,13 @@ function initialize() {
     }
     if (job.status === 'failed' || requiresLogin(job)) {
       const panel = element('div', 'job-failed');
-      if (requiresLogin(job)) {
+      if (job.errorCode === 'FLOW_ONBOARDING_REQUIRED') {
+        panel.append(
+          element('h3', '', 'Завершите настройку Google Flow'),
+          element('p', 'inline-error', 'Google показал окно первоначальной настройки. Откройте его для выбранного аккаунта, пройдите шаги Google и нажмите «Я вошёл» в Flow Studio.'),
+          button('Открыть окно Google Flow', 'primary', () => recoverAccount(job)),
+        );
+      } else if (requiresLogin(job)) {
         panel.append(element('h3', '', 'Нужно снова войти в Google'), element('p', 'inline-error', 'Google отклонил подключение аккаунта. Войдите заново и проверьте подключение в Flow Studio.'), button('Войти в Google заново', 'primary', () => recoverAccount(job)), element('p', 'hint recovery-note', 'Отправленная задача могла завершиться в Flow. Проверьте её там перед новым запуском. Повторный вход не запускает генерацию; запрос и исходные изображения остаются в редакторе.'));
         const details = element('details', 'error-details');
         details.append(element('summary', '', 'Технические детали'), element('pre', '', job.error || job.progress || 'Требуется повторный вход в Google'));

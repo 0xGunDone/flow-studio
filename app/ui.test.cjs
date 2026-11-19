@@ -399,6 +399,14 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.match(byId('recovery-account').textContent, /Выберите нужный аккаунт/);
   assert.equal(generated.length, 2, 'Checking and completing login never spend generation credits');
 
+  eventHandler({ type: 'job', job: { ...authJob, id: 'onboarding-job', accountId: 10, errorCode: 'FLOW_ONBOARDING_REQUIRED', error: 'Google Flow просит завершить настройку' } });
+  await byId('history').children[0].dispatch('click');
+  assert.ok(descendants(byId('result')).some(node => node.textContent === 'Завершите настройку Google Flow'));
+  await resultButton('Открыть окно Google Flow').dispatch('click');
+  assert.deepEqual(reconnected, [9, 10], 'Onboarding opens the profile of the blocked job');
+  assert.equal(generated.length, 2, 'Onboarding never submits a generation');
+  await byId('complete-login').dispatch('click');
+
   await videoMode.dispatch('change');
   byId('model').value = snapshot.models[3].id;
   await byId('model').dispatch('change');
