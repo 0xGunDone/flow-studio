@@ -4,19 +4,16 @@ Use when Flow Studio MCP tools are unavailable or the current session caches an 
 
 The bridge can launch Flow Studio. Closing its window with × or quitting with `⌘Q` stops the engine; minimizing keeps it open. CLI does not keep a standalone backend after exit. Stop polling when the user closes the app to stop work. Google may continue an accepted job; check Flow before retrying.
 
-App bridge entrypoint:
+Use the absolute path to the installed MCP adapter. The examples use `~/Applications/Flow-Studio-MCP/mcp-server.cjs`. A source checkout with installed dependencies can use its own `app/mcp-server.cjs`.
 
-```text
-/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs
-```
-
-No-spend discovery and preparation. Current status reports `apiVersion: 3` and `video-watermark-selection` in `features`.
+Current status reports `apiVersion: 3` and `video-watermark-selection` in `features`. These commands spend no credits.
 
 ```sh
-node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --list-tools
-node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call status '{}'
-node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call models '{"kind":"video","method":"frames","durationSeconds":8,"aspectRatio":"16:9"}'
-node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call prepare '{"model":"<EXACT_MODEL_ID_FROM_LIST_MODELS>","method":"frames","prompt":"<USER_PROMPT>","startFramePath":"/absolute/path/start.png"}'
+flow_studio_mcp="$HOME/Applications/Flow-Studio-MCP/mcp-server.cjs"
+node "$flow_studio_mcp" --list-tools
+node "$flow_studio_mcp" --call status '{}'
+node "$flow_studio_mcp" --call models '{"kind":"video","method":"frames","durationSeconds":8,"aspectRatio":"16:9"}'
+node "$flow_studio_mcp" --call prepare '{"model":"<EXACT_MODEL_ID_FROM_LIST_MODELS>","method":"frames","prompt":"<USER_PROMPT>","startFramePath":"/absolute/path/start.png"}'
 ```
 
 Default `prepare` has no spend or job side effect: no upload, generation, or persistence. It needs neither UUID nor `confirmCreditSpend`. It checks absolute paths, formats, regular files, sizes, and roles, without decoding media or probing duration; account access and credits remain unchecked. Source duration is checked during submission. Read [generation.md](generation.md) for settings and input roles.
@@ -25,10 +22,10 @@ Default `prepare` has no spend or job side effect: no upload, generation, or per
 For an explicitly requested browser/upload check, use the same `prepare` method with `checkBrowser:true` and an exact `accountId`. Use only an exact catalog model reporting `generationEngine:"isolated-browser"`: supported Nano Banana, Omni 1.2 or Veo. This uploads the requested image references, explicit frame roles or Edit source video to Google, then clears the owned composer before releasing the browser; no Generate click, job, or credit spend. Read `checks.browser`, `checks.upload`, and `browserCheck`; `generateArguments` excludes the diagnostic flag. Never automatically retry a browser check after timeout or transport failure.
 
 ```sh
-node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call prepare '{"model":"<EXACT_OMNI_1.2_MODEL_ID_FROM_LIST_MODELS>","method":"ingredients","prompt":"<USER_PROMPT>","referencePaths":["/absolute/path/reference.png"],"accountId":7,"checkBrowser":true}'
+node "$flow_studio_mcp" --call prepare '{"model":"<EXACT_OMNI_1.2_MODEL_ID_FROM_LIST_MODELS>","method":"ingredients","prompt":"<USER_PROMPT>","referencePaths":["/absolute/path/reference.png"],"accountId":7,"checkBrowser":true}'
 ```
 
-Replace `7` with a known account ID. Omit `checkBrowser` for purely local preparation. Video uses `videoWatermark: "with"` by default. For an explicit no-mark request, add `"videoWatermark":"without"` alongside `model` or `settings` and use an eligible account whose `visibleWatermarkCapability` is `optional`. Use `--call check_account '{"accountId":7}'` to read capability without uploading inputs. Browser preparation can change the official account preference and reports `checks.visibleWatermark` of `"on"` or `"off"`.
+Replace `7` with a known account ID. Omit `checkBrowser` for purely local preparation. Video uses `videoWatermark: "with"` by default. For an explicit no-mark request, add `"videoWatermark":"without"` alongside `model` or `settings`. For automatic account selection, omit `accountId`; for a pinned generation, use an eligible account with `browserReady:true` and `visibleWatermarkCapability:"optional"`. Use `--call check_account '{"accountId":7}'` to read capability without uploads. Browser preparation requires an explicit `accountId`, can change the official account preference, and reports `checks.visibleWatermark` of `"on"` or `"off"`.
 
 Pass one allowlisted method and a JSON object. Preserve structured stdout so errors and identifiers stay exact. Use proper shell quoting or a subprocess argument array; never interpolate user text into shell code. Never read or print `agent-bridge.json` to obtain credentials.
 
