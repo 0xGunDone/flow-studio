@@ -44,11 +44,12 @@ test('cooldown labels use expiry and tolerate absent or malformed timestamps',()
 });
 
 test('draft reader allows only harmless fields and tolerates unavailable or corrupt storage', () => {
-  const empty = { mode: 'image', model: '', videoMethod: '', prompt: '', sourceVideoId: '' };
+  const empty = { mode: 'image', model: '', videoMethod: '', videoWatermark: 'with', prompt: '', sourceVideoId: '' };
   assert.deepEqual(readDraft(), empty);
   assert.deepEqual(readDraft({ getItem() { throw new Error('Disabled'); } }), empty);
   assert.deepEqual(readDraft({ getItem: () => '{' }), empty);
-  assert.deepEqual(readDraft({ getItem: () => JSON.stringify({ mode: 'video', model: 'm', videoMethod: 'ingredients', prompt: 'draft', sourceVideoId: 'source', images: ['data:image/png;base64,secret'], credentials: 'secret' }) }), { mode: 'video', model: 'm', videoMethod: 'ingredients', prompt: 'draft', sourceVideoId: 'source' });
+  assert.deepEqual(readDraft({ getItem: () => JSON.stringify({ mode: 'video', model: 'm', videoMethod: 'ingredients', videoWatermark: 'without', prompt: 'draft', sourceVideoId: 'source', images: ['data:image/png;base64,secret'], credentials: 'secret' }) }), { mode: 'video', model: 'm', videoMethod: 'ingredients', videoWatermark: 'without', prompt: 'draft', sourceVideoId: 'source' });
+  assert.equal(readDraft({ getItem: () => '{"mode":"video","videoWatermark":"invalid"}' }).videoWatermark, 'with');
 });
 
 test('current catalog models expose format, duration, and correct input requirements', () => {
@@ -79,14 +80,14 @@ test('current catalog models expose format, duration, and correct input requirem
 test('generation payload validates exact model needs and excludes irrelevant inputs', () => {
   const image = { id: 'gemini-3.1-flash-image-landscape' };
   const ref = { name: 'one.png', dataUrl: 'data:image/png;base64,abc' };
-  assert.deepEqual(requestFor(image, '  My prompt  ', [ref], 'unused'), { model: image.id, prompt: 'My prompt', images: [ref.dataUrl] });
+  assert.deepEqual(requestFor(image, '  My prompt  ', [ref], 'unused', 'without'), { model: image.id, prompt: 'My prompt', images: [ref.dataUrl] });
   assert.throws(() => requestFor(image, ' ', [], ''), /Опишите/);
   assert.throws(() => requestFor(image, 'Prompt', Array(6).fill(ref), ''), /не больше 5/);
   assert.throws(() => requestFor({ id: 'veo-3.1-fast-i2v-4s-landscape' }, 'Prompt', [], ''), /хотя бы одно/);
   assert.throws(() => requestFor({ id: 'veo-3.1-fast-r2v-8s-landscape' }, 'Prompt', Array(4).fill(ref), ''), /не больше 3/);
   const extend = { id: 'veo-3.1-fast-extend-8s-landscape' };
   assert.throws(() => requestFor(extend, 'Prompt', [], ''), /ID исходного видео/);
-  assert.deepEqual(requestFor(extend, 'Prompt', [ref], ' source '), { model: extend.id, prompt: 'Prompt', images: [], sourceVideoId: 'source' });
+  assert.deepEqual(requestFor(extend, 'Prompt', [ref], ' source '), { model: extend.id, prompt: 'Prompt', images: [], sourceVideoId: 'source', videoWatermark: 'with' });
 });
 
 test('mixed references keep their order and videos require Omni editing', () => {
@@ -94,7 +95,7 @@ test('mixed references keep their order and videos require Omni editing', () => 
   const second = { kind: 'image', name: 'two.jpg', dataUrl: 'data:image/jpeg;base64,def' };
   const video = { kind: 'video', name: 'source.mov', path: '/chosen/source.mov', previewUrl: 'flow-input://source-id' };
   const edit = { id: 'omni-1.1-flash-edit-landscape' };
-  assert.deepEqual(requestFor(edit, ' Edit this ', [second, video, image], ''), { model: edit.id, prompt: 'Edit this', references: [{ kind: 'image', dataUrl: second.dataUrl }, { kind: 'video', path: video.path }, { kind: 'image', dataUrl: image.dataUrl }] });
+  assert.deepEqual(requestFor(edit, ' Edit this ', [second, video, image], '', 'without'), { model: edit.id, prompt: 'Edit this', references: [{ kind: 'image', dataUrl: second.dataUrl }, { kind: 'video', path: video.path }, { kind: 'image', dataUrl: image.dataUrl }], videoWatermark: 'without' });
   assert.throws(() => requestFor(edit, 'Prompt', [image], ''), /исходное видео/);
   assert.throws(() => requestFor(edit, 'Prompt', [video, video], ''), /не больше 1 видео/);
   assert.throws(() => requestFor(edit, 'Prompt', [video, ...Array(6).fill(image)], ''), /не больше 5 изображений/);
@@ -158,7 +159,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     node.hidden = /\bhidden\b/.test(attributes);
   }
   const document = {
-    createElement: tag => new Node(tag), createTextNode: text => ({ textContent: text }),
+    createElement: tag => new Node(tag), createTextNode: text => ({ textContent: text, children: [], className: '' }),
     getElementById: id => [...nodes].reverse().find(node => node.id === id),
     querySelectorAll: selector => nodes.filter(node => selector === '[data-page]' ? node.dataset.page : selector === '[data-copy-target]' ? node.dataset.copyTarget : selector === '[data-help-target]' ? node.dataset.helpTarget : selector === '[data-go-create]' ? node.goCreate : selector === 'input[name="mode"]' ? node.name === 'mode' : selector.startsWith('.') ? node.className.split(' ').includes(selector.slice(1)) : false)
   };
@@ -273,7 +274,11 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(byId('prompt').value, 'Saved draft');
   assert.equal(byId('source-video-id').value, 'saved-source');
   assert.equal(nodes.find(node => node.name === 'mode' && node.value === 'video').checked, true);
+  assert.equal(byId('video-watermark-field').hidden, false);
+  assert.equal(byId('video-watermark').value, 'with', 'Legacy video drafts default to with');
   await nodes.find(node => node.name === 'mode' && node.value === 'image').dispatch('change');
+  assert.equal(byId('video-watermark-field').hidden, true);
+  assert.equal(byId('video-watermark').disabled, true);
   byId('source-video-id').value = '';
   byId('prompt').value = 'Test scene';
   byId('generation-account').value='9';
@@ -283,6 +288,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(generated.length, 1);
   assert.equal(generated[0].accountId,9,'Exact account selection reaches the shared generation request');byId('generation-account').value='';
   assert.equal(generated[0].images.length, 1);
+  assert.equal(Object.hasOwn(generated[0], 'videoWatermark'), false);
   assert.equal(byId('generate').disabled, true);
   const firstResultNodes=node=>[node,...node.children.flatMap(firstResultNodes)];
   await firstResultNodes(byId('result')).find(node=>node.tagName==='BUTTON'&&node.textContent==='Остановить ожидание').dispatch('click');
@@ -299,9 +305,10 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.match(byId('form-error').textContent, /ID исходного видео/);
   byId('source-video-id').value = 'source-id';
   await byId('source-video-id').dispatch('input');
-  assert.deepEqual(JSON.parse(stored.get('flowStudio.draft')), { mode: 'video', model: snapshot.models[2].id, videoMethod: 'extend', prompt: 'Test scene', sourceVideoId: 'source-id' });
+  assert.deepEqual(JSON.parse(stored.get('flowStudio.draft')), { mode: 'video', model: snapshot.models[2].id, videoMethod: 'extend', videoWatermark: 'with', prompt: 'Test scene', sourceVideoId: 'source-id' });
   await byId('generate').dispatch('click');
   assert.equal(generated[1].sourceVideoId, 'source-id');
+  assert.equal(generated[1].videoWatermark, 'with');
   assert.equal(generated[1].images.length, 0, 'Hidden image references cannot leak into extend request');
   eventHandler({ type: 'job', job: { id: 'job-2', model: snapshot.models[2].id, kind: 'video', prompt: 'Test scene', status: 'succeeded', media: [{ url: 'flow-media://job-2/0', kind: 'video', path: '/saved.mp4' }] } });
   assert.equal(byId('result-tag').textContent, 'Готово');
@@ -436,7 +443,7 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
   assert.equal(byId('references-count').textContent, '2 / 5 фото · 1 / 1 видео');
   await byId('generate').dispatch('click');
   assert.equal(generated.length, 3);
-  assert.deepEqual(JSON.parse(JSON.stringify(generated[2])), { model: snapshot.models[3].id, prompt: 'Current editor draft', references: [{ kind: 'video', path: '/chosen/source.mov' }, { kind: 'image', dataUrl: 'data:image/png;base64,aGVsbG8=' }, { kind: 'image', dataUrl: 'data:image/png;base64,c2Vjb25k' }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(generated[2])), { model: snapshot.models[3].id, prompt: 'Current editor draft', references: [{ kind: 'video', path: '/chosen/source.mov' }, { kind: 'image', dataUrl: 'data:image/png;base64,aGVsbG8=' }, { kind: 'image', dataUrl: 'data:image/png;base64,c2Vjb25k' }], videoWatermark: 'with' });
   assert.equal(Object.hasOwn(generated[2], 'images'), false, 'Mixed request never also sends images');
   eventHandler({ type: 'job', job: { id: 'job-3', model: snapshot.models[3].id, kind: 'video', prompt: 'Current editor draft', status: 'failed', error: 'TEST_DONE', media: [] } });
   byId('model').value = snapshot.models[4].id;
@@ -628,14 +635,16 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     await resets[0].dispatch('click');assert.equal(clears,1);
     let retryCalls=0,finishRetry;const retryArgs=[];
     bridge.retryGeneration=async args=>{retryCalls++;retryArgs.push(args);return new Promise(resolve=>{finishRetry=resolve;});};
-    const failed={id:'retry-source',model:snapshot.models[1].id,kind:'video',status:'failed',prompt:'same scene',error:'HTTP 503: provider unavailable',media:[],accountId:9,accountEmail:'cooling@example.test',retryAvailable:true};
+    const failed={id:'retry-source',model:snapshot.models[1].id,kind:'video',videoWatermark:'without',status:'failed',prompt:'same scene',error:'HTTP 503: provider unavailable',media:[],accountId:9,accountEmail:'cooling@example.test',retryAvailable:true};
     eventHandler({type:'job',job:failed});await byId('history').children[0].dispatch('click');
     assert(descendants(byId('result')).some(node=>node.textContent==='cooling@example.test'));
     let retry=resultButton('Повторить генерацию');assert(retry);assert.equal(retry.disabled,false);
+    assert(descendants(byId('result')).some(node=>node.className.includes('retry-hint')&&node.textContent.includes('Только без метки')));
     const repeated=retry.dispatch('click');
     assert.equal(resultButton('Повторить генерацию').disabled,true);
     await retry.dispatch('click');assert.equal(retryCalls,1);
     assert.equal(retryArgs[0].jobId,'retry-source');assert.ok(retryArgs[0].requestId);
+    assert.equal(Object.hasOwn(retryArgs[0], 'videoWatermark'), false, 'Retry references saved settings even if the composer uses another mode');
     finishRetry({jobId:'retry-child'});await repeated;
     assert.equal(generated.length,5,'Retry calls only dedicated bridge, not edited composer inputs');
     eventHandler({type:'job',job:{...failed,id:'held-job',accountId:10,accountEmail:'held@example.test'}});await byId('history').children[0].dispatch('click');
@@ -669,5 +678,59 @@ test('renderer bridge covers startup, generation, failure, history and Google lo
     bridge.checkEnabledAccounts=async()=>{eventHandler({type:'accounts',accounts:[accounts[0]],history:[failed]});return {running:false,results:[],failed:0};};
     await byId('check-enabled-accounts').dispatch('click');
     assert.equal(resultButton('Повторить генерацию').disabled,false,'Account check completion restores selected retry');
+  }
+  {
+    const required = { id: 20, email: 'required@example.test', isActive: true, visibleWatermarkCapability: 'required' };
+    const optional = { id: 21, email: 'optional@example.test', isActive: true, browserReady: true, visibleWatermarkCapability: 'optional' };
+    const unknown = { id: 22, email: 'unknown@example.test', isActive: true };
+    const noProfile = { ...optional, id: 24, browserReady: false };
+    const accounts = [required, optional, unknown, { ...optional, id: 23, videoEnabled: false }, noProfile];
+    const chooser = byId('generation-account');
+    const watermark = byId('video-watermark');
+    const choices = () => chooser.children.filter(option => !option.disabled).map(option => option.value);
+    eventHandler({ type: 'accounts', accounts });
+    assert.deepEqual(choices(), ['', '20', '21', '22', '24']);
+    assert.deepEqual(chooser.children.slice(1).map(option => option.textContent.split(' · ')[1]), ['Метка обязательна', 'Можно без метки', 'Метка не проверена', 'Можно без метки']);
+    assert(descendants(byId('accounts-list')).some(node => node.textContent === ' · Можно без метки'));
+
+    chooser.value = '20';
+    await chooser.dispatch('change');
+    watermark.value = 'without';
+    await watermark.dispatch('change');
+    assert.equal(JSON.parse(stored.get('flowStudio.draft')).videoWatermark, 'without');
+    assert.deepEqual(choices(), ['', '21']);
+    assert.equal(chooser.value, '20', 'Watermark change preserves explicit account');
+    assert.equal(chooser.attributes['aria-invalid'], 'true');
+    assert.equal(byId('generate').disabled, true);
+    assert.match(byId('generate-hint').textContent, /Выбранный аккаунт недоступен/);
+    await byId('generate').dispatch('click');
+    assert.equal(generated.length, 5);
+
+    refresh = Promise.resolve([unknown, noProfile]);
+    await byId('refresh-accounts').dispatch('click');
+    assert.equal(chooser.value, '20', 'Refresh preserves explicit account even if removed');
+    chooser.value = '';
+    await chooser.dispatch('change');
+    assert.deepEqual(choices(), ['']);
+    assert.equal(byId('generate').disabled, true);
+    assert.match(byId('generate-hint').textContent, /Проверить все включённые/);
+
+    bridge.checkEnabledAccounts = async () => {
+      eventHandler({ type: 'accounts', accounts: [{ ...unknown, browserReady: true, visibleWatermarkCapability: 'optional' }] });
+      return { running: false, results: [], failed: 0 };
+    };
+    await byId('check-enabled-accounts').dispatch('click');
+    assert.deepEqual(choices(), ['', '22']);
+    assert.equal(byId('generate').disabled, false);
+    await byId('generate').dispatch('click');
+    assert.equal(generated.length, 6);
+    assert.equal(generated[5].videoWatermark, 'without');
+    assert.equal(Object.hasOwn(generated[5], 'accountId'), false);
+
+    watermark.value = 'with';
+    await watermark.dispatch('change');
+    eventHandler({ type: 'job', job: { ...generated[5], id: 'job-6', kind: 'video', status: 'failed', error: 'TEST_DONE', media: [] } });
+    await resultButton('Использовать запрос').dispatch('click');
+    assert.equal(watermark.value, 'without', 'Using a history entry restores its watermark intent');
   }
 });

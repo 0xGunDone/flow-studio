@@ -80,7 +80,7 @@ test('isolated inspection pins active account and shares account lock across IPC
  finish();assert.equal((await pending).usesDesktopFocus,false);assert.equal(h.runtime.accountActionPending,false);
  for(const params of [{},[],{accountId:7,extra:true},{accountId:0},{accountId:'7'},{accountId:1.5}])await assert.rejects(h.bridgeDispatch('isolated_inspect',params),/accountId/);
  await assert.rejects(inspect(event,9),/недоступен/);h.runtime.jobs=[{status:'running'}];
- await assert.rejects(inspect(event,7),/завершения генерации/);await assert.rejects(h.bridgeDispatch('isolated_inspect',{accountId:7}),/текущей генерации/);
+ await assert.rejects(inspect(event,7),/завершения генерации/);await assert.rejects(h.bridgeDispatch('isolated_inspect',{accountId:7}),/завершения генерации/);
  h.runtime.jobs=[];const bridgePending=h.bridgeDispatch('isolated_inspect',{accountId:7});await new Promise(setImmediate);finish();
  assert.equal((await bridgePending).accountEmail,'owner@example.test');assert.deepEqual(calls,[[7,'owner@example.test'],[7,'owner@example.test']]);
  assert.equal(h.events.some(event=>typeof event==='string'&&event.startsWith('native-')||Array.isArray(event)&&['open-path','external','native-inspect'].includes(event[0])),false,'Background inspection never requests native access or focuses Chrome');
@@ -192,6 +192,26 @@ test('bulk check goes through managed session sync and serial account action blo
  const task=h.handlers.get('studio:checkEnabledAccounts')(event);await new Promise(setImmediate);
  assert.throws(()=>h.handlers.get('studio:setAccountActive')(event,7,false),/Дождитесь/);
  finish();assert.deepEqual(await task,{verified:1});assert.deepEqual(calls,[['sync',7],['check',7]]);
+});
+test('account check remembers the official watermark capability for the same profile', async () => {
+ const calls=[];
+ const h=await launch({
+  accountRuntime:{
+   accounts:[{id:7,email:'owner@example.test',isActive:true,browserReady:true}],
+   startController:new AbortController(),
+   checkAccount:async id=>{calls.push(['session',id]);return {ok:true};},
+   rememberVisibleWatermark:async value=>calls.push(['remember',value.accountId,value.visibleWatermarkCapability]),
+  },
+  managedOverrides:{syncAccountNow:async id=>calls.push(['sync',id])},
+  isolatedOverrides:{inspectWatermark:async (id,{email})=>{
+   calls.push(['inspect',id,email]);
+   return {accountId:id,accountEmail:email,visibleWatermarkCapability:'optional'};
+  }},
+ });
+ const event={sender:h.window.webContents,senderFrame:{url:pathToFileURL(path.join(__dirname,'index.html')).href}};
+ const checked=await h.handlers.get('studio:checkAccount')(event,7);
+ assert.equal(checked.visibleWatermarkCapability,'optional');
+ assert.deepEqual(calls,[['sync',7],['session',7],['inspect',7,'owner@example.test'],['remember',7,'optional']]);
 });
 test('UI account actions honor deferred MCP mutation lock until the original action finishes',async()=>{
  let finish;const calls=[],h=await launch({accountRuntime:{setAccountActive:async(id,enabled)=>{calls.push(['set',id,enabled]);await new Promise(resolve=>{finish=resolve;});return {accounts:[]};},clearCooldown:async()=>assert.fail('UI reset entered during MCP action'),checkAccount:async()=>assert.fail('UI check entered during MCP action')}});

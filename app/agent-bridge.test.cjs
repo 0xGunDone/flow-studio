@@ -5,8 +5,8 @@ const {startAgentBridge,createAgentActions,generationInput,capabilities}=require
 const {Runtime}=require('./runtime.cjs');
 const settings={kind:'video',method:'text',family:'Veo 3.1 Fast',durationSeconds:8,aspectRatio:'16:9'};
 test('catalog distinguishes official watermark verification support without claiming account entitlement',()=>{
- for(const id of ['omni-1.2-flash-3s-landscape','veo-3.1-fast-i2v-8s-landscape','omni-1.2-flash-edit-portrait']){const model=capabilities({id});assert.equal(model.visibleWatermarkPolicy,'require_off');assert.equal(model.visibleWatermarkVerification,'supported');assert.equal(model.generationEngine,'isolated-browser');}
- const legacy=capabilities({id:'omni-1.1-flash-extend-landscape'});assert.equal(legacy.visibleWatermarkPolicy,'require_off');assert.equal(legacy.visibleWatermarkVerification,'unsupported');assert.equal(legacy.generationEngine,'server');
+ for(const id of ['omni-1.2-flash-3s-landscape','veo-3.1-fast-i2v-8s-landscape','omni-1.2-flash-edit-portrait']){const model=capabilities({id});assert.equal(model.visibleWatermarkPolicy,'selectable');assert.equal(model.visibleWatermarkVerification,'supported');assert.equal(model.generationEngine,'isolated-browser');}
+ const legacy=capabilities({id:'omni-1.1-flash-extend-landscape'});assert.equal(legacy.visibleWatermarkPolicy,'selectable');assert.equal(legacy.visibleWatermarkVerification,'unsupported');assert.equal(legacy.generationEngine,'server');
  const image=capabilities({id:'gemini-3.1-flash-image-landscape'});assert.equal(image.visibleWatermarkPolicy,undefined);assert.equal(image.visibleWatermarkVerification,undefined);
 });
 async function fixture(t){
@@ -72,7 +72,7 @@ test('prepare validates local files and returns exact reusable arguments without
  const call=createAgentActions({runtime});
  const prepared=await call('prepare',{settings:{...settings,method:'frames'},prompt:' preserve spaces ',startFramePath:start,endFramePath:end});
  assert.equal(prepared.valid,true);assert.equal(prepared.model.id,'veo-3.1-fast-i2v-8s-landscape');assert.equal(prepared.method,'frames');
- assert.deepEqual(prepared.generateArguments,{model:'veo-3.1-fast-i2v-8s-landscape',method:'frames',prompt:' preserve spaces ',startFramePath:start,endFramePath:end});
+ assert.deepEqual(prepared.generateArguments,{model:'veo-3.1-fast-i2v-8s-landscape',method:'frames',prompt:' preserve spaces ',videoWatermark:'with',startFramePath:start,endFramePath:end});
  assert.deepEqual(prepared.settings,{...settings,method:'frames',resolution:'standard'});
  assert.deepEqual(prepared.inputs,{images:2,videos:0,references:0,startFrame:true,endFrame:true,sourceVideo:false});
  assert.deepEqual(prepared.checks,{localFiles:'passed',videoDuration:'not_applicable',accountAccess:'not_checked',credits:'not_checked',visibleWatermark:'not_checked'});
@@ -97,14 +97,14 @@ test('optional browser preparation uploads only when requested and returns after
  const {start}=await fixture(t),model='omni-1.2-flash-8s-landscape',calls=[];let finish,entered;
  const checking=new Promise(resolve=>{entered=resolve;});
  const runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{},generate:()=>assert.fail('Browser check generated'),persist:()=>assert.fail('Browser check persisted job')};
- const result={ready:true,accountId:7,email:'owner@example.test',projectURL:'https://flow.google.com/project/fixture',model,referenceCount:1,uploadedImages:1,submitted:false,cleared:true,visibleWatermark:'off',privateInput:'must-not-return'};
+ const result={ready:true,accountId:7,email:'owner@example.test',projectURL:'https://flow.google.com/project/fixture',model,referenceCount:1,uploadedImages:1,submitted:false,cleared:true,visibleWatermark:'on',privateInput:'must-not-return'};
  const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);await new Promise(resolve=>{finish=resolve;entered();});return result;}});
  const input={model,prompt:' original prompt ',method:'ingredients',referencePaths:[start],accountId:7};
  assert.equal((await call('prepare',input)).checks.browser,undefined);assert.equal((await call('prepare',{...input,checkBrowser:false})).checks.browser,undefined);assert.equal(calls.length,0);
  let settled=false;const pending=call('prepare',{...input,checkBrowser:true}).then(value=>{settled=true;return value;});
  await checking;assert.equal(settled,false);assert.equal(calls.length,1);
- assert.deepEqual(calls[0],{model,prompt:input.prompt,accountId:7,references:[{kind:'image',dataUrl:'data:image/png;base64,c3RhcnQ='}]});
- finish();const plan=await pending;assert.equal(plan.checks.browser,'passed');assert.equal(plan.checks.upload,'passed');assert.equal(plan.checks.credits,'not_checked');assert.equal(plan.checks.visibleWatermark,'off');assert.equal(plan.browserCheck.visibleWatermark,'off');
+ assert.deepEqual(calls[0],{model,prompt:input.prompt,accountId:7,videoWatermark:'with',references:[{kind:'image',dataUrl:'data:image/png;base64,c3RhcnQ='}]});
+ finish();const plan=await pending;assert.equal(plan.checks.browser,'passed');assert.equal(plan.checks.upload,'passed');assert.equal(plan.checks.credits,'not_checked');assert.equal(plan.checks.visibleWatermark,'on');assert.equal(plan.browserCheck.visibleWatermark,'on');
  assert.equal(plan.browserCheck.accountEmail,'owner@example.test');assert.equal(plan.browserCheck.submitted,false);assert.equal(plan.browserCheck.cleared,true);
  assert.equal(plan.generateArguments.checkBrowser,undefined);assert.equal(Object.hasOwn(plan.generateArguments,'checkBrowser'),false);
  assert.doesNotMatch(JSON.stringify(plan),/must-not-return|base64/);assert.deepEqual(runtime.jobs,[]);
@@ -124,23 +124,40 @@ test('browser preparation validates explicit account and supported route before 
  }
  await assert.rejects(generationInput(runtime,{...input,confirmCreditSpend:true,requestId:'bad-diagnostic-flag'}),{code:'INVALID_ARGUMENTS'});
 });
-test('local watermark preparation reports unverified video policy without reading browser state while images remain not applicable',async()=>{
- const video='omni-1.2-flash-8s-landscape',serverVideo='omni-1.1-flash-8s-landscape',image='gemini-3.1-flash-image-landscape',runtime={ready:true,models:[video,serverVideo,image].map(id=>({id})),accounts:[{id:7,email:'owner@example.test',isActive:true}],jobs:[],start:async()=>{},generate:()=>assert.fail('Local prepare must not generate'),persist:()=>assert.fail('Local prepare must not persist')};let browserChecks=0;
+test('local preparation preserves the requested watermark mode without reading browser state',async()=>{
+ const video='omni-1.2-flash-8s-landscape',serverVideo='omni-1.1-flash-8s-landscape',image='gemini-3.1-flash-image-landscape',runtime={ready:true,models:[video,serverVideo,image].map(id=>({id})),accounts:[{id:7,email:'owner@example.test',isActive:true,visibleWatermarkCapability:'unknown'}],jobs:[],start:async()=>{},generate:()=>assert.fail('Local prepare must not generate'),persist:()=>assert.fail('Local prepare must not persist')};let browserChecks=0;
  const call=createAgentActions({runtime,checkIsolatedInputs:async()=>{browserChecks++;assert.fail('Local prepare must not inspect account setting');}});
- const status=await call('status');assert.equal(status.videoWatermarkPolicy,'require_off');assert.ok(status.features.includes('video-visible-watermark-off'));assert.equal(status.accounts[0].visibleWatermark,undefined);
- for(const model of [video,serverVideo]){const plan=await call('prepare',{model,prompt:'Exact user request',accountId:7});assert.equal(plan.checks.visibleWatermark,'not_checked');assert.equal(plan.browserCheck,undefined);assert.equal(Object.hasOwn(plan.generateArguments,'visibleWatermark'),false);}
- await assert.rejects(call('prepare',{model:serverVideo,prompt:'Same server route',accountId:7,checkBrowser:true}),{code:'BROWSER_MODEL_UNSUPPORTED'});
- const plan=await call('prepare',{model:image,prompt:'Image request'});assert.equal(plan.checks.visibleWatermark,'not_applicable');assert.equal(browserChecks,0);assert.deepEqual(runtime.jobs,[]);
-});
-test('browser watermark preparation accepts only exact off evidence and preserves mandatory errors without generation',async()=>{
- const model='omni-1.2-flash-3s-portrait-360p',runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{},generate:()=>assert.fail('Browser check must not generate'),persist:()=>assert.fail('Browser check must not persist')},args={model,prompt:'Exact user request',method:'text',accountId:7,checkBrowser:true};let browserChecks=0;
- for(const state of [undefined,null,'on','required','not_checked','OFF',false,{checked:false}]){
-  const call=createAgentActions({runtime,checkIsolatedInputs:async()=>{browserChecks++;return {ready:true,accountId:7,model,uploadedImages:0,submitted:false,cleared:true,...(state!==undefined?{visibleWatermark:state}:{})};}});
-  await assert.rejects(call('prepare',args),{code:'VISIBLE_WATERMARK_UNVERIFIED'});assert.deepEqual(runtime.jobs,[]);
+ const status=await call('status');assert.equal(status.videoWatermarkDefault,'with');assert.deepEqual(status.videoWatermarkModes,['with','without']);assert.equal(status.accounts[0].visibleWatermarkCapability,'unknown');
+ for(const [model,videoWatermark] of [[video,undefined],[serverVideo,'with'],[video,'without']]){
+  const plan=await call('prepare',{model,prompt:'Exact user request',accountId:7,videoWatermark});
+  assert.equal(plan.videoWatermark,videoWatermark??'with');assert.equal(plan.generateArguments.videoWatermark,plan.videoWatermark);
+  assert.equal(plan.checks.visibleWatermark,'not_checked');assert.equal(plan.browserCheck,undefined);assert.equal(Object.hasOwn(plan.generateArguments,'visibleWatermark'),false);
  }
- const call=createAgentActions({runtime,checkIsolatedInputs:async()=>{browserChecks++;return {ready:true,accountId:7,model,uploadedImages:0,submitted:false,cleared:true,visibleWatermark:'off'};}}),plan=await call('prepare',args);
- assert.equal(plan.checks.visibleWatermark,'off');assert.equal(plan.browserCheck.visibleWatermark,'off');assert.equal(plan.browserCheck.accountId,7);assert.equal(plan.browserCheck.submitted,false);assert.equal(plan.generateArguments.visibleWatermark,undefined);assert.equal(browserChecks,9);
- const mandatory=Object.assign(new Error('Google requires visible watermarking for this account'),{code:'VISIBLE_WATERMARK_REQUIRED'}),required=createAgentActions({runtime,checkIsolatedInputs:async()=>{throw mandatory;}});await assert.rejects(required('prepare',args),error=>error===mandatory);assert.deepEqual(runtime.jobs,[]);
+ await assert.rejects(call('prepare',{model:serverVideo,prompt:'Same server route',accountId:7,checkBrowser:true}),{code:'BROWSER_MODEL_UNSUPPORTED'});
+ const plan=await call('prepare',{model:image,prompt:'Image request'});assert.equal(plan.checks.visibleWatermark,'not_applicable');assert.equal(Object.hasOwn(plan.generateArguments,'videoWatermark'),false);
+ for(const videoWatermark of ['with','without'])await assert.rejects(call('prepare',{model:image,prompt:'Image request',videoWatermark}),{code:'INVALID_ARGUMENTS'});
+ for(const videoWatermark of ['off','WITH',null,true])await assert.rejects(call('prepare',{model:video,prompt:'Video request',videoWatermark}),{code:'INVALID_ARGUMENTS'});
+ assert.equal(browserChecks,0);assert.deepEqual(runtime.jobs,[]);
+});
+test('browser preparation requires exact evidence for both watermark modes and preserves mandatory errors',async()=>{
+ const model='omni-1.2-flash-3s-portrait-360p',runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{},generate:()=>assert.fail('Browser check must not generate'),persist:()=>assert.fail('Browser check must not persist')},args={model,prompt:'Exact user request',method:'text',accountId:7,checkBrowser:true};
+ for(const [mode,expected,wrong] of [['with','on','off'],['without','off','on']]){
+  let state;
+  const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{
+   assert.equal(input.videoWatermark,mode);
+   return {ready:true,accountId:7,model,uploadedImages:0,submitted:false,cleared:true,visibleWatermark:state};
+  }});
+  for(state of [undefined,null,wrong,'required','not_checked',expected.toUpperCase(),false,{checked:false}]){
+   await assert.rejects(call('prepare',{...args,videoWatermark:mode}),{code:'VISIBLE_WATERMARK_UNVERIFIED'});
+  }
+  state=expected;
+  const plan=await call('prepare',{...args,videoWatermark:mode});
+  assert.equal(plan.checks.visibleWatermark,expected);assert.equal(plan.browserCheck.visibleWatermark,expected);
+  assert.equal(plan.browserCheck.accountId,7);assert.equal(plan.browserCheck.submitted,false);
+  assert.equal(plan.generateArguments.videoWatermark,mode);assert.equal(plan.generateArguments.visibleWatermark,undefined);
+ }
+ const mandatory=Object.assign(new Error('Google requires visible watermarking for this account'),{code:'VISIBLE_WATERMARK_REQUIRED'}),required=createAgentActions({runtime,checkIsolatedInputs:async()=>{throw mandatory;}});
+ await assert.rejects(required('prepare',{...args,videoWatermark:'without'}),error=>error===mandatory);assert.deepEqual(runtime.jobs,[]);
 });
 test('model filters combine new settings with legacy mode and status advertises API features',async()=>{
  const runtime={ready:true,message:'ready',models:[{id:'veo-3.1-fast-r2v-8s-landscape'},{id:'omni-1.1-flash'},{id:'gemini-3.1-flash-image-landscape-4k'}],accounts:[],jobs:[],start:async()=>{}};
@@ -148,7 +165,7 @@ test('model filters combine new settings with legacy mode and status advertises 
  assert.deepEqual((await call('models',{kind:'video',mode:'references',method:'ingredients',family:'Veo 3.1 Fast',durationSeconds:8,aspectRatio:'16:9',resolution:'standard'})).models.map(model=>model.id),['veo-3.1-fast-r2v-8s-landscape']);
  assert.deepEqual((await call('models',{method:'frames'})).models,[]);
  assert.equal((await call('models',{method:'text',family:'Omni 1.1 Flash',durationSeconds:8})).models.length,1);
- const status=await call('status');assert.equal(status.apiVersion,3);assert.equal(status.videoWatermarkPolicy,'require_off');assert.deepEqual(status.features,['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation','video-visible-watermark-off']);
+ const status=await call('status');assert.equal(status.apiVersion,3);assert.equal(status.videoWatermarkPolicy,'selectable');assert.deepEqual(status.features,['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation','video-watermark-selection']);
 });
 test('catalog advertises isolated browser for exact Omni 1.2 text ingredients and frame variants without extending edit route',()=>{
  for(const id of ['omni-1.2-flash-3s-landscape','omni-1.2-flash-8s-portrait','omni-1.2-flash-15s-portrait-360p']){
@@ -161,7 +178,7 @@ test('catalog advertises isolated browser for exact Omni 1.2 text ingredients an
 });
 test('exact Omni 1.2 alias keeps its requested model id through browser check and generation input',async()=>{
  const model='omni-1.2-flash',runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{}},calls=[];
- const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);return {ready:true,accountId:7,uploadedImages:0,submitted:false,cleared:true,visibleWatermark:'off'};}});
+ const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);return {ready:true,accountId:7,uploadedImages:0,submitted:false,cleared:true,visibleWatermark:'on'};}});
  const plan=await call('prepare',{model,prompt:'exact alias',accountId:7,checkBrowser:true});assert.equal(plan.model.generationEngine,'isolated-browser');assert.equal(plan.generateArguments.model,model);assert.equal(calls[0].model,model);assert.equal(plan.settings.durationSeconds,8);assert.equal(plan.settings.aspectRatio,'16:9');
  const input=await generationInput(runtime,{...plan.generateArguments,requestId:'same-model-alias',confirmCreditSpend:true});assert.equal(input.model,model);
 });
@@ -169,7 +186,7 @@ test('Nano Banana routes exact standard and supported upscale variants while Lit
  const ids=[];for(const family of ['gemini-3.1-flash-image','gemini-3.1-flash-lite-image','gemini-3.0-pro-image'])for(const aspect of ['landscape','portrait','square','four-three','three-four']){const id=family+'-'+aspect;ids.push(id);const model=capabilities({id});assert.equal(model.generationEngine,'isolated-browser');assert.equal(model.kind,'image');assert.deepEqual(model.methods,['image']);for(const resolution of ['2k','4k'])assert.equal(capabilities({id:id+'-'+resolution}).generationEngine,family.includes('lite')?'server':'isolated-browser');}
  assert.equal(ids.length,15);const {start}=await fixture(t);let checked;
  const runtime={ready:true,models:[{id:ids[0]}],jobs:[],start:async()=>{}},call=createAgentActions({runtime,checkIsolatedInputs:async input=>{checked=input;return {ready:true,accountId:7,uploadedImages:2,submitted:false,cleared:true};}});
- const preview=await call('prepare',{model:ids[0],method:'image',prompt:'image exact',referencePaths:[start,start],accountId:7,checkBrowser:true});assert.equal(preview.model.generationEngine,'isolated-browser');assert.equal(checked.references.length,2);assert(checked.references.every(ref=>ref.kind==='image'));assert.equal(preview.generateArguments.startFramePath,undefined);assert.equal(preview.checks.visibleWatermark,'not_applicable');assert.equal(preview.browserCheck.visibleWatermark,undefined);
+ const preview=await call('prepare',{model:ids[0],method:'image',prompt:'image exact',referencePaths:[start,start],accountId:7,checkBrowser:true});assert.equal(preview.model.generationEngine,'isolated-browser');assert.equal(checked.references.length,2);assert(checked.references.every(ref=>ref.kind==='image'));assert.equal(preview.generateArguments.startFramePath,undefined);assert.equal(preview.checks.visibleWatermark,'not_applicable');assert.equal(preview.browserCheck.visibleWatermark,undefined);assert.equal(Object.hasOwn(checked,'videoWatermark'),false);
  await assert.rejects(call('prepare',{model:ids[0],prompt:'too many',referencePaths:Array(6).fill(start)}),/до 5/);
 });
 test('Veo catalog uses shared exact forty-three variants and keeps frame roles for no-spend browser check',async t=>{
@@ -177,20 +194,20 @@ test('Veo catalog uses shared exact forty-three variants and keeps frame roles f
  assert.equal(ids.length,43);for(const id of ids)assert.equal(capabilities({id}).generationEngine,'isolated-browser',id);
  for(const id of ['veo-3.1-quality-r2v-8s-landscape','veo-3.1-fast-r2v-4s-landscape','veo-3.1-fast-extend-8s-landscape','veo-3.1-fast-8s-square'])assert.equal(capabilities({id}).generationEngine,'server',id);
  const {start,end}=await fixture(t),model='veo-3.1-fast-i2v-8s-portrait',runtime={ready:true,models:[{id:model},{id:'veo-3.1-fast-4s-landscape'}],jobs:[],start:async()=>{}},calls=[];
- const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);if(input.model.includes('-4s-'))throw Object.assign(new Error('Exact duration unavailable'),{code:'MODEL_DURATION_UNAVAILABLE'});return {ready:true,accountId:7,uploadedImages:2,submitted:false,cleared:true,visibleWatermark:'off'};}});
+ const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);if(input.model.includes('-4s-'))throw Object.assign(new Error('Exact duration unavailable'),{code:'MODEL_DURATION_UNAVAILABLE'});return {ready:true,accountId:7,uploadedImages:2,submitted:false,cleared:true,visibleWatermark:'on'};}});
  const plan=await call('prepare',{model,method:'frames',prompt:'exact frames',startFramePath:start,endFramePath:end,accountId:7,checkBrowser:true});assert.equal(plan.generateArguments.model,model);assert.equal(plan.generateArguments.startFramePath,start);assert.equal(plan.generateArguments.endFramePath,end);assert.equal(calls[0].references[0].dataUrl,'data:image/png;base64,c3RhcnQ=');assert.equal(calls[0].references[1].dataUrl,'data:image/jpeg;base64,ZW5k');
  await assert.rejects(call('prepare',{model:'veo-3.1-fast-4s-landscape',method:'text',prompt:'exact 4s',accountId:7,checkBrowser:true}),{code:'MODEL_DURATION_UNAVAILABLE'});assert.equal(calls[1].model,'veo-3.1-fast-4s-landscape');assert.equal(capabilities({id:calls[1].model}).requiredTier,'Ultra');
 });
 test('optional Omni 1.2 edit check forwards video source and images without frame conversion or generation flags',async t=>{
  const {start,video}=await fixture(t),model='omni-1.2-flash-edit-portrait-360p';let checked;
- const runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{}},call=createAgentActions({runtime,checkIsolatedInputs:async input=>{checked=input;return {ready:true,accountId:7,uploadedImages:1,submitted:false,cleared:true,visibleWatermark:'off'};}});
+ const runtime={ready:true,models:[{id:model}],jobs:[],start:async()=>{}},call=createAgentActions({runtime,checkIsolatedInputs:async input=>{checked=input;return {ready:true,accountId:7,uploadedImages:1,submitted:false,cleared:true,visibleWatermark:'on'};}});
  const plan=await call('prepare',{model,method:'edit',prompt:'Edit original video',videoPaths:[video],referencePaths:[start],accountId:7,checkBrowser:true});
  assert.equal(plan.model.generationEngine,'isolated-browser');assert.deepEqual(checked.references,[{kind:'image',dataUrl:'data:image/png;base64,c3RhcnQ='},{kind:'video',path:video}]);assert.equal(plan.generateArguments.videoPaths[0],video);assert.equal(plan.generateArguments.startFramePath,undefined);assert.equal(plan.generateArguments.checkBrowser,undefined);assert.equal(plan.checks.browser,'passed');assert.equal(runtime.jobs.length,0);
 });
 test('browser check reports one uploaded Edit video with no images while local prepare stays inert and text has no upload',async t=>{
  const {video}=await fixture(t),model='omni-1.2-flash-edit-portrait-360p',textModel='omni-1.2-flash-3s-portrait-360p',calls=[];
  const runtime={ready:true,models:[{id:model},{id:textModel}],jobs:[],start:async()=>{},generate:()=>assert.fail('Upload check generated'),persist:()=>assert.fail('Upload check persisted job')};
- const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);return {ready:true,accountId:7,model:input.model,uploadedImages:input.references.filter(ref=>ref.kind==='image').length,submitted:false,cleared:true,visibleWatermark:'off'};}});
+ const call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);return {ready:true,accountId:7,model:input.model,uploadedImages:input.references.filter(ref=>ref.kind==='image').length,submitted:false,cleared:true,visibleWatermark:'on'};}});
  const args={model,method:'edit',prompt:'Edit exactly this video',videoPaths:[video],accountId:7};
  for(const local of [args,{...args,checkBrowser:false}]){
   const plan=await call('prepare',local);assert.equal(plan.checks.browser,undefined);assert.equal(plan.checks.upload,undefined);assert.equal(plan.browserCheck,undefined);
@@ -213,7 +230,7 @@ test('browser check rejects a different returned model or explicit video upload 
 });
 test('optional Omni 1.2 browser frame check keeps start/end roles and rejects ingredients or unsupported end frame',async t=>{
  const {start,end}=await fixture(t),models=[{id:'omni-1.2-flash-i2v-8s-landscape'},{id:'omni-1.2-flash-i2v-15s-portrait-360p'}],calls=[];
- const runtime={ready:true,models,jobs:[],start:async()=>{}},call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);return {ready:true,accountId:7,uploadedImages:input.references.length,submitted:false,cleared:true,visibleWatermark:'off'};}});
+ const runtime={ready:true,models,jobs:[],start:async()=>{}},call=createAgentActions({runtime,checkIsolatedInputs:async input=>{calls.push(input);return {ready:true,accountId:7,uploadedImages:input.references.length,submitted:false,cleared:true,visibleWatermark:'on'};}});
  const args={model:models[0].id,method:'frames',prompt:'frame transition',startFramePath:start,endFramePath:end,accountId:7,checkBrowser:true};
  const plan=await call('prepare',args);assert.equal(plan.model.generationEngine,'isolated-browser');assert.equal(plan.method,'frames');
  assert.deepEqual(calls[0].references,[{kind:'image',dataUrl:'data:image/png;base64,c3RhcnQ='},{kind:'image',dataUrl:'data:image/jpeg;base64,ZW5k'}]);
@@ -231,7 +248,7 @@ test('prepare and generation preserve optional exact account without checking ac
  const generation={...plan.generateArguments,requestId:'stable-account',confirmCreditSpend:true};
  const input=await generationInput(runtime,generation);assert.equal(input.accountId,7);assert.equal(input.prompt,params.prompt);
  const result=await call('generate',generation);assert.equal(generations,1);assert.equal(result.job.generationEngine,'isolated-browser');assert.equal(result.job.accountId,7);
- const ordinary=await generationInput(runtime,{model,prompt:'automatic account',requestId:'automatic',confirmCreditSpend:true});assert.equal(Object.hasOwn(ordinary,'accountId'),false);
+ const ordinary=await generationInput(runtime,{model,prompt:'automatic account',requestId:'automatic',confirmCreditSpend:true});assert.equal(Object.hasOwn(ordinary,'accountId'),false);assert.equal(Object.hasOwn(ordinary,'videoWatermark'),false);
  for(const accountId of [null,0,-1,1.2,Number.MAX_SAFE_INTEGER+1,'7']){
   await assert.rejects(call('prepare',{...params,accountId}),{code:'INVALID_ARGUMENTS'});
   await assert.rejects(generationInput(runtime,{...generation,accountId}),{code:'INVALID_ARGUMENTS'});

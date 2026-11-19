@@ -95,6 +95,6 @@ test('frame slots preserve roles, require a start frame and enforce an unsupport
   assert.throws(() => frameReferences([null, end], info), /Добавьте начальный кадр/);
   assert.deepEqual(frameReferences([start, null], info, true), [start]);
   assert.deepEqual(frameReferences([start, end], info, true), [start, end]);
-  assert.deepEqual(requestFor(model, 'Scene', frameReferences([start, end], info, true), ''), { model: model.id, prompt: 'Scene', images: [start.dataUrl, end.dataUrl] });
+  assert.deepEqual(requestFor(model, 'Scene', frameReferences([start, end], info, true), ''), { model: model.id, prompt: 'Scene', images: [start.dataUrl, end.dataUrl], videoWatermark: 'with' });
   assert.throws(() => frameReferences([start, end], modelInfo({ id: 'veo_3_1_i2v_lite_landscape' }), true), /не поддерживает конечный кадр/);
 });

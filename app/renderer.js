@@ -33,6 +33,15 @@ function referenceKind(reference) {
 
 const PREFERRED_VIDEO_FAMILY = 'Omni 1.2 Flash';
 const VIDEO_METHODS = { text: 'Текст → видео', frames: 'Frames · Кадры', ingredients: 'Ingredients · Ингредиенты', edit: 'Редактирование видео', extend: 'Продолжение видео' };
+const VIDEO_WATERMARK_LABELS = { with: 'С меткой', without: 'Только без метки' };
+const WATERMARK_CAPABILITY_LABELS = { required: 'Метка обязательна', optional: 'Можно без метки', unknown: 'Метка не проверена' };
+function normalizeVideoWatermark(value) {
+  return value === 'without' ? 'without' : 'with';
+}
+function watermarkCapabilityLabel(account) {
+  const capability = account.visibleWatermarkCapability;
+  return WATERMARK_CAPABILITY_LABELS[Object.hasOwn(WATERMARK_CAPABILITY_LABELS, capability) ? capability : 'unknown'];
+}
 function modelSettings(model) {
   const info = modelInfo(model), id = info.id;
   const family = /^veo[-_]3[._]1[-_](lite|fast|quality)/.exec(id)?.[1];
@@ -68,7 +77,7 @@ function referenceError(info, references, required = false) {
   return '';
 }
 
-function requestFor(model, prompt, references, sourceVideoId) {
+function requestFor(model, prompt, references, sourceVideoId, videoWatermark) {
   const info = modelInfo(model);
   if (!model?.id) throw new Error('Выберите модель');
   if (!prompt.trim()) throw new Error('Опишите, что хотите создать');
@@ -78,7 +87,7 @@ function requestFor(model, prompt, references, sourceVideoId) {
   const inputs = references.some(reference => referenceKind(reference) === 'video')
     ? { references: references.map(reference => referenceKind(reference) === 'video' ? { kind: 'video', path: reference.path } : { kind: 'image', dataUrl: reference.dataUrl }) }
     : { images: info.maxImages ? references.map(reference => reference.dataUrl) : [] };
-  return { model: model.id, prompt: prompt.trim(), ...inputs, ...(info.extend ? { sourceVideoId: sourceVideoId.trim() } : {}) };
+  return { model: model.id, prompt: prompt.trim(), ...inputs, ...(info.extend ? { sourceVideoId: sourceVideoId.trim() } : {}), ...(info.kind === 'video' ? { videoWatermark: normalizeVideoWatermark(videoWatermark) } : {}) };
 }
 
 function mediaUrl(url) {
@@ -94,8 +103,8 @@ function readDraft(storage) {
   try {
     const draft = JSON.parse(storage?.getItem('flowStudio.draft') || '{}');
     const text = (key, max) => typeof draft?.[key] === 'string' ? draft[key].slice(0, max) : '';
-    return { mode: draft?.mode === 'video' ? 'video' : 'image', model: text('model', 512), videoMethod: Object.hasOwn(VIDEO_METHODS, draft?.videoMethod) ? draft.videoMethod : '', prompt: text('prompt', 16000), sourceVideoId: text('sourceVideoId', 2048) };
-  } catch { return { mode: 'image', model: '', videoMethod: '', prompt: '', sourceVideoId: '' }; }
+    return { mode: draft?.mode === 'video' ? 'video' : 'image', model: text('model', 512), videoMethod: Object.hasOwn(VIDEO_METHODS, draft?.videoMethod) ? draft.videoMethod : '', videoWatermark: normalizeVideoWatermark(draft?.videoWatermark), prompt: text('prompt', 16000), sourceVideoId: text('sourceVideoId', 2048) };
+  } catch { return { mode: 'image', model: '', videoMethod: '', videoWatermark: 'with', prompt: '', sourceVideoId: '' }; }
 }
 
 function requiresLogin(job) {
@@ -147,6 +156,7 @@ function initialize() {
   const draft = readDraft(draftStorage);
   state.mode = draft.mode;
   state.videoMethod = draft.videoMethod || 'text';
+  $('video-watermark').value = draft.videoWatermark;
   $('prompt').value = draft.prompt;
   $('source-video-id').value = draft.sourceVideoId;
   for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
@@ -154,7 +164,7 @@ function initialize() {
 
   function saveDraft() {
     draft.model = $('model').value || draft.model;
-    try { draftStorage?.setItem('flowStudio.draft', JSON.stringify({ mode: state.mode, model: draft.model, videoMethod: state.videoMethod, prompt: $('prompt').value, sourceVideoId: $('source-video-id').value })); } catch { /* A full or disabled store must not block generation. */ }
+    try { draftStorage?.setItem('flowStudio.draft', JSON.stringify({ mode: state.mode, model: draft.model, videoMethod: state.videoMethod, videoWatermark: $('video-watermark').value, prompt: $('prompt').value, sourceVideoId: $('source-video-id').value })); } catch { /* A full or disabled store must not block generation. */ }
   }
 
   function element(tag, className, text) {
@@ -177,6 +187,30 @@ function initialize() {
   }
   function activeJob() { return state.jobs.find(job => job.status === 'running'); }
   function selectedModel() { return state.models.find(model => model.id === $('model').value); }
+  function requiresNoWatermark() {
+    return state.mode === 'video' && $('video-watermark').value === 'without';
+  }
+  function generationAccounts() {
+    const video = state.mode === 'video';
+    const without = requiresNoWatermark();
+    return state.accounts.filter(account => account.isActive && (!video || account.videoEnabled !== false) &&
+      (!without || account.visibleWatermarkCapability === 'optional' && account.browserReady === true));
+  }
+  function generationAccountProblem() {
+    const selected = $('generation-account').value;
+    const eligible = generationAccounts().filter(account => !selected || String(account.id) === selected);
+    if (eligible.some(account => !cooldownSeconds(account))) return '';
+    if (eligible.length) return selected ? 'Выбранный аккаунт на КД. Дождитесь окончания или выберите другой аккаунт' : 'Доступные аккаунты на КД. Дождитесь окончания или откройте «Аккаунты»';
+    if (selected) {
+      const account = state.accounts.find(item => String(item.id) === selected);
+      if (requiresNoWatermark() && account?.browserReady === false) return 'Для выбранного аккаунта нажмите «Войти заново» в разделе «Аккаунты» или выберите другой аккаунт';
+      if (requiresNoWatermark() && account?.isActive && account.videoEnabled !== false) return 'Выбранный аккаунт недоступен для видео без метки. Выберите другой аккаунт, проверьте подключение в «Аккаунтах» или выберите «С меткой»';
+      return 'Выбранный аккаунт недоступен. Выберите другой аккаунт или «Автоматически»';
+    }
+    if (!state.accounts.some(account => account.isActive)) return 'Подключите активный аккаунт в разделе «Аккаунты»';
+    if (requiresNoWatermark()) return 'Нет доступных аккаунтов для видео без метки. Откройте «Аккаунты» и нажмите «Проверить все включённые» или выберите «С меткой»';
+    return 'Нет включённых аккаунтов с доступом к видео. Проверьте подключение в разделе «Аккаунты»';
+  }
   function currentReferences(required = false) {
     const info = modelInfo(selectedModel());
     if (state.mode === 'video' && state.videoMethod === 'frames') return frameReferences(state.frames, info, required);
@@ -332,10 +366,14 @@ function initialize() {
   function updateGenerate() {
     const running = Boolean(activeJob()) || state.submitting;
     const browserPending=Boolean(state.browserPreparedToken);
-    const available = state.accounts.some(account => account.isActive && !cooldownSeconds(account));
-    $('generate').disabled = browserPending || !state.ready || !selectedModel() || running || !available || state.importPending || state.accountPending !== null || Boolean(state.batchCheck?.running) || state.retryingJobId !== null;
+    const accountProblem = generationAccountProblem();
+    const checkingAccounts = state.batchCheck?.running || state.mode === 'video' && state.checkingAccountId !== null;
+    $('generate').disabled = browserPending || !state.ready || !selectedModel() || running || Boolean(accountProblem) || state.importPending || state.accountPending !== null || checkingAccounts || state.retryingJobId !== null;
     $('generate-label').textContent = running ? 'Генерация идет…' : state.mode === 'video' ? 'Создать видео' : 'Создать изображение';
-    $('generate-hint').textContent = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : state.batchCheck?.running ? 'Проверяем аккаунты…' : state.accountPending !== null ? 'Обновляем подключение…' : state.importPending ? 'Добавляем вложения…' : !available ? (state.accounts.some(account => account.isActive) ? 'Аккаунты на КД — дождитесь окончания или откройте «Аккаунты»' : 'Подключите активный аккаунт в разделе «Аккаунты»') : '⌘ Enter — создать';
+    const hint = !state.ready ? 'Ожидаем подключения Flow' : running ? 'Ход генерации виден справа' : checkingAccounts ? 'Проверяем аккаунты…' : state.accountPending !== null ? 'Обновляем подключение…' : state.importPending ? 'Добавляем вложения…' : accountProblem || '⌘ Enter — создать';
+    if ($('generate-hint').textContent !== hint) $('generate-hint').textContent = hint;
+    if ($('generation-account').value && accountProblem) $('generation-account').setAttribute('aria-invalid', 'true');
+    else $('generation-account').removeAttribute('aria-invalid');
   }
   function renderModels(requestedModel) {
     if (requestedModel !== undefined) draft.model = requestedModel;
@@ -366,6 +404,7 @@ function initialize() {
     const settings = selectedModel() && modelSettings(selectedModel());
     if (state.mode === 'video' && settings && !settings.methods.includes(state.videoMethod)) state.videoMethod = settings.methods[0];
     renderSettings();
+    renderGenerationAccounts();
     updateModel();
   }
   function fillSelect(id, values, selected, label = value => value) {
@@ -380,6 +419,7 @@ function initialize() {
     const selected = selectedModel() && modelSettings(selectedModel());
     if($('generation-route-hint'))$('generation-route-hint').textContent=(selected?.info.id==='omni-1.2-flash'||/^omni-1\.2-flash-(?:(?:i2v-)?(?:[3-9]|1[0-5])s-|edit-)(?:landscape|portrait)(?:-360p)?$/.test(selected?.info.id||'')||/^(?:gemini-3\.1-flash-image|gemini-3\.0-pro-image)-(?:landscape|portrait|square|four-three|three-four)(?:-(?:2k|4k))?$/.test(selected?.info.id||'')||/^gemini-3\.1-flash-lite-image-(?:landscape|portrait|square|four-three|three-four)$/.test(selected?.info.id||'')||/^veo-3\.1-(?:lite|fast|quality)(?:-(?:i2v-)?(?:4|6|8)s-(?:landscape|portrait))?$/.test(selected?.info.id||'')||/^veo-3\.1-(?:lite|fast)-r2v-8s-(?:landscape|portrait)$/.test(selected?.info.id||''))?'Отдельный фоновый браузер Flow Studio. Вашим Chrome можно пользоваться во время генерации.':'Этот режим использует серверный движок. Выбранная модель не меняется автоматически.';
     $('video-method-field').hidden = state.mode !== 'video';
+    $('video-watermark-field').hidden = $('video-watermark').disabled = state.mode !== 'video';
     fillSelect('video-method', Object.keys(VIDEO_METHODS).filter(method => catalog.some(entry => entry.methods.includes(method))), state.videoMethod, value => VIDEO_METHODS[value]);
     if (state.mode === 'video') state.videoMethod = $('video-method').value;
     const method = state.mode === 'image' ? 'image' : state.videoMethod;
@@ -427,7 +467,6 @@ function initialize() {
     $('source-video-id').required = info.extend;
     $('pick-images-label').textContent = info.supportsVideoReferences ? 'Добавить фото или видео' : 'Добавить изображения';
     $('model-description').textContent = !selectedModel() ? '' : info.edit ? 'Редактирует исходное видео по вашему запросу и ингредиентам' : info.extend ? 'Продолжает исходное видео по вашему запросу' : state.videoMethod === 'frames' && state.mode === 'video' ? 'Задайте начальный кадр и при необходимости конечный' : state.videoMethod === 'ingredients' && state.mode === 'video' ? 'Использует ингредиенты для содержания и стиля ролика' : info.kind === 'image' ? 'По тексту или с исходными изображениями' : 'Видео по текстовому описанию';
-    if (selectedModel() && info.kind === 'video') $('model-description').textContent += '. Видимый водяной знак должен быть выключен; если Google требует его, запуск останавливается до расхода кредитов';
     const editSize = /^omni-1\.2-flash-edit-/.test(info.id) ? (info.resolution === '360p' ? (info.aspect === '9:16' ? '360×640' : '640×360') : (info.aspect === '9:16' ? '720×1280' : '1280×720')) : '';
     $('references-hint').textContent = info.edit ? `1 исходное видео MP4, MOV или M4V до ${info.maxInputDuration} с и до 5 изображений. Порядок образцов сохраняется.${editSize ? ` Исходник: ${editSize}. Автоматического изменения размера нет.` : ''}` : info.i2v ? 'Порядок изображений задает начальный и конечный кадры' : info.minImages ? `От ${info.minImages} до ${info.maxImages} изображений` : info.maxImages ? `До ${info.maxImages} изображений, если нужны` : 'Эта модель не использует исходные изображения';
     renderReferences();
@@ -532,6 +571,7 @@ function initialize() {
   function reuse(job) {
     const model = state.models.find(item => item.id === job.model);
     state.mode = model ? modelInfo(model).kind : job.kind || modelInfo({ id: job.model }).kind;
+    if (state.mode === 'video') $('video-watermark').value = normalizeVideoWatermark(job.videoWatermark);
     for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
     renderModels(job.model);
     $('prompt').value = job.prompt;
@@ -655,7 +695,8 @@ function initialize() {
     retry.dataset.jobId=job.id;
     retry.disabled=!state.ready || !job.retryAvailable || Boolean(activeJob()) || state.retryingJobId !== null || Boolean(cooldownSeconds(account)) || state.accountPending !== null || Boolean(state.batchCheck?.running);
     container.append(retry);
-    const reason = cooldownSeconds(account) ? 'Повтор доступен после завершения КД аккаунта' : job.retryBlockedReason || (!job.retryAvailable ? 'Для этой задачи нет сохранённых исходников. Используйте «Редактировать запрос»' : 'Новая попытка с теми же исходниками и настройками может расходовать кредиты');
+    const creditHint = job.kind === 'video' ? `Повтор использует режим «${VIDEO_WATERMARK_LABELS[normalizeVideoWatermark(job.videoWatermark)]}». Новая попытка может расходовать кредиты` : 'Новая попытка с теми же исходниками и настройками может расходовать кредиты';
+    const reason = cooldownSeconds(account) ? 'Повтор доступен после завершения КД аккаунта' : job.retryBlockedReason || (!job.retryAvailable ? 'Для этой задачи нет сохранённых исходников. Используйте «Редактировать запрос»' : creditHint);
     container.append(element('p','hint retry-hint',reason));
   }
   async function retryGeneration(job) {
@@ -707,13 +748,39 @@ function initialize() {
       $('history').append(card);
     }
   }
-  function renderAccounts() {
-    for(const id of ['generation-account','isolated-account']){
-      const select=$(id);if(!select)continue;const chosen=select.value;select.replaceChildren();
-      if(id==='generation-account'){const automatic=element('option','','Автоматически');automatic.value='';select.append(automatic);}
-      for(const account of state.accounts.filter(a=>a.isActive)){const option=element('option','',account.email+(account.browserReady===false?' · нужен вход в Flow Studio':''));option.value=String(account.id);select.append(option);}
-      if(state.accounts.some(a=>a.isActive&&String(a.id)===chosen))select.value=chosen;
+  function renderGenerationAccounts() {
+    const select = $('generation-account');
+    const chosen = select.value;
+    const eligible = generationAccounts();
+    const unavailable = chosen && !eligible.some(account => String(account.id) === chosen)
+      ? state.accounts.find(account => String(account.id) === chosen) || { id: chosen }
+      : null;
+    const automatic = element('option', '', 'Автоматически');
+    automatic.value = '';
+    select.replaceChildren(automatic);
+    for (const account of unavailable ? [...eligible, unavailable] : eligible) {
+      const label = [account.email || `Аккаунт ${account.id}`];
+      if (state.mode === 'video') label.push(watermarkCapabilityLabel(account));
+      if (account.browserReady === false) label.push('нужен вход в Flow Studio');
+      if (account === unavailable) label.push('недоступен');
+      const option = element('option', '', label.join(' · '));
+      option.value = String(account.id);
+      option.disabled = account === unavailable;
+      select.append(option);
     }
+    select.value = chosen;
+  }
+  function renderAccounts() {
+    renderGenerationAccounts();
+    const select = $('isolated-account');
+    const chosen = select.value;
+    select.replaceChildren();
+    for (const account of state.accounts.filter(account => account.isActive)) {
+      const option = element('option', '', account.email + (account.browserReady === false ? ' · нужен вход в Flow Studio' : ''));
+      option.value = String(account.id);
+      select.append(option);
+    }
+    if (state.accounts.some(account => account.isActive && String(account.id) === chosen)) select.value = chosen;
     $('accounts-count').textContent = numbers.format(state.accounts.length);
     const active = state.accounts.filter(account => account.isActive).length;
     const countWord = { one: 'аккаунт', few: 'аккаунта', many: 'аккаунтов', other: 'аккаунта' }[new Intl.PluralRules('ru-RU').select(active)];
@@ -732,6 +799,7 @@ function initialize() {
       const status = element('p');
       status.append(element('span', `badge${account.isActive ? '' : ' inactive'}`, account.isActive ? 'Включен для генерации' : 'Выключен для генерации'));
       if (account.videoEnabled === false) status.append(document.createTextNode(' · Видео недоступно'));
+      status.append(document.createTextNode(` · ${watermarkCapabilityLabel(account)}`));
       identity.append(element('h3', '', account.email || `Аккаунт ${account.id}`), status);
       if(account.isActive&&account.serverActive===false&&account.browserReady===true)identity.append(element('p','hint server-session-warning','Серверная сессия требует проверки; браузер доступен'));
       if(account.browserReady===false)identity.append(element('p','hint','Для фоновой генерации нажмите «Войти заново» один раз. Вход сохраняется в отдельном профиле Flow Studio.'));
@@ -892,11 +960,15 @@ function initialize() {
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.submitting || state.retryingJobId !== null || state.importPending || state.accountPending !== null || state.batchCheck?.running || activeJob() || !state.ready) return;
+    if ($('generate').disabled || generationAccountProblem()) return;
     if (!$('generation-form').reportValidity()) return;
     setError('form-error', '');
     let request;
-    try { request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value);const accountId=Number($('generation-account')?.value);if(Number.isSafeInteger(accountId)&&accountId>0)request.accountId=accountId; }
+    try {
+      request = requestFor(selectedModel(), $('prompt').value, currentReferences(true), $('source-video-id').value, $('video-watermark').value);
+      const accountId = Number($('generation-account').value);
+      if (Number.isSafeInteger(accountId) && accountId > 0) request.accountId = accountId;
+    }
     catch (error) { setError('form-error', errorMessage(error)); return; }
     state.submitting = true;
     updateGenerate();
@@ -935,6 +1007,13 @@ function initialize() {
   $('dismiss-notice').addEventListener('click', () => { $('notice').hidden = true; });
   $('model').addEventListener('change', () => { const settings = selectedModel() && modelSettings(selectedModel()); if (state.mode === 'video' && settings && !settings.methods.includes(state.videoMethod)) state.videoMethod = settings.methods[0]; renderSettings(); updateModel(); saveDraft(); });
   for (const id of ['video-method','model-family','duration','aspect-ratio','resolution']) $(id).addEventListener('change', () => selectSettings(id));
+  $('video-watermark').addEventListener('change', () => {
+    renderGenerationAccounts();
+    setError('form-error', inputError());
+    updateGenerate();
+    saveDraft();
+  });
+  $('generation-account').addEventListener('change', updateGenerate);
   $('prompt').addEventListener('input', () => { updatePromptCount(); saveDraft(); });
   $('source-video-id').addEventListener('input', saveDraft);
   $('prompt').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); if (!$('generate').disabled) $('generate').click(); } });

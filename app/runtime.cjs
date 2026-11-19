@@ -12,6 +12,8 @@ const exec = promisify(execFile);
 const BASE = 'http://127.0.0.1:38000';
 const COMMAND_ENV = {...process.env, PATH:[process.env.PATH,'/opt/homebrew/bin','/usr/local/bin','/Applications/Docker.app/Contents/Resources/bin','/usr/bin','/bin','/usr/sbin','/sbin'].filter(Boolean).join(':')};
 const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
+const videoWatermarkModes = ['with', 'without'];
+const watermarkCapabilities = ['required', 'optional', 'unknown'];
 function publicAccount(t) {
   const account={id:t.id,email:t.login_account||t.email,credits:t.credits??0,isActive:!!t.is_active,serverActive:!!t.is_active,manualDisabled:t.ban_reason==='manual_disabled',videoEnabled:t.video_enabled!==false};
   const fields={generation_cooldown_until:'cooldownUntil',generation_last_error:'lastGenerationError',generation_last_error_at:'lastGenerationErrorAt',generation_cooldown_remaining_seconds:'cooldownRemainingSeconds',generation_cooldown_reset_allowed:'cooldownResetAllowed'};
@@ -130,7 +132,7 @@ class Runtime {
     Object.assign(this,{composePath,databasePath,dataDir,onEvent});
     this.ready=false;this.message='Запускаем Flow Studio…';this.models=[];this.accounts=[];this.accountRefreshVersion=0;this.accountAppliedVersion=0;this.jobs=[];
     this.sessionCookie='';this.startTask=null;this.aborts=new Map();this.persistTask=Promise.resolve();
-    this.closing=false;this.closeTask=null;this.engineManaged=false;this.engineContainer=null;this.engineContainerCaptureFailed=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();this.retryInputs=new Set();this.retryTask=null;this.browserEngine=null;this.browserAccountState=new Map();this.accountParticipation=new Map();
+    this.closing=false;this.closeTask=null;this.engineManaged=false;this.engineContainer=null;this.engineContainerCaptureFailed=false;this.jobTasks=new Set();this.historyTask=null;this.startController=new AbortController();this.retryInputs=new Set();this.retryTask=null;this.browserEngine=null;this.browserAccountState=new Map();this.accountParticipation=new Map();this.accountWatermarks=new Map();
   }
   attachBrowserEngine(engine){
     if(!engine||typeof engine.supports!=='function'||typeof engine.generate!=='function')throw new Error('Неверный браузерный движок.');
@@ -146,6 +148,13 @@ class Runtime {
       try{
         const saved=JSON.parse(await fs.readFile(path.join(this.dataDir,'browser-account-state.json'),'utf8'));
         if(saved.version===1&&Array.isArray(saved.accounts))for(const account of saved.accounts)if(Number.isSafeInteger(account?.id)&&account.id>0&&typeof account.email==='string'&&account.email&&typeof account.lastGenerationError==='string'&&Number.isFinite(Date.parse(account.lastGenerationErrorAt))&&(account.cooldownUntil===null||Number.isFinite(Date.parse(account.cooldownUntil))))this.browserAccountState.set(account.id,{id:account.id,email:account.email,cooldownUntil:account.cooldownUntil,lastGenerationError:account.lastGenerationError.slice(0,1200),lastGenerationErrorAt:account.lastGenerationErrorAt});
+        if (saved.version === 1 && Array.isArray(saved.watermarks)) {
+          for (const entry of saved.watermarks) {
+            if (Number.isSafeInteger(entry?.id) && entry.id > 0 && typeof entry.email === 'string' && entry.email && watermarkCapabilities.includes(entry.capability)) {
+              this.accountWatermarks.set(entry.id, {id: entry.id, email: entry.email.toLowerCase(), capability: entry.capability});
+            }
+          }
+        }
       }catch{}
       try{
         const saved=JSON.parse(await fs.readFile(path.join(this.dataDir,'account-participation.json'),'utf8'));
@@ -245,7 +254,7 @@ class Runtime {
   snapshot(){return {ready:this.ready,message:this.message,models:this.models,accounts:this.accounts,history:this.publicJobs()};}
   publicJobs(){return this.jobs.map(j=>this.publicJob(j));}
   publicJob(job){
-    const fields=['id','model','prompt','kind','createdAt','status','progress','error','needsLogin','elapsedSeconds','accountId','accountEmail','retryOf','unknownOutcome','errorCode','generationEngine','recovering'];
+    const fields=['id','model','prompt','kind','createdAt','status','progress','error','needsLogin','elapsedSeconds','accountId','accountEmail','videoWatermark','retryOf','unknownOutcome','errorCode','generationEngine','recovering'];
     const result=Object.fromEntries(fields.filter(key=>Object.hasOwn(job,key)).map(key=>[key,job[key]]));
     const reason=this.retryBlockedReason(job);
     const recoveryReason=this.recoveryBlockedReason(job);
@@ -266,6 +275,9 @@ class Runtime {
     const account=this.accounts.find(a=>a.id===job.accountId&&a.email?.toLowerCase()===job.accountEmail.toLowerCase());
     if(!account)return 'Подключите исходный аккаунт перед повтором.';
     if(!account.isActive)return 'Включите исходный аккаунт перед повтором.';
+    if (job.videoWatermark === 'without' && account.visibleWatermarkCapability !== 'optional') {
+      return 'У исходного аккаунта не подтверждена возможность генерации без метки. Проверьте его подключение или выберите другой аккаунт в редакторе.';
+    }
     if(this.models.length&&!this.models.some(m=>m.id===job.model))return 'Исходная модель больше недоступна. Выберите модель в редакторе.';
     return '';
   }
@@ -300,7 +312,32 @@ class Runtime {
     this.accountAppliedVersion=version;
     const present=new Map(rows.map(row=>[row.id,String(row.login_account||row.email||'').toLowerCase()]));
     for(const [id,intent] of this.accountParticipation)if(present.get(id)!==intent.email.toLowerCase())this.accountParticipation.delete(id);
-    this.accounts=rows.map(row=>this.withParticipation(this.withBrowserCooldown(publicAccount(row))));this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});return this.accounts;
+    for (const [id, entry] of this.accountWatermarks) if (present.get(id) !== entry.email) this.accountWatermarks.delete(id);
+    this.accounts=rows.map(row=>this.withWatermarkCapability(this.withParticipation(this.withBrowserCooldown(publicAccount(row)))));this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});return this.accounts;
+  }
+  withWatermarkCapability(account) {
+    const entry = this.accountWatermarks.get(account.id);
+    const capability = entry && entry.email === account.email?.toLowerCase() ? entry.capability : 'unknown';
+    return {...account, visibleWatermarkCapability: capability};
+  }
+  async rememberVisibleWatermark({accountId, accountEmail, visibleWatermarkCapability} = {}) {
+    const account = this.accounts.find(a => a.id === accountId);
+    if (!account || typeof accountEmail !== 'string' || account.email?.toLowerCase() !== accountEmail.toLowerCase()) {
+      throw Object.assign(new Error('Google подтвердил настройки другого аккаунта. Проверьте подключение.'), {code: 'ACCOUNT_MISMATCH'});
+    }
+    if (!watermarkCapabilities.includes(visibleWatermarkCapability)) throw new Error('Не подтверждён статус видимого водяного знака.');
+    const previous = this.accountWatermarks.get(accountId);
+    const email = accountEmail.toLowerCase();
+    if (previous?.email === email && previous.capability === visibleWatermarkCapability) return;
+    this.accountWatermarks.set(accountId, {id: accountId, email, capability: visibleWatermarkCapability});
+    try { await this.persist(); }
+    catch (error) {
+      if (previous) this.accountWatermarks.set(accountId, previous);
+      else this.accountWatermarks.delete(accountId);
+      throw error;
+    }
+    this.accounts = this.accounts.map(a => a.id === accountId ? this.withWatermarkCapability(a) : a);
+    this.onEvent({type: 'accounts', accounts: this.accounts, history: this.publicJobs()});
   }
   withParticipation(account){
     const intent=this.accountParticipation.get(account.id);
@@ -372,8 +409,8 @@ class Runtime {
     if(result.success!==true)throw new Error('Не удалось удалить подключение.');
     this.accountAppliedVersion=++this.accountRefreshVersion;
     this.accounts=this.accounts.filter(a=>a.id!==accountId);
-    const hadCooldown=this.browserAccountState.delete(accountId),hadParticipation=this.accountParticipation.delete(accountId);
-    if(hadCooldown||hadParticipation)await this.persist();
+    const hadCooldown=this.browserAccountState.delete(accountId),hadParticipation=this.accountParticipation.delete(accountId),hadWatermark=this.accountWatermarks.delete(accountId);
+    if(hadCooldown||hadParticipation||hadWatermark)await this.persist();
     this.onEvent({type:'accounts',accounts:this.accounts,history:this.publicJobs()});
     return {deleted:true,accounts:this.accounts};
   }
@@ -395,7 +432,7 @@ class Runtime {
           try{
             const checked=await checkAccount(id);
             if(checked?.ok!==true)throw new Error(checked?.message||'Подключение не подтверждено');
-            result={accountId:id,status:'verified',checkedAt:checked.checkedAt||new Date().toISOString()};summary.verified++;
+            result={accountId:id,status:'verified',checkedAt:checked.checkedAt||new Date().toISOString(),...(watermarkCapabilities.includes(checked.visibleWatermarkCapability)?{visibleWatermarkCapability:checked.visibleWatermarkCapability}:{})};summary.verified++;
           }catch(error){
             this.startController.signal.throwIfAborted();
             result={accountId:id,status:'error',message:error.message};summary.failed++;
@@ -430,7 +467,7 @@ class Runtime {
       const target=path.join(this.dataDir,'history.json'),temp=target+'.tmp';
       await fs.writeFile(temp,JSON.stringify(this.jobs.slice(0,100)),{mode:0o600,flush:true});await fs.rename(temp,target);
       const state=path.join(this.dataDir,'browser-account-state.json'),stateTemp=state+'.tmp';
-      await fs.writeFile(stateTemp,JSON.stringify({version:1,accounts:[...this.browserAccountState.values()]}),{mode:0o600,flush:true});await fs.rename(stateTemp,state);
+      await fs.writeFile(stateTemp,JSON.stringify({version:1,accounts:[...this.browserAccountState.values()],watermarks:[...this.accountWatermarks.values()]}),{mode:0o600,flush:true});await fs.rename(stateTemp,state);
       const participation=path.join(this.dataDir,'account-participation.json'),participationTemp=participation+'.tmp';
       await fs.writeFile(participationTemp,JSON.stringify({version:1,accounts:[...this.accountParticipation.values()]}),{mode:0o600,flush:true});await fs.rename(participationTemp,participation);
     };
@@ -494,7 +531,7 @@ class Runtime {
       const account=this.accounts.find(account=>account.id===original.accountId);
       if(Date.parse(account.cooldownUntil)>Date.now())throw new Error('Аккаунт на паузе после ошибки. Дождитесь окончания паузы или сбросьте её вручную.');
       const saved=await this.readRetryInput(original);
-      return this.generate({model:saved.model,prompt:saved.prompt,sourceVideoId:saved.sourceVideoId,references:[...saved.images.map(dataUrl=>({kind:'image',dataUrl})),...saved.videos.map(file=>({kind:'video',path:file}))],requestId:input.requestId},{retryOf:original.id,accountId:original.accountId,accountEmail:original.accountEmail,videoNames:saved.videoNames});
+      return this.generate({model:saved.model,prompt:saved.prompt,sourceVideoId:saved.sourceVideoId,references:[...saved.images.map(dataUrl=>({kind:'image',dataUrl})),...saved.videos.map(file=>({kind:'video',path:file}))],requestId:input.requestId,...(original.videoWatermark?{videoWatermark:original.videoWatermark}:{})},{retryOf:original.id,accountId:original.accountId,accountEmail:original.accountEmail,videoNames:saved.videoNames});
     })().finally(()=>{this.retryTask=null;this.retryRequestId=null;this.retryJobId=null;});
     return this.retryTask;
   }
@@ -508,23 +545,31 @@ class Runtime {
     accountId=accountId??input.accountId;
     if(typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
     const info=modelInfo(this.models.find(m=>m.id===input.model));
+    if (Object.hasOwn(input, 'videoWatermark') && (info.kind !== 'video' || !videoWatermarkModes.includes(input.videoWatermark))) throw new Error('Неверный режим видимого водяного знака для выбранной модели.');
+    const videoWatermark = info.kind === 'video' ? input.videoWatermark ?? 'with' : undefined;
     if(input.images&&input.references)throw new Error('Передайте images или references.');
     const refs=input.references||(input.images||[]).map(dataUrl=>({kind:'image',dataUrl}));
     if(!Array.isArray(refs)||refs.length>7||refs.some(r=>!r||!['image','video'].includes(r.kind)))throw new Error('Некорректные референсы.');
     const images=refs.filter(r=>r.kind==='image').map(r=>r.dataUrl),videos=refs.filter(r=>r.kind==='video').map(r=>r.path);
     if(images.length>info.maxImages||images.some(s=>typeof s!=='string'||s.length>28*1024*1024||!/^data:image\/(?:png|jpeg|webp|gif);base64,/.test(s)))throw new Error('Слишком много изображений или неверный формат. Изображение: до 20 МБ.');
     if(videos.length>(info.maxVideos||0)||videos.some(p=>typeof p!=='string'||!path.isAbsolute(p)||! /\.(mp4|mov|m4v)$/i.test(p))||info.edit&&videos.length!==1)throw new Error(`Для редактирования Omni нужно одно видео MP4/MOV/M4V до ${info.maxInputDuration} секунд и до 100 МБ.`);
-    const browserInput={model:input.model,prompt:input.prompt.trim(),references:refs,...(input.sourceVideoId?{sourceVideoId:input.sourceVideoId}:{})};
+    const browserInput={model:input.model,prompt:input.prompt.trim(),references:refs,...(input.sourceVideoId?{sourceVideoId:input.sourceVideoId}:{}),...(videoWatermark?{videoWatermark}:{})};
     const browserEngine=this.browserEngine?.supports(browserInput)?this.browserEngine:null;
-    const requestHash=crypto.createHash('sha256').update(JSON.stringify({model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||'',...(retryOf?{retryOf}:{}),...(accountId?{accountId}:{})})).digest('hex');
+    const hashInput={model:input.model,prompt:input.prompt.trim(),images,videos,sourceVideoId:input.sourceVideoId||'',...(retryOf?{retryOf}:{}),...(accountId?{accountId}:{})};
+    const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const requestHash = hash(videoWatermark ? {...hashInput, videoWatermark} : hashInput);
     if(input.requestId){
       const existing=this.jobs.find(j=>j.requestId===input.requestId);
-      if(existing){if(existing.requestHash!==requestHash)throw new Error('requestId уже использован с другими параметрами.');return {jobId:existing.id};}
+      if(existing){
+        const legacyReplay = videoWatermark && input.videoWatermark === undefined && !Object.hasOwn(existing, 'videoWatermark') && existing.requestHash === hash(hashInput);
+        if(existing.requestHash!==requestHash && !legacyReplay)throw new Error('requestId уже использован с другими параметрами.');
+        return {jobId:existing.id};
+      }
     }
-    if(info.kind!=='image'&&!browserEngine)throw Object.assign(new Error('Для выбранного серверного видеорежима нельзя проверить отключение видимого водяного знака Google Flow. Генерация не запускалась.'),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});
+    if(info.kind!=='image'&&!browserEngine)throw Object.assign(new Error('Для выбранного серверного видеорежима нельзя проверить настройку видимого водяного знака Google Flow. Генерация не запускалась.'),{code:'VISIBLE_WATERMARK_ROUTE_UNVERIFIED'});
     if(this.accountActionPending||this.accountCheckTask)throw new Error('Дождитесь завершения действия с аккаунтами.');
     if(this.jobs.some(j=>j.status==='running'))throw new Error('Дождитесь текущей генерации.');
-    const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:input.model.includes('image')?'image':'video',generationEngine:browserEngine?'isolated-browser':'server',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(input.requestId?{requestId:input.requestId,requestHash}:{}),...(accountId?{accountId}:{}),...(retryOf?{retryOf,accountEmail}:{})};
+    const id=crypto.randomUUID(),job={id,model:input.model,prompt:input.prompt.trim(),kind:info.kind,generationEngine:browserEngine?'isolated-browser':'server',createdAt:new Date().toISOString(),status:'running',progress:'Отправляем запрос…',media:[],...(videoWatermark?{videoWatermark}:{}),...(input.requestId?{requestId:input.requestId,requestHash}:{}),...(accountId?{accountId}:{}),...(retryOf?{retryOf,accountEmail}:{})};
     this.jobs.unshift(job);this.emitJob(job);
     const task=this.runJob(job,images,input.sourceVideoId,videos,{accountId,videoNames,browserEngine}).catch(()=>{});
     this.jobTasks.add(task);task.finally(()=>this.jobTasks.delete(task));
@@ -616,12 +661,23 @@ class Runtime {
       let media;
       if(browserEngine){
         const accounts=await this.refreshAccounts(),enabled=accounts.filter(account=>Number.isSafeInteger(account.id)&&account.id>0&&typeof account.email==='string'&&account.email&&account.isActive&&(job.kind==='image'||account.videoEnabled!==false)),available=enabled.filter(account=>!(Date.parse(account.cooldownUntil)>Date.now()));
-        const account=accountId?accounts.find(account=>account.id===accountId):available.find(account=>account.browserReady!==false)||available[0]||enabled[0];
+        const requiresNoMark = job.videoWatermark === 'without';
+        const ready = available.filter(account => account.browserReady !== false);
+        const account = accountId ? accounts.find(account => account.id === accountId)
+          : requiresNoMark ? ready.find(account => account.browserReady === true && account.visibleWatermarkCapability === 'optional')
+          : (job.videoWatermark === 'with' ? ready.find(account => account.visibleWatermarkCapability === 'required') : null) || ready[0] || available[0] || enabled[0];
+        if (!account && requiresNoMark && !accountId) {
+          throw Object.assign(new Error('Нет готового аккаунта с подтверждённой возможностью видео без метки. Проверьте подключение аккаунтов или выберите «С меткой».'), {code: 'VISIBLE_WATERMARK_ACCOUNT_UNAVAILABLE'});
+        }
         if(!account){const error=new Error(accountId?'Исходный аккаунт недоступен для генерации.':'Нет включённого аккаунта, доступного для генерации.');error.code='account_unavailable';throw error;}
         if(job.accountEmail&&account.email?.toLowerCase()!==job.accountEmail.toLowerCase()){const error=new Error('Исходный аккаунт изменился. Подключите его заново.');error.code='account_changed';throw error;}
         job.accountId=account.id;job.accountEmail=account.email;this.emitJob(job);
         if(!enabled.includes(account)){const error=new Error('Исходный аккаунт недоступен для генерации.');error.code='account_unavailable';throw error;}
         if(Date.parse(account.cooldownUntil)>Date.now()){const error=new Error('Аккаунт на паузе после ошибки. Дождитесь окончания паузы или сбросьте её вручную.');error.code='account_cooldown';throw error;}
+        if (requiresNoMark && (account.visibleWatermarkCapability !== 'optional' || account.browserReady !== true)) {
+          const required = account.visibleWatermarkCapability === 'required';
+          throw Object.assign(new Error(required ? 'Google требует видимую метку на выбранном аккаунте. Выберите аккаунт, позволяющий видео без метки.' : 'Для выбранного аккаунта возможность видео без метки ещё не подтверждена. Проверьте его подключение.'), {code: required ? 'VISIBLE_WATERMARK_REQUIRED' : 'VISIBLE_WATERMARK_UNVERIFIED'});
+        }
         const onAccount=value=>{
           if(value?.id!==account.id||typeof value.email!=='string'||value.email.toLowerCase()!==account.email?.toLowerCase()){const error=new Error('Браузер подтвердил другой Google-аккаунт. Проверьте подключение.');error.code='account_changed';throw error;}
         };
@@ -632,7 +688,11 @@ class Runtime {
           preparingSubmit=true;job.unknownOutcome=true;await this.persist();controller.signal.throwIfAborted();submitted=true;
         };
         controller.signal.throwIfAborted();
-        const result=await browserEngine.generate({jobId:job.id,model:job.model,prompt:job.prompt,references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...savedVideos.map(file=>({kind:'video',path:file}))],...(sourceVideoId?{sourceVideoId}:{}),accountId:account.id,accountEmail:account.email},{signal:controller.signal,onProgress,onAccount,beforeSubmit});
+        const onWatermarkCapability = async state => {
+          onAccount({id: state.accountId, email: state.accountEmail});
+          await this.rememberVisibleWatermark(state);
+        };
+        const result=await browserEngine.generate({jobId:job.id,model:job.model,prompt:job.prompt,references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...savedVideos.map(file=>({kind:'video',path:file}))],...(sourceVideoId?{sourceVideoId}:{}),...(job.videoWatermark?{videoWatermark:job.videoWatermark}:{}),accountId:account.id,accountEmail:account.email},{signal:controller.signal,onProgress,onAccount,onWatermarkCapability,beforeSubmit});
         if(!submitted)throw new Error('Браузер не подтвердил отправку запроса.');
         media=await this.browserMedia(job,result);
       }else{

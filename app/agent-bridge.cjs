@@ -10,6 +10,8 @@ const {importMedia}=require('./input-files.cjs');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const methods=['image','text','ingredients','frames','edit','extend'];
 const aliases=new Set(['veo-3.1-lite','veo-3.1-fast','veo-3.1-quality','omni-1.1-flash','omni-1.2-flash']);
+const videoWatermarkModes=['with','without'];
+const videoWatermarkDefault='with';
 const fileLimits={image:{maxBytes:20*1024*1024,extensions:['png','jpg','jpeg','webp','gif']},video:{maxBytes:100*1024*1024,maxDurationSeconds:10,extensions:['mp4','mov','m4v']}};
 const failure=(message,code='INVALID_ARGUMENTS')=>Object.assign(new Error(message),{code});
 function capabilities(model){
@@ -21,7 +23,7 @@ function capabilities(model){
   inputsByMethod[method]={minImages,maxImages,minVideos,maxVideos,minReferences:minImages+minVideos,maxReferences:maxImages+maxVideos,supportsStartFrame:method==='frames',supportsEndFrame:method==='frames'&&maxImages>1,requiresSourceVideoId:method==='extend'};
  }
  const generationEngine=model.id==='omni-1.2-flash'||/^omni-1\.2-flash-(?:(?:i2v-)?(?:[3-9]|1[0-5])s-|edit-)(?:landscape|portrait)(?:-360p)?$/.test(model.id)||supportsVeoModel({model:model.id})||supportsImageModel({model:model.id})?'isolated-browser':'server';
- return {id:model.id,description:info.label,kind:info.kind,generationEngine,...(info.kind==='video'?{visibleWatermarkPolicy:'require_off',visibleWatermarkVerification:generationEngine==='isolated-browser'?'supported':'unsupported'}:{}),mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
+ return {id:model.id,description:info.label,kind:info.kind,generationEngine,...(info.kind==='video'?{visibleWatermarkPolicy:'selectable',visibleWatermarkVerification:generationEngine==='isolated-browser'?'supported':'unsupported'}:{}),mode:info.edit?'edit':info.extend?'extend':info.i2v?'frames':info.r2v||info.omni?'references':'text',minImages:info.minImages,maxImages:info.maxImages,maxVideos:info.maxVideos,maxReferences:info.maxReferences,supportsVideoReferences:info.supportsVideoReferences,requiredTier:info.requiredTier,aspectRatio:settings.aspect,durationSeconds:info.kind==='video'&&!info.edit?Number(settings.duration):undefined,resolution:settings.resolution,supportsStartFrame:info.i2v,supportsEndFrame:info.i2v&&info.maxImages>1,family:settings.family,preferred:settings.family===PREFERRED_VIDEO_FAMILY,methods:settings.methods,durationSource:info.edit?'input_video':'model',inputsByMethod,fileLimits:{...fileLimits,video:{...fileLimits.video,maxDurationSeconds:info.maxInputDuration||10}}};
 }
 function externalJob(job){
  const {requestHash,...result}=job;
@@ -69,6 +71,12 @@ async function validatedInput(runtime,params){
  if(Object.hasOwn(params,'accountId')&&(!Number.isSafeInteger(params.accountId)||params.accountId<=0))throw failure('accountId должен быть положительным целым числом.');
  if(typeof params.prompt!=='string'||!params.prompt.trim()||params.prompt.length>20000)throw new Error('Введите запрос длиной до 20 000 символов.');
  const {model,method,info,settings}=selection(runtime,params),refs=params.referencePaths??[],videos=params.videoPaths??[];
+ const {videoWatermark}=params;
+ if(videoWatermark!==undefined){
+  if(!videoWatermarkModes.includes(videoWatermark))throw failure('Для videoWatermark укажите with или without.');
+  if(info.kind!=='video')throw failure('videoWatermark доступен только для видео.');
+ }
+ const watermark=info.kind==='video'?{videoWatermark:videoWatermark??videoWatermarkDefault}:{};
  if(!Array.isArray(refs))throw new Error('referencePaths должен быть массивом путей.');
  if(!Array.isArray(videos))throw new Error('videoPaths должен быть массивом путей.');
  const hasReferences=params.referencePaths!==undefined||params.videoPaths!==undefined,hasFrames=params.startFramePath!==undefined||params.endFramePath!==undefined,hasSource=params.sourceVideoId!==undefined;
@@ -91,9 +99,9 @@ async function validatedInput(runtime,params){
  if(media.slice(0,files.length).some(item=>item.kind!=='image')||media.slice(files.length).some(item=>item.kind!=='video'))throw new Error('referencePaths и кадры принимают изображения; videoPaths принимает видео MP4, MOV и M4V.');
  const images=media.slice(0,files.length).map(item=>item.dataUrl);
  const inputs=videos.length?{references:[...images.map(dataUrl=>({kind:'image',dataUrl})),...videos.map(file=>({kind:'video',path:file}))]}:{images};
- const generateArguments={model:model.id,method,prompt:params.prompt};
+ const generateArguments={model:model.id,method,prompt:params.prompt,...watermark};
  for(const key of ['accountId','referencePaths','videoPaths','startFramePath','endFramePath','sourceVideoId'])if(params[key]!==undefined)generateArguments[key]=params[key];
- return {input:{model:model.id,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId,...(params.accountId!==undefined?{accountId:params.accountId}:{})},preview:{valid:true,model:info,method,settings,inputs:{images:files.length,videos:videos.length,references:hasFrames?0:refs.length+videos.length,startFrame:params.startFramePath!==undefined,endFrame:params.endFramePath!==undefined,sourceVideo:hasSource},generateArguments,checks:{localFiles:'passed',videoDuration:videos.length?'checked_at_submission':'not_applicable',accountAccess:'not_checked',credits:'not_checked',visibleWatermark:info.kind==='video'?'not_checked':'not_applicable'}}};
+ return {input:{model:model.id,prompt:params.prompt,...inputs,sourceVideoId:params.sourceVideoId,...(params.accountId!==undefined?{accountId:params.accountId}:{}),...(videoWatermark!==undefined?{videoWatermark}:{})},preview:{valid:true,model:info,method,settings,...watermark,inputs:{images:files.length,videos:videos.length,references:hasFrames?0:refs.length+videos.length,startFrame:params.startFramePath!==undefined,endFrame:params.endFramePath!==undefined,sourceVideo:hasSource},generateArguments,checks:{localFiles:'passed',videoDuration:videos.length?'checked_at_submission':'not_applicable',accountAccess:'not_checked',credits:'not_checked',visibleWatermark:info.kind==='video'?'not_checked':'not_applicable'}}};
 }
 async function generationInput(runtime,params){
  if(params&&Object.hasOwn(params,'checkBrowser'))throw failure('checkBrowser доступен только для подготовки.');
@@ -113,7 +121,7 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
  return async function dispatch(method,params={}){
   switch(method){
    case 'status':
-    await ready();return {ready:runtime.ready,message:runtime.message,modelsCount:runtime.models.length,accounts:runtime.accounts,runningJobs:runtime.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,model:j.model,progress:j.progress,...(j.generationEngine?{generationEngine:j.generationEngine}:{})})),countHistory:runtime.jobs.length,login:getLoginState(),apiVersion:3,videoWatermarkPolicy:'require_off',features:['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation','video-visible-watermark-off']};
+    await ready();return {ready:runtime.ready,message:runtime.message,modelsCount:runtime.models.length,accounts:runtime.accounts,runningJobs:runtime.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,model:j.model,progress:j.progress,...(j.generationEngine?{generationEngine:j.generationEngine}:{})})),countHistory:runtime.jobs.length,login:getLoginState(),apiVersion:3,videoWatermarkPolicy:'selectable',videoWatermarkDefault,videoWatermarkModes,features:['generation-settings','prepare-generation','explicit-methods','isolated-browser-generation','video-watermark-selection']};
    case 'models':{
     await ready();let models=runtime.models.map(capabilities);
     if(params.kind)models=models.filter(m=>m.kind===params.kind);
@@ -132,13 +140,18 @@ function createAgentActions({runtime,accountManager,getLoginState=()=>null,shell
     if(checkBrowser!==true)return preview;
     if(preview.model.generationEngine!=='isolated-browser')throw failure('Проверка браузера поддерживает доступные режимы Nano Banana, Omni 1.2 Flash и Veo 3.1 из текущего каталога.','BROWSER_MODEL_UNSUPPORTED');
     if(typeof checkIsolatedInputs!=='function')throw failure('Проверка фонового браузера недоступна. Обновите приложение.','BROWSER_CHECK_UNAVAILABLE');
-    const checked=await checkIsolatedInputs({model:input.model,prompt:input.prompt,accountId:input.accountId,references:input.references||(input.images||[]).map(dataUrl=>({kind:'image',dataUrl}))});
+    const {videoWatermark}=preview;
+    const checked=await checkIsolatedInputs({model:input.model,prompt:input.prompt,accountId:input.accountId,references:input.references||(input.images||[]).map(dataUrl=>({kind:'image',dataUrl})),...(videoWatermark?{videoWatermark}:{})});
     if(checked?.ready!==true||checked.accountId!==input.accountId||checked.cleared!==true||checked.submitted!==false||checked.uploadedImages!==preview.inputs.images||checked.model!==undefined&&checked.model!==input.model||checked.uploadedVideos!==undefined&&checked.uploadedVideos!==preview.inputs.videos)throw failure('Браузер не подтвердил проверку и очистку подготовленного запроса.','BROWSER_CHECK_UNCONFIRMED');
-    if(preview.model.kind==='video'&&checked.visibleWatermark!=='off')throw failure('Браузер не подтвердил отключение видимого водяного знака.','VISIBLE_WATERMARK_UNVERIFIED');
-    const browserCheck=Object.fromEntries(['visibleWatermark','ready','accountId','accountEmail','projectURL','model','referenceCount','uploadedImages','submitted','cleared'].filter(key=>Object.hasOwn(checked,key)).map(key=>[key,checked[key]]));
+    const browserCheck=Object.fromEntries(['ready','accountId','accountEmail','projectURL','model','referenceCount','uploadedImages','submitted','cleared'].filter(key=>Object.hasOwn(checked,key)).map(key=>[key,checked[key]]));
+    if(videoWatermark){
+     const expected=videoWatermark==='with'?'on':'off';
+     if(checked.visibleWatermark!==expected)throw failure('Браузер не подтвердил настройку Visible watermarking: '+expected+'.','VISIBLE_WATERMARK_UNVERIFIED');
+     browserCheck.visibleWatermark=checked.visibleWatermark;
+    }
     if(typeof checked.email==='string'&&!browserCheck.accountEmail)browserCheck.accountEmail=checked.email;
     browserCheck.uploadedVideos=preview.inputs.videos;
-    return {...preview,checks:{...preview.checks,visibleWatermark:preview.model.kind==='video'?'off':'not_applicable',browser:'passed',upload:preview.inputs.images||preview.inputs.videos?'passed':'not_applicable'},browserCheck};
+    return {...preview,checks:{...preview.checks,visibleWatermark:browserCheck.visibleWatermark??preview.checks.visibleWatermark,browser:'passed',upload:preview.inputs.images||preview.inputs.videos?'passed':'not_applicable'},browserCheck};
    }
    case 'generate':{
     await ready();const input=await generationInput(runtime,params);

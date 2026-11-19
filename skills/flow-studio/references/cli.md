@@ -10,7 +10,7 @@ App bridge entrypoint:
 /ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs
 ```
 
-No-spend discovery and preparation. Current status reports `apiVersion: 3` and features `generation-settings`, `prepare-generation`, `explicit-methods`, `isolated-browser-generation`:
+No-spend discovery and preparation. Current status reports `apiVersion: 3` and `video-watermark-selection` in `features`.
 
 ```sh
 node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --list-tools
@@ -28,17 +28,17 @@ For an explicitly requested browser/upload check, use the same `prepare` method 
 node '/ABSOLUTE/PATH/flow-studio/app/mcp-server.cjs' --call prepare '{"model":"<EXACT_OMNI_1.2_MODEL_ID_FROM_LIST_MODELS>","method":"ingredients","prompt":"<USER_PROMPT>","referencePaths":["/absolute/path/reference.png"],"accountId":7,"checkBrowser":true}'
 ```
 
-Replace `7` with a known account ID. Omit `checkBrowser` for purely local preparation.
+Replace `7` with a known account ID. Omit `checkBrowser` for purely local preparation. Video uses `videoWatermark: "with"` by default. For an explicit no-mark request, add `"videoWatermark":"without"` alongside `model` or `settings` and use an eligible account whose `visibleWatermarkCapability` is `optional`. Use `--call check_account '{"accountId":7}'` to read capability without uploading inputs. Browser preparation can change the official account preference and reports `checks.visibleWatermark` of `"on"` or `"off"`.
 
 Pass one allowlisted method and a JSON object. Preserve structured stdout so errors and identifiers stay exact. Use proper shell quoting or a subprocess argument array; never interpolate user text into shell code. Never read or print `agent-bridge.json` to obtain credentials.
 
 | MCP tool suffix | CLI method | Parameters |
 | --- | --- | --- |
 | `flow_studio_status` | `status` | `{}` |
-| `flow_studio_inspect_isolated_browser` | `isolated_inspect` | `{accountId}`; verifies app-owned background login/project without upload or spend |
+| `flow_studio_inspect_isolated_browser` | `isolated_inspect` | `{accountId}` to verify the managed session/project and refresh cached watermark capability |
 | `flow_studio_recover_job` | `recover` | `{jobId}`; same receipt/account/result, no upload or new submission |
 | `flow_studio_list_models` | `models` | Optional `kind`, `method`, `family`, `durationSeconds`, `aspectRatio`, `resolution`, legacy `mode`, `query` |
-| `flow_studio_prepare_generation` | `prepare` | `prompt`, exactly one of `model` or `settings`; optional `accountId`, outer `method` with `model` only; local inputs below |
+| `flow_studio_prepare_generation` | `prepare` | `prompt`, exactly one of `model` or `settings`, optional `accountId` and video-only top-level `videoWatermark`. Outer `method` applies only to `model` |
 | `flow_studio_generate` | `generate` | Preparation fields plus `confirmCreditSpend: true`, stable UUID `requestId` |
 | `flow_studio_get_job` | `job` | `jobId` |
 | `flow_studio_wait_job` | `wait` | `jobId`; optional `timeoutSeconds` from 0 to 30 |
@@ -47,8 +47,8 @@ Pass one allowlisted method and a JSON object. Preserve structured stdout so err
 | `flow_studio_open_result_folder` | `open_folder` | `jobId`; optional zero-based `index` |
 | `flow_studio_list_accounts` | `accounts` | `{}` |
 | `flow_studio_set_account_active` | `set_account_active` | `{accountId,enabled}` exact boolean; explicit change only |
-| `flow_studio_check_account` | `check_account` | `{accountId}`; saved session and identity, no generation |
-| `flow_studio_check_enabled_accounts` | `check_enabled_accounts` | `{}`; serial enabled-account checks, no auto enable/reset/generation |
+| `flow_studio_check_account` | `check_account` | `{accountId}` for saved session, identity and watermark capability |
+| `flow_studio_check_enabled_accounts` | `check_enabled_accounts` | `{}` for serial enabled-account checks, including watermark capability |
 | `flow_studio_reset_account_cooldown` | `reset_cooldown` | `{accountId}`; requested local timer reset only, never automatic |
 | `flow_studio_begin_google_login` | `login_start` | Optional existing `accountId` |
 | `flow_studio_complete_google_login` | `login_complete` | `{}` |

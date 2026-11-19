@@ -19,6 +19,7 @@ Both `prepare_generation` and `generate` require `prompt` and **exactly one** se
     "aspectRatio": "16:9",
     "resolution": "standard"
   },
+  "videoWatermark": "with",
   "prompt": "<USER_PROMPT>",
   "startFramePath": "/absolute/path/start.png",
   "endFramePath": "/absolute/path/end.png"
@@ -46,13 +47,14 @@ Success includes `valid`, resolved model metadata, explicit `method`, normalized
   "localFiles": "passed",
   "videoDuration": "checked_at_submission",
   "accountAccess": "not_checked",
-  "credits": "not_checked"
+  "credits": "not_checked",
+  "visibleWatermark": "not_checked"
 }
 ```
 
 Without a source video, `videoDuration` is `"not_applicable"`.
 
-`generateArguments` contains exact resolved `model`, explicit `method`, original `prompt`, and original paths/ID; it omits `settings`, `requestId`, and `confirmCreditSpend`. Preserve it unchanged. For the authorized generation, add a fresh stable UUID `requestId` and `confirmCreditSpend: true`. Preparation does not prove account entitlement, balance, source duration, or Google acceptance.
+`generateArguments` contains exact resolved `model`, explicit `method`, original `prompt`, original paths/ID, and `videoWatermark` for video. Preserve it unchanged. For the authorized generation, add a fresh stable UUID `requestId` and `confirmCreditSpend: true`. Preparation does not prove account entitlement, balance, source duration, or Google acceptance.
 
 Preparation preserves the supplied prompt in those arguments. Submission currently trims surrounding whitespace; it does not rewrite the prompt content.
 
@@ -80,15 +82,18 @@ For extend, obtain `sourceVideoId` from existing job `media[index].mediaGenerati
 
 ## Visible-watermark verification before new video spend
 
-The default is to require the official Google-account `Visible watermarking: Off` before every new video. Supported browser Omni, Veo and Edit preparation checks it before input uploads; submission checks it again before Generate/Approve and the paid boundary. If the ordinary switch can be changed, the app turns it Off and reopens the account settings to confirm it stayed Off. This is an account-wide Google setting, so the change may affect future generations elsewhere; image generation itself is not changed by this video policy.
+Set optional `videoWatermark` at the top level with either model selector. `"with"` is the default and verifies official Google `Visible watermarking: On`. Explicit `"without"` requires verified `Off`. Images reject this field. Supported browser Omni, Veo and Edit routes verify the setting before input uploads and again before Generate or Agent Approve. Where Google allows a change, the app uses the official switch and reopens settings to confirm persistence. The preference applies to the whole Google Flow account.
 
-Default local preparation does not inspect or modify the watermark setting. An explicitly requested video `checkBrowser:true` may apply and verify Off without creating a video, paid proposal approval or generation-credit spend. It does not prove that an existing file has no marks. Read-only receipt recovery/download of already accepted jobs remains unchanged and does not alter the account setting.
+`status` and `list_accounts` expose cached `visibleWatermarkCapability`. `required` means Google requires visible watermarking. `optional` means Google permits changing it. `unknown` covers missing or inconclusive evidence. `check_account` and `check_enabled_accounts` read this capability where managed browser access is available, without changing the preference or uploading inputs. Automatic `"without"` selection considers only eligible `optional` accounts. A pinned `unknown` account needs a capability check first, while an explicitly requested browser preparation can inspect that account directly.
 
-- `VISIBLE_WATERMARK_REQUIRED`: Google explicitly requires the visible mark. The observed account displayed `Visible watermarking is required in your region`; do not generalize that account/session observation to all regions or accounts.
-- `VISIBLE_WATERMARK_UNVERIFIED`: control is missing, ambiguous or disabled, or Off was not confirmed persisted. Stop before credits; preserve the returned reason.
-- `VISIBLE_WATERMARK_ROUTE_UNVERIFIED`: unsupported server/legacy video route cannot verify Off. No new video is submitted, and the app does not silently switch model/account/route.
+Local preparation leaves `checks.visibleWatermark` as `"not_checked"` for video. An explicitly requested video `checkBrowser:true` can apply the account preference and reports verified `"on"` or `"off"` in `checks.visibleWatermark` and `browserCheck.visibleWatermark`. It creates no job and spends no credits. Receipt recovery and downloads preserve the watermark, SynthID and existing account preference.
 
-Do not use existing-media mark removal, SynthID changes, region changes or account rotation as a fallback. A required/locked visible mark is not permission to spend on a marked replacement. No successful no-visible-mark generated-video proof is claimed by the setting check alone.
+- `VISIBLE_WATERMARK_REQUIRED` means Google requires the visible mark for that account. One observed message was `Visible watermarking is required in your region`.
+- `VISIBLE_WATERMARK_UNVERIFIED` means the requested setting or the pinned account's ability to switch it off could not be confirmed.
+- `VISIBLE_WATERMARK_ACCOUNT_UNAVAILABLE` means automatic selection found no eligible account with confirmed optional watermarking for `"without"`.
+- `VISIBLE_WATERMARK_ROUTE_UNVERIFIED` means the video route cannot verify the official setting and blocks submission.
+
+Preserve the returned reason and requested model, account and mode after any of these errors. The check verifies an account setting. It takes no action on saved media.
 
 ## Project readiness
 
